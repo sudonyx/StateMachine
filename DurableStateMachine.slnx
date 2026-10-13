@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DurableStateMachine.Core/DurableStateMachine.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DurableStateMachine.Tests/DurableStateMachine.Tests.csproj" />
+  </Folder>
+</Solution>

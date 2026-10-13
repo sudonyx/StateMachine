@@ -1,0 +1,43 @@
+{
+  "languageVersion": "1.0",
+  "id": "internal-document-review",
+  "version": "1.0",
+  "initialState": "Draft",
+  "states": [
+    { "id": "Draft" },
+    { "id": "UnderReview" },
+    { "id": "Approved", "terminal": true },
+    { "id": "Rejected", "terminal": true }
+  ],
+  "events": ["Submit", "Approve", "Reject"],
+  "transitions": [
+    {
+      "id": "submit-document",
+      "source": "Draft",
+      "event": "Submit",
+      "target": "UnderReview",
+      "description": "The draft enters the review queue."
+    },
+    {
+      "id": "approve-document",
+      "source": "UnderReview",
+      "event": "Approve",
+      "target": "Approved",
+      "description": "The reviewer approves after recording a minimum quality score.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "exists", "fact": "reviewer" },
+          { "op": "gte", "fact": "qualityScore", "value": 70 }
+        ]
+      }
+    },
+    {
+      "id": "reject-document",
+      "source": "UnderReview",
+      "event": "Reject",
+      "target": "Rejected",
+      "description": "The reviewer rejects the document."
+    }
+  ]
+}

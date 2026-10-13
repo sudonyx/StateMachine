@@ -1,0 +1,161 @@
+{
+  "languageVersion": "1.0",
+  "id": "orion-equipment-lease",
+  "version": "1.0",
+  "initialState": "Draft",
+  "states": [
+    { "id": "Draft" },
+    { "id": "AwaitingDocuments" },
+    { "id": "AssessmentReady" },
+    { "id": "ManualReview" },
+    { "id": "Approved", "terminal": true },
+    { "id": "Rejected", "terminal": true },
+    { "id": "Cancelled", "terminal": true }
+  ],
+  "events": [
+    "Submit",
+    "DocumentsReceived",
+    "ReferForReview",
+    "Approve",
+    "Reject",
+    "Cancel"
+  ],
+  "transitions": [
+    {
+      "id": "submit-missing-documents",
+      "source": "Draft",
+      "event": "Submit",
+      "target": "AwaitingDocuments",
+      "description": "Submission is waiting for required documents.",
+      "guard": { "op": "eq", "fact": "documentsComplete", "value": false }
+    },
+    {
+      "id": "submit-auto-reject-low-risk",
+      "source": "Draft",
+      "event": "Submit",
+      "target": "Rejected",
+      "description": "A risk score below the fictional automatic-rejection threshold is rejected.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "eq", "fact": "documentsComplete", "value": true },
+          { "op": "lt", "fact": "riskScore", "value": 35 }
+        ]
+      }
+    },
+    {
+      "id": "submit-for-manual-review",
+      "source": "Draft",
+      "event": "Submit",
+      "target": "ManualReview",
+      "description": "A borderline score or high-value request requires manual review.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "eq", "fact": "documentsComplete", "value": true },
+          { "op": "gte", "fact": "riskScore", "value": 35 },
+          {
+            "op": "or",
+            "args": [
+              { "op": "lte", "fact": "riskScore", "value": 59 },
+              { "op": "gt", "fact": "equipmentValue", "value": 100000 }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "submit-ready-for-assessment",
+      "source": "Draft",
+      "event": "Submit",
+      "target": "AssessmentReady",
+      "description": "A complete application outside the manual-review band is ready for assessment.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "eq", "fact": "documentsComplete", "value": true },
+          { "op": "gte", "fact": "riskScore", "value": 60 },
+          { "op": "lte", "fact": "equipmentValue", "value": 100000 }
+        ]
+      }
+    },
+    {
+      "id": "documents-complete",
+      "source": "AwaitingDocuments",
+      "event": "DocumentsReceived",
+      "target": "AssessmentReady",
+      "description": "Required documents are now marked complete.",
+      "guard": { "op": "eq", "fact": "documentsComplete", "value": true }
+    },
+    {
+      "id": "refer-for-manual-review",
+      "source": "AssessmentReady",
+      "event": "ReferForReview",
+      "target": "ManualReview",
+      "description": "An authorised business process has referred the application to a reviewer."
+    },
+    {
+      "id": "approve-assessment",
+      "source": "AssessmentReady",
+      "event": "Approve",
+      "target": "Approved",
+      "description": "Required checks are complete and the assessment permits approval.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "eq", "fact": "checksComplete", "value": true },
+          { "op": "eq", "fact": "eligible", "value": true }
+        ]
+      }
+    },
+    {
+      "id": "approve-manual-review",
+      "source": "ManualReview",
+      "event": "Approve",
+      "target": "Approved",
+      "description": "A reviewer approves after checks and justification are recorded.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "eq", "fact": "checksComplete", "value": true },
+          { "op": "exists", "fact": "reviewerJustification" }
+        ]
+      }
+    },
+    {
+      "id": "reject-manual-review",
+      "source": "ManualReview",
+      "event": "Reject",
+      "target": "Rejected",
+      "description": "A reviewer rejects the application."
+    },
+    {
+      "id": "cancel-draft",
+      "source": "Draft",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "An unsubmitted application is cancelled."
+    },
+    {
+      "id": "cancel-awaiting-documents",
+      "source": "AwaitingDocuments",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "The application is cancelled while waiting for documents."
+    },
+    {
+      "id": "cancel-assessment",
+      "source": "AssessmentReady",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "The application is cancelled before a final decision."
+    },
+    {
+      "id": "cancel-manual-review",
+      "source": "ManualReview",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "The application is cancelled during manual review."
+    }
+  ]
+}
