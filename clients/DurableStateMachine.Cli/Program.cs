@@ -38,6 +38,7 @@ try
                 var factsJson = factsInput.StartsWith('@')
                     ? await File.ReadAllTextAsync(factsInput[1..])
                     : factsInput;
+                factsJson = factsJson.TrimStart('\uFEFF');
                 facts = JsonDocument.Parse(factsJson);
             }
             using (facts)

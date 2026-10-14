@@ -42,13 +42,14 @@ $env:DURABLE_STATE_MACHINE_API_URL = "http://localhost:5000"
 @'
 { "reviewer": "reviewer-1", "qualityScore": 85 }
 '@ | Set-Content -Encoding utf8 review-facts.json
+$id = "review-$([guid]::NewGuid().ToString('N'))"
 dotnet run --project clients\DurableStateMachine.Cli -- register definitions\document-review-v1.json
-dotnet run --project clients\DurableStateMachine.Cli -- create review-123 internal-document-review 1.0 '@review-facts.json'
-dotnet run --project clients\DurableStateMachine.Cli -- inspect review-123
-dotnet run --project clients\DurableStateMachine.Cli -- send review-123 Submit
-dotnet run --project clients\DurableStateMachine.Cli -- send review-123 Approve
-dotnet run --project clients\DurableStateMachine.Cli -- attempts review-123
-dotnet run --project clients\DurableStateMachine.Cli -- history review-123
+dotnet run --project clients\DurableStateMachine.Cli -- create $id internal-document-review 1.0 '@review-facts.json'
+dotnet run --project clients\DurableStateMachine.Cli -- inspect $id
+dotnet run --project clients\DurableStateMachine.Cli -- send $id Submit
+dotnet run --project clients\DurableStateMachine.Cli -- send $id Approve
+dotnet run --project clients\DurableStateMachine.Cli -- attempts $id
+dotnet run --project clients\DurableStateMachine.Cli -- history $id
 ```
 
 The CLI supports `register`, `definitions`, `create`, `inspect`, `send`, `attempts` and `history`. `create` accepts optional inline scalar facts or `@path-to-json-file` (the latter avoids shell quoting problems). Configure the base URL with `DURABLE_STATE_MACHINE_API_URL` or pass `--url http://host:port` before the command. Workflow rejections are returned as readable `200 OK` result envelopes with reason codes; malformed requests and unknown resources use HTTP error statuses.
