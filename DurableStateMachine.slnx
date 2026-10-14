@@ -1,6 +1,12 @@
 <Solution>
   <Folder Name="/src/">
     <Project Path="src/DurableStateMachine.Core/DurableStateMachine.Core.csproj" />
+    <Project Path="src/DurableStateMachine.Persistence/DurableStateMachine.Persistence.csproj" />
+    <Project Path="src/DurableStateMachine.Api/DurableStateMachine.Api.csproj" />
+  </Folder>
+  <Folder Name="/clients/">
+    <Project Path="clients/DurableStateMachine.Cli/DurableStateMachine.Cli.csproj" />
+    <Project Path="clients/DurableStateMachine.OrionClient/DurableStateMachine.OrionClient.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/DurableStateMachine.Tests/DurableStateMachine.Tests.csproj" />
