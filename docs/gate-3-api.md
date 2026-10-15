@@ -1,6 +1,6 @@
 # Gate 3 HTTP API
 
-The service exposes the generic state-machine runtime over JSON/HTTP. It does not expose a state-update endpoint: all state changes are made by submitting events to the evaluator. The OpenAPI document is available at `GET /openapi/v1.json`; `GET /health` is a process health check.
+The service exposes the generic state-machine runtime over JSON/HTTP. It does not expose a state-update endpoint: state changes are accepted only through an evaluator result, either from a legacy event submission or from an eligible command/observation mapped to an event. The OpenAPI document is available at `GET /openapi/v1.json`; `GET /health` is a process health check.
 
 ## Base URL and serialization
 
@@ -10,7 +10,7 @@ Routes are rooted at `/api`. JSON property names are camel case and evaluation/s
 
 ### Register an immutable version
 
-`POST /api/definitions` accepts a complete language-version 1.0 definition as the request body:
+`POST /api/definitions` accepts a complete language-version 1.0 or 1.1 definition as the request body. Language 1.1 may opt into declared command and observation mappings; see [state-machine-language-v1.md](./state-machine-language-v1.md).
 
 ```json
 {
@@ -170,6 +170,43 @@ For example, an absent comparison fact remains unresolved instead of being treat
   "transition": null
 }
 ```
+
+## Commands and observations (language 1.1)
+
+For a definition declaring `inputPolicy`, use the distinct input endpoints:
+
+- `POST /api/instances/{id}/commands` submits an action request.
+- `POST /api/instances/{id}/observations` submits a claim about an external occurrence.
+- `POST /api/instances/{id}/expected-operations` registers a permitted external result.
+- `GET /api/instances/{id}/expected-operations` inspects expected and resolved operations.
+- `GET /api/instances/{id}/inbound-messages` and `GET /api/instances/{id}/inbound-messages/{receiptId}` inspect input receipts and their outcomes.
+
+Command and observation bodies use an envelope such as:
+
+```json
+{
+  "messageId": "command-or-delivery-identity",
+  "type": "AcceptOffer",
+  "expectedRevision": 3,
+  "correlationId": "optional-command-correlation-or-required-operation-id",
+  "source": "caller-claimed-source",
+  "occurredAt": "2026-10-15T12:00:00Z",
+  "payload": { "offerId": "synthetic-offer-1" },
+  "facts": { "offerValidAtEvaluation": true },
+  "evidence": {},
+  "factsProvenance": {}
+}
+```
+
+For commands, `type` must match a declared command mapping and `expectedRevision` must match the current instance revision. For observations, `correlationId` is the expected operation ID; the definition mapping, expected-operation record, source identity, required evidence, and instance revision must all match. The revision, definition identity, payload/evidence digests, mapped event, evaluator attempt and outcome are recorded. Receipt itself does not accept an event or transition.
+
+Observations without a valid trusted-ingestion key are retained as `Untrusted` and cannot evaluate an event. The controlled training boundary uses `DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY`, supplied in the `X-State-Machine-Trusted-Ingestion-Key` header. The same configured boundary is required to register expected operations. This shared local demonstration credential is not production authentication or source attestation; do not expose it to ordinary clients. A claimed `source` value alone is never authority.
+
+The API returns `200 OK` with an inspectable message result for well-formed but ineligible inputs. Outcomes include `Accepted`, evaluator outcomes such as `Rejected` and `Unresolved`, `Duplicate`, `IdentityConflict`, `Unexpected`, `Untrusted`, `Malformed`, `Stale`, and `Conflicting`. Invalid typed fields are returned as `400 Bad Request` and, where the instance and envelope can be parsed, retained as a `Malformed` receipt. JSON that cannot be parsed or bound to the request contract is rejected before a receipt can be persisted. A command identity (`messageId`) reused with different content is a conflict; same content is a duplicate. A second delivery ID for an already resolved operation is duplicate only when its canonical result digest matches. Conflicting results are preserved and refused. An accepted message includes an `attempt`; other inputs do not create evaluator attempts. Only an accepted evaluator result creates an accepted workflow event and transition history.
+
+Definitions with an input policy reject `POST /api/instances/{id}/events` with `403 Forbidden`; the rejected legacy call is retained as an inbound receipt. Definitions without an input policy, including existing language 1.0 definitions and the Meridian integration workflow, retain the legacy event endpoint semantics. This is the explicit compatibility boundary; migrating a workflow to language 1.1 requires clients to use the declared input paths.
+
+The generated OpenAPI document at `GET /openapi/v1.json` includes the command, observation, expected-operation and inbound-message routes.
 
 ## Attempts and accepted-transition history
 

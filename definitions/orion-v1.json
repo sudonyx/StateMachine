@@ -1,7 +1,7 @@
 {
-  "languageVersion": "1.0",
+  "languageVersion": "1.1",
   "id": "orion-equipment-lease",
-  "version": "1.0",
+  "version": "2.0",
   "initialState": "Draft",
   "states": [
     { "id": "Draft" },
@@ -23,6 +23,30 @@
     "Reject",
     "Cancel"
   ],
+  "inputPolicy": {
+    "commands": [
+      { "name": "SubmitApplication", "event": "Submit" },
+      { "name": "ReceiveDocuments", "event": "DocumentsReceived" },
+      { "name": "ReferForReview", "event": "ReferForReview" },
+      { "name": "ApproveAssessment", "event": "Approve" },
+      { "name": "IssueOffer", "event": "IssueOffer" },
+      { "name": "AcceptOffer", "event": "AcceptOffer" },
+      { "name": "RejectApplication", "event": "Reject" },
+      { "name": "CancelApplication", "event": "Cancel" }
+    ],
+    "observations": [
+      {
+        "name": "DocumentPackageReceived",
+        "event": "DocumentsReceived",
+        "requiredEvidence": ["documentSetDigest"]
+      },
+      {
+        "name": "OfferDocumentGenerated",
+        "event": "IssueOffer",
+        "requiredEvidence": ["documentId", "offerDigest"]
+      }
+    ]
+  },
   "transitions": [
     {
       "id": "submit-missing-documents",

@@ -7,6 +7,7 @@ using Microsoft.Data.Sqlite;
 
 namespace DurableStateMachine.Tests;
 
+[Collection("API environment")]
 public sealed class ApiDurabilityTests
 {
     private const string Definition = """

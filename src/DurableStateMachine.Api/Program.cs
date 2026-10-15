@@ -29,6 +29,7 @@ await using (var scope = app.Services.CreateAsyncScope())
     var database = scope.ServiceProvider.GetRequiredService<MachineDbContext>();
     await database.Database.EnsureCreatedAsync();
     await database.EnsureGate4SchemaAsync();
+    await database.EnsureGate5SchemaAsync();
 }
 
 app.Use(async (context, next) =>
@@ -105,19 +106,19 @@ instances.MapGet("/{id}", async (string id, MachineStore store, CancellationToke
     .WithName("GetInstance").WithSummary("Inspect current durable instance state and facts.");
 instances.MapPost("/{id}/events", async (string id, SubmitEventRequest request, MachineStore store, CancellationToken cancellationToken) =>
 {
+    if (await store.IsInputProtectedInstanceAsync(id, cancellationToken))
+    {
+        var rejected = await store.RecordLegacyEventRejectionAsync(id, request.Event ?? string.Empty,
+            JsonSerializer.Serialize(request, JsonDefaults.Options), DateTimeOffset.UtcNow, cancellationToken);
+        return Results.Json(new ApiError("legacy-event-endpoint-restricted",
+            $"Direct event submission is disabled for this input-protected definition. Inspect inbound receipt '{rejected.Id}'."),
+            statusCode: StatusCodes.Status403Forbidden);
+    }
     if (string.IsNullOrWhiteSpace(request.Event))
     {
         return Results.BadRequest(new ApiError("invalid-request", "Event must be a non-empty string."));
     }
-    var facts = new Dictionary<string, FactValue>(StringComparer.Ordinal);
-    foreach (var (name, value) in request.Facts ?? [])
-    {
-        if (string.IsNullOrWhiteSpace(name))
-        {
-            return Results.BadRequest(new ApiError("invalid-facts", "Fact names must not be empty."));
-        }
-        facts.Add(name, ParseFact(value));
-    }
+    var facts = ParseFacts(request.Facts);
 
     var decisionEvidence = request.DecisionEvidence?.ToCoreEvidence();
     var result = await store.SubmitEventAsync(id, request.Event, DateTimeOffset.UtcNow, cancellationToken,
@@ -126,6 +127,96 @@ instances.MapPost("/{id}/events", async (string id, SubmitEventRequest request, 
         result.Transition?.ToResponse());
     return result.ConcurrencyConflict ? Results.Conflict(response) : Results.Ok(response);
 }).WithName("SubmitEvent").WithSummary("Evaluate and record an event; workflow-level refusals return an inspectable result.");
+instances.MapPost("/{id}/commands", async (
+    string id, SubmitInputRequest request, MachineStore store, CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(request.MessageId) || string.IsNullOrWhiteSpace(request.Type) ||
+        request.MessageId.Length > 128 || request.ExpectedRevision is null || request.ExpectedRevision < 0)
+    {
+        return await RecordMalformedInput(store, id, "Command", request, trustedSource: false,
+            "Message ID (1-128 characters), command type, and non-negative expected revision are required.",
+            cancellationToken);
+    }
+    IReadOnlyDictionary<string, FactValue> facts;
+    ExternalDecisionEvidence? decisionEvidence;
+    try
+    {
+        facts = ParseFacts(request.Facts);
+        decisionEvidence = request.DecisionEvidence?.ToCoreEvidence();
+    }
+    catch (Exception exception) when (exception is ArgumentException or JsonException)
+    {
+        return await RecordMalformedInput(store, id, "Command", request, trustedSource: false,
+            exception.Message, cancellationToken);
+    }
+    var result = await store.SubmitInputAsync(id, "Command", request.MessageId, request.Type,
+        request.ExpectedRevision.Value, request.CorrelationId, request.Source, request.OccurredAt,
+        request.Payload, facts, request.Evidence, decisionEvidence,
+        request.FactsProvenance, trustedSource: false, DateTimeOffset.UtcNow, cancellationToken);
+    var response = ToInputResponse(result, await store.GetInstanceAsync(id, cancellationToken));
+    return result.Submission?.ConcurrencyConflict == true ? Results.Conflict(response) : Results.Ok(response);
+}).WithName("SubmitCommand").WithSummary("Submit a declared command; receipt alone does not accept a workflow event.");
+instances.MapPost("/{id}/observations", async (
+    string id, SubmitInputRequest request, HttpRequest httpRequest, MachineStore store, CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(request.MessageId) || string.IsNullOrWhiteSpace(request.Type) ||
+        request.MessageId.Length > 128 || string.IsNullOrWhiteSpace(request.CorrelationId) ||
+        request.ExpectedRevision is null || request.ExpectedRevision < 0)
+    {
+        return await RecordMalformedInput(store, id, "Observation", request, IsTrustedIngestion(httpRequest),
+            "Message ID (1-128 characters), observation type, operation correlation ID, and non-negative expected revision are required.",
+            cancellationToken);
+    }
+    var trustedSource = IsTrustedIngestion(httpRequest);
+    IReadOnlyDictionary<string, FactValue> facts;
+    ExternalDecisionEvidence? decisionEvidence;
+    try
+    {
+        facts = ParseFacts(request.Facts);
+        decisionEvidence = request.DecisionEvidence?.ToCoreEvidence();
+    }
+    catch (Exception exception) when (exception is ArgumentException or JsonException)
+    {
+        return await RecordMalformedInput(store, id, "Observation", request, trustedSource,
+            exception.Message, cancellationToken);
+    }
+    var result = await store.SubmitInputAsync(id, "Observation", request.MessageId, request.Type,
+        request.ExpectedRevision.Value, request.CorrelationId, request.Source, request.OccurredAt,
+        request.Payload, facts, request.Evidence, decisionEvidence,
+        request.FactsProvenance, trustedSource, DateTimeOffset.UtcNow, cancellationToken);
+    var response = ToInputResponse(result, await store.GetInstanceAsync(id, cancellationToken));
+    return result.Submission?.ConcurrencyConflict == true ? Results.Conflict(response) : Results.Ok(response);
+}).WithName("SubmitObservation").WithSummary("Submit an external claim; only the configured trusted ingestion boundary can authorize it.");
+instances.MapPost("/{id}/expected-operations", async (
+    string id, RegisterExpectedOperationRequest request, HttpRequest httpRequest, MachineStore store,
+    CancellationToken cancellationToken) =>
+{
+    if (!IsTrustedIngestion(httpRequest))
+    {
+        return Results.Json(new ApiError("trusted-ingestion-required",
+            "Expected operations can only be created through the configured controlled demonstration boundary."),
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+    if (string.IsNullOrWhiteSpace(request.OperationId) || string.IsNullOrWhiteSpace(request.ObservationType) ||
+        string.IsNullOrWhiteSpace(request.SourceIdentity))
+    {
+        return Results.BadRequest(new ApiError("invalid-request", "Operation ID, observation type, and source identity are required."));
+    }
+    var operation = await store.RegisterExpectedOperationAsync(id, request.OperationId, request.ObservationType,
+        request.SourceIdentity, request.ExpectedRevision, request.RequiredEvidence, DateTimeOffset.UtcNow, cancellationToken);
+    return Results.Created($"/api/instances/{Uri.EscapeDataString(id)}/expected-operations/{Uri.EscapeDataString(operation.OperationId)}",
+        operation.ToResponse());
+}).WithName("RegisterExpectedOperation").WithSummary("Register an expected result through the controlled trusted demonstration boundary.");
+instances.MapGet("/{id}/expected-operations", async (string id, MachineStore store, CancellationToken cancellationToken) =>
+    Results.Ok((await store.ListExpectedOperationsAsync(id, cancellationToken)).Select(operation => operation.ToResponse())))
+    .WithName("ListExpectedOperations").WithSummary("Inspect expected external results and their resolution status.");
+instances.MapGet("/{id}/inbound-messages", async (string id, MachineStore store, CancellationToken cancellationToken) =>
+    Results.Ok((await store.ListInboundMessagesAsync(id, cancellationToken)).Select(message => message.ToResponse())))
+    .WithName("ListInboundMessages").WithSummary("Inspect command and observation receipts, authority decisions, and outcomes.");
+instances.MapGet("/{id}/inbound-messages/{receiptId}", async (
+    string id, string receiptId, MachineStore store, CancellationToken cancellationToken) =>
+    Results.Ok((await store.GetInboundMessageAsync(id, receiptId, cancellationToken)).ToResponse()))
+    .WithName("GetInboundMessage").WithSummary("Inspect one inbound message receipt.");
 instances.MapGet("/{id}/attempts", async (string id, MachineStore store, CancellationToken cancellationToken) =>
     Results.Ok((await store.ListAttemptsAsync(id, cancellationToken)).Select(attempt => attempt.ToResponse())))
     .WithName("ListAttempts").WithSummary("List event attempts in received order.");
@@ -157,5 +248,59 @@ static FactValue ParseFact(JsonElement value) => value.ValueKind switch
     JsonValueKind.Null => FactValue.Null,
     _ => throw new ArgumentException("Fact values must be scalar strings, numbers, booleans or null.")
 };
+
+static IReadOnlyDictionary<string, FactValue> ParseFacts(Dictionary<string, JsonElement>? values)
+{
+    var facts = new Dictionary<string, FactValue>(StringComparer.Ordinal);
+    foreach (var (name, value) in values ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            throw new ArgumentException("Fact names must not be empty.");
+        }
+        facts.Add(name, ParseFact(value));
+    }
+    return facts;
+}
+
+static InputProcessingResponse ToInputResponse(InboundProcessingResult result, MachineInstanceDetails currentInstance)
+{
+    var submission = result.Submission;
+    return new InputProcessingResponse(result.Message.ToResponse(),
+        submission?.Attempt.ToResponse(), (submission?.Instance ?? currentInstance).ToResponse(),
+        submission?.Transition?.ToResponse());
+}
+
+static async Task<IResult> RecordMalformedInput(
+    MachineStore store,
+    string instanceId,
+    string inputKind,
+    SubmitInputRequest request,
+    bool trustedSource,
+    string explanation,
+    CancellationToken cancellationToken)
+{
+    var receipt = await store.RecordMalformedInputAsync(
+        instanceId, inputKind, request.MessageId, request.Type, request.ExpectedRevision,
+        request.CorrelationId, request.Source, request.OccurredAt,
+        JsonSerializer.Serialize(request, JsonDefaults.Options), trustedSource, explanation,
+        DateTimeOffset.UtcNow, cancellationToken);
+    return Results.BadRequest(new ApiError("malformed-input",
+        $"{explanation} Inspect inbound receipt '{receipt.Id}'."));
+}
+
+static bool IsTrustedIngestion(HttpRequest request)
+{
+    var configuredKey = Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY");
+    if (string.IsNullOrEmpty(configuredKey) ||
+        !request.Headers.TryGetValue("X-State-Machine-Trusted-Ingestion-Key", out var suppliedKey) ||
+        string.IsNullOrEmpty(suppliedKey))
+    {
+        return false;
+    }
+    return System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+        System.Text.Encoding.UTF8.GetBytes(configuredKey),
+        System.Text.Encoding.UTF8.GetBytes(suppliedKey.ToString()));
+}
 
 public partial class Program { }

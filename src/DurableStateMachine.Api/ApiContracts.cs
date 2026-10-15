@@ -17,6 +17,69 @@ public sealed record SubmitEventRequest(
     DecisionEvidenceRequest? DecisionEvidence = null,
     Dictionary<string, string>? FactsProvenance = null);
 
+public sealed record SubmitInputRequest(
+    string MessageId,
+    string Type,
+    long? ExpectedRevision,
+    string? CorrelationId = null,
+    string? Source = null,
+    DateTimeOffset? OccurredAt = null,
+    Dictionary<string, JsonElement>? Payload = null,
+    Dictionary<string, JsonElement>? Facts = null,
+    Dictionary<string, JsonElement>? Evidence = null,
+    Dictionary<string, string>? FactsProvenance = null,
+    DecisionEvidenceRequest? DecisionEvidence = null);
+
+public sealed record RegisterExpectedOperationRequest(
+    string OperationId,
+    string ObservationType,
+    string SourceIdentity,
+    long? ExpectedRevision = null,
+    IReadOnlyList<string>? RequiredEvidence = null);
+
+public sealed record InboundMessageResponse(
+    string Id,
+    string InstanceId,
+    string MessageId,
+    string InputKind,
+    string InputType,
+    string Authority,
+    string? CorrelationId,
+    string? ClaimedSource,
+    long? ExpectedRevision,
+    string DefinitionId,
+    string DefinitionVersion,
+    long RevisionAtReceipt,
+    JsonElement RequestEnvelope,
+    JsonElement Payload,
+    JsonElement Evidence,
+    string PayloadDigest,
+    string Status,
+    string ReasonCode,
+    string Explanation,
+    string? AcceptedEvent,
+    string? AttemptId,
+    DateTimeOffset ReceivedAt,
+    DateTimeOffset? OccurredAt);
+
+public sealed record ExpectedOperationResponse(
+    string OperationId,
+    string InstanceId,
+    string ObservationType,
+    string SourceIdentity,
+    DateTimeOffset ExpectedAt,
+    long ExpectedRevision,
+    IReadOnlyList<string> RequiredEvidence,
+    string Status,
+    string? ResultDigest,
+    DateTimeOffset? ResolvedAt);
+
+public sealed record InputProcessingResponse(
+    InboundMessageResponse Message,
+    AttemptResponse? Attempt,
+    InstanceResponse Instance,
+    TransitionResponse? Transition);
+
 public sealed record DecisionEvidenceRequest(
     string DecisionSystemIdentity,
     string? ExternalEvaluationId,
@@ -49,6 +112,22 @@ public sealed record ApiError(string Code, string Message, IReadOnlyList<Validat
 
 public static class ApiContractMapping
 {
+    public static InboundMessageResponse ToResponse(this InboundMessageRecord message) =>
+        new(message.Id, message.InstanceId, message.MessageId, message.InputKind, message.InputType,
+            message.Authority, message.CorrelationId, message.ClaimedSource, message.ExpectedRevision, message.DefinitionId,
+            message.DefinitionVersion, message.RevisionAtReceipt,
+            JsonDocument.Parse(message.InputEnvelopeJson).RootElement.Clone(),
+            JsonDocument.Parse(message.PayloadJson).RootElement.Clone(),
+            JsonDocument.Parse(message.EvidenceJson).RootElement.Clone(), message.PayloadDigest, message.Status,
+            message.ReasonCode, message.Explanation, message.AcceptedEvent, message.AttemptId,
+            message.ReceivedAt, message.OccurredAt);
+
+    public static ExpectedOperationResponse ToResponse(this ExpectedOperationRecord operation) =>
+        new(operation.OperationId, operation.InstanceId, operation.ObservationType, operation.SourceIdentity,
+            operation.ExpectedAt, operation.ExpectedRevision,
+            JsonSerializer.Deserialize<string[]>(operation.RequiredEvidenceJson, JsonDefaults.Options) ?? [],
+            operation.Status, operation.ResultDigest, operation.ResolvedAt);
+
     public static InstanceResponse ToResponse(this MachineInstanceDetails instance) =>
         new(instance.Id, instance.DefinitionId, instance.DefinitionVersion, instance.CurrentState, instance.Revision,
             instance.Facts.ToDictionary(pair => pair.Key, pair => ToObject(pair.Value), StringComparer.Ordinal),

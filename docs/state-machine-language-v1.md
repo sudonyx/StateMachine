@@ -1,6 +1,6 @@
-# State-machine language 1.0
+# State-machine language 1.0 and 1.1
 
-The runtime accepts a deliberately small JSON definition format. Definitions are parsed and semantically validated before registration; unsupported or unknown properties are errors rather than ignored input.
+The runtime accepts deliberately small JSON definition formats. Definitions are parsed and semantically validated before registration; unsupported or unknown properties are errors rather than ignored input. Language 1.0 retains its original event-submission semantics. Language 1.1 adds opt-in input mappings; it does not reinterpret definitions already registered as language 1.0.
 
 ## Structure
 
@@ -30,6 +30,30 @@ The runtime accepts a deliberately small JSON definition format. Definitions are
 
 All top-level properties shown are required. `description` is optional; all other transition properties are required. A state is nonterminal unless `"terminal": true`. IDs are non-empty, case-sensitive strings. Each `(id, version)` identifies one immutable registered definition.
 
+Language 1.1 may additionally declare an input policy:
+
+```json
+{
+  "languageVersion": "1.1",
+  "id": "example",
+  "version": "2",
+  "initialState": "Draft",
+  "states": [{ "id": "Draft" }, { "id": "Done", "terminal": true }],
+  "events": ["Finish"],
+  "inputPolicy": {
+    "commands": [{ "name": "RequestFinish", "event": "Finish" }],
+    "observations": [{
+      "name": "WorkCompleted",
+      "event": "Finish",
+      "requiredEvidence": ["resultDigest"]
+    }]
+  },
+  "transitions": [{ "id": "finish", "source": "Draft", "event": "Finish", "target": "Done" }]
+}
+```
+
+Both `commands` and `observations` arrays are required when `inputPolicy` is present. Each mapping name is unique within its kind and maps to a declared workflow event. Observation mappings list required evidence keys. Language 1.0 definitions must not contain `inputPolicy`; register a new immutable definition version using language 1.1 to opt in.
+
 ## Definition semantics and validation
 
 - The initial state must be declared.
@@ -38,7 +62,7 @@ All top-level properties shown are required. `description` is optional; all othe
 - Every source and target must name a declared state; every transition event must be declared.
 - Terminal states cannot have outgoing transitions.
 - Two unguarded transitions cannot share a source and event. Guarded overlaps are checked when facts are evaluated; runtime ambiguity is refused.
-- Only language version `1.0` is accepted. Unknown JSON properties and unsupported guard operators are errors.
+- Language versions `1.0` and `1.1` are accepted. Unknown JSON properties and unsupported guard operators are errors. Language 1.1 adds only the optional input policy described above; the flat-state and guard semantics are unchanged.
 - States are flat. Hierarchy, parallel regions, entry/exit actions, timers, arbitrary code, side effects and definition migration are unsupported.
 
 Validation exceptions expose a list of `ValidationIssue` values (`Code`, JSON `Path`, and `Message`). Invalid JSON is reported as `invalid-json`.
@@ -82,4 +106,4 @@ The evaluator first refuses unknown current states, terminal states and undeclar
 
 Definition order never breaks ties. Results include the prior state, event, selected transition and target when accepted, guard findings, a reason code, and an explanation. Rejected, ambiguous and unresolved results do not change an instance.
 
-The definition format and language version remain `1.0`; Gate 4 extends the event-submission context, not the JSON definition grammar.
+The transition and guard semantics are shared by both language versions. Language 1.1 adds declared command/observation-to-event mappings; it does not change transition selection or the Gate 4 immutable evaluation context.

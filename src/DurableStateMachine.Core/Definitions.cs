@@ -20,31 +20,42 @@ public sealed record MachineTransition(
     string Target,
     string? Description,
     GuardExpression? Guard);
+public sealed record CommandInputMapping(string Name, string Event);
+public sealed record ObservationInputMapping(string Name, string Event, IReadOnlyList<string> RequiredEvidence);
+public sealed record MachineInputPolicy(
+    IReadOnlyDictionary<string, CommandInputMapping> Commands,
+    IReadOnlyDictionary<string, ObservationInputMapping> Observations);
 
 public sealed class MachineDefinition
 {
     internal MachineDefinition(
         string id,
         string version,
+        string languageVersion,
         string initialState,
         IReadOnlyDictionary<string, MachineState> states,
         IReadOnlySet<string> events,
-        IReadOnlyList<MachineTransition> transitions)
+        IReadOnlyList<MachineTransition> transitions,
+        MachineInputPolicy? inputPolicy)
     {
         Id = id;
         Version = version;
+        LanguageVersion = languageVersion;
         InitialState = initialState;
         States = states;
         Events = events;
         Transitions = transitions;
+        InputPolicy = inputPolicy;
     }
 
     public string Id { get; }
     public string Version { get; }
+    public string LanguageVersion { get; }
     public string InitialState { get; }
     public IReadOnlyDictionary<string, MachineState> States { get; }
     public IReadOnlySet<string> Events { get; }
     public IReadOnlyList<MachineTransition> Transitions { get; }
+    public MachineInputPolicy? InputPolicy { get; }
 }
 
 public enum FactKind
@@ -84,7 +95,7 @@ public abstract record GuardExpression
 public static class MachineDefinitionLoader
 {
     private static readonly string[] RootProperties =
-        ["languageVersion", "id", "version", "initialState", "states", "events", "transitions"];
+        ["languageVersion", "id", "version", "initialState", "states", "events", "transitions", "inputPolicy"];
 
     public static MachineDefinition Load(string json)
     {
@@ -114,9 +125,13 @@ public static class MachineDefinitionLoader
             {
                 issues.Add(new("missing-property", "$.languageVersion", "Required property 'languageVersion' is missing."));
             }
-            else if (languageVersion is not null && languageVersion != "1.0")
+            else if (languageVersion is not null && languageVersion is not ("1.0" or "1.1"))
             {
-                issues.Add(new("unsupported-language-version", "$.languageVersion", $"Language version '{languageVersion}' is not supported; expected '1.0'."));
+                issues.Add(new("unsupported-language-version", "$.languageVersion", $"Language version '{languageVersion}' is not supported; expected '1.0' or '1.1'."));
+            }
+            if (languageVersion == "1.0" && root.TryGetProperty("inputPolicy", out _))
+            {
+                issues.Add(new("input-policy-version", "$.inputPolicy", "Input policies require language version '1.1'."));
             }
 
             var id = ReadRequiredString(root, "id", "$.id", issues);
@@ -126,6 +141,7 @@ public static class MachineDefinitionLoader
             var states = ReadStates(root, issues);
             var events = ReadEvents(root, issues);
             var transitions = ReadTransitions(root, issues);
+            var inputPolicy = ReadInputPolicy(root, languageVersion, events, issues);
 
             if (states.Values.All(state => !state.IsTerminal))
             {
@@ -146,11 +162,141 @@ public static class MachineDefinitionLoader
             return new MachineDefinition(
                 id!,
                 version!,
+                languageVersion!,
                 initialState!,
                 new ReadOnlyDictionary<string, MachineState>(states),
                 events.ToFrozenSet(StringComparer.Ordinal),
-                transitions.AsReadOnly());
+                transitions.AsReadOnly(),
+                inputPolicy);
         }
+    }
+
+    private static MachineInputPolicy? ReadInputPolicy(
+        JsonElement root,
+        string? languageVersion,
+        IReadOnlySet<string> events,
+        List<ValidationIssue> issues)
+    {
+        if (!root.TryGetProperty("inputPolicy", out var policy))
+        {
+            return null;
+        }
+        if (policy.ValueKind != JsonValueKind.Object)
+        {
+            issues.Add(new("invalid-input-policy", "$.inputPolicy", "Input policy must be an object."));
+            return null;
+        }
+
+        CheckProperties(policy, ["commands", "observations"], "$.inputPolicy", issues);
+        var commands = ReadCommandMappings(policy, events, issues);
+        var observations = ReadObservationMappings(policy, events, issues);
+        if (languageVersion != "1.1")
+        {
+            return null;
+        }
+        return new MachineInputPolicy(
+            new ReadOnlyDictionary<string, CommandInputMapping>(commands),
+            new ReadOnlyDictionary<string, ObservationInputMapping>(observations));
+    }
+
+    private static Dictionary<string, CommandInputMapping> ReadCommandMappings(
+        JsonElement policy,
+        IReadOnlySet<string> events,
+        List<ValidationIssue> issues)
+    {
+        var commands = new Dictionary<string, CommandInputMapping>(StringComparer.Ordinal);
+        if (!policy.TryGetProperty("commands", out var values) || values.ValueKind != JsonValueKind.Array)
+        {
+            issues.Add(new("invalid-command-mappings", "$.inputPolicy.commands", "Commands must be an array."));
+            return commands;
+        }
+
+        var index = 0;
+        foreach (var value in values.EnumerateArray())
+        {
+            var path = $"$.inputPolicy.commands[{index++}]";
+            if (value.ValueKind != JsonValueKind.Object)
+            {
+                issues.Add(new("invalid-command-mapping", path, "Each command mapping must be an object."));
+                continue;
+            }
+            CheckProperties(value, ["name", "event"], path, issues);
+            var name = ReadRequiredString(value, "name", path + ".name", issues);
+            var eventName = ReadRequiredString(value, "event", path + ".event", issues);
+            if (eventName is not null && !events.Contains(eventName))
+            {
+                issues.Add(new("undeclared-input-event", path + ".event", $"Event '{eventName}' is not declared."));
+            }
+            if (name is not null && eventName is not null && !commands.TryAdd(name, new CommandInputMapping(name, eventName)))
+            {
+                issues.Add(new("duplicate-command-mapping", path + ".name", $"Command '{name}' is declared more than once."));
+            }
+        }
+        return commands;
+    }
+
+    private static Dictionary<string, ObservationInputMapping> ReadObservationMappings(
+        JsonElement policy,
+        IReadOnlySet<string> events,
+        List<ValidationIssue> issues)
+    {
+        var observations = new Dictionary<string, ObservationInputMapping>(StringComparer.Ordinal);
+        if (!policy.TryGetProperty("observations", out var values) || values.ValueKind != JsonValueKind.Array)
+        {
+            issues.Add(new("invalid-observation-mappings", "$.inputPolicy.observations", "Observations must be an array."));
+            return observations;
+        }
+
+        var index = 0;
+        foreach (var value in values.EnumerateArray())
+        {
+            var path = $"$.inputPolicy.observations[{index++}]";
+            if (value.ValueKind != JsonValueKind.Object)
+            {
+                issues.Add(new("invalid-observation-mapping", path, "Each observation mapping must be an object."));
+                continue;
+            }
+            CheckProperties(value, ["name", "event", "requiredEvidence"], path, issues);
+            var name = ReadRequiredString(value, "name", path + ".name", issues);
+            var eventName = ReadRequiredString(value, "event", path + ".event", issues);
+            if (eventName is not null && !events.Contains(eventName))
+            {
+                issues.Add(new("undeclared-input-event", path + ".event", $"Event '{eventName}' is not declared."));
+            }
+
+            var requiredEvidence = new List<string>();
+            if (!value.TryGetProperty("requiredEvidence", out var required) || required.ValueKind != JsonValueKind.Array)
+            {
+                issues.Add(new("invalid-required-evidence", path + ".requiredEvidence", "Required evidence must be an array of strings."));
+            }
+            else
+            {
+                foreach (var item in required.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(item.GetString()))
+                    {
+                        issues.Add(new("invalid-required-evidence", path + ".requiredEvidence", "Evidence names must be non-empty strings."));
+                        continue;
+                    }
+                    var evidenceName = item.GetString()!;
+                    if (requiredEvidence.Contains(evidenceName, StringComparer.Ordinal))
+                    {
+                        issues.Add(new("duplicate-required-evidence", path + ".requiredEvidence", $"Evidence '{evidenceName}' is declared more than once."));
+                    }
+                    else
+                    {
+                        requiredEvidence.Add(evidenceName);
+                    }
+                }
+            }
+
+            if (name is not null && eventName is not null &&
+                !observations.TryAdd(name, new ObservationInputMapping(name, eventName, requiredEvidence.AsReadOnly())))
+            {
+                issues.Add(new("duplicate-observation-mapping", path + ".name", $"Observation '{name}' is declared more than once."));
+            }
+        }
+        return observations;
     }
 
     private static Dictionary<string, MachineState> ReadStates(JsonElement root, List<ValidationIssue> issues)

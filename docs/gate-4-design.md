@@ -64,3 +64,7 @@ The Meridian supplier definition and existing Document Review definition use the
 Gate 4 does not implement authenticated evidence authority, commands/observations, generic external activity scheduling/retries, state-machine event deduplication, timers, distributed locks, full event replay, rule execution, or machine-definition migration. Meridian's request idempotency and local retry envelope do not remove the distributed uncertainty boundary: an evaluation may be stored remotely while the client is unsure whether it received the response. Retrying is safe only when the caller preserves and reuses the same key and same parsed request; a new key represents a new assessment.
 
 The evidence snapshot duplicates fact and response data to make historical inspection independent of mutable current data. This costs storage but avoids lossy references and keeps the evaluator and persistence history explainable.
+
+## Gate 5 continuation
+
+Gate 5 adds a separate durable input-eligibility boundary for language 1.1 definitions. Commands and observations map to declared events only after input-specific checks; the existing evaluator and Gate 4 immutable fact/decision-evidence context remain unchanged. Meridian's language 1.0 integration retains the legacy endpoint behavior. See [gate-5-design.md](./gate-5-design.md) for the new authority boundary and its controlled-training-environment limitations.

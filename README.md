@@ -1,6 +1,6 @@
 # Durable State Machine
 
-A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 4 adds immutable per-evaluation facts, recorded decision evidence and an independent Meridian HTTP integration while preserving the earlier evaluator and persistence semantics.
+A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
 
 ## Requirements, build and tests
 
@@ -14,8 +14,8 @@ dotnet test DurableStateMachine.slnx
 ## Solution structure
 
 - `src/DurableStateMachine.Core/` — definition loading, validation, typed facts and pure deterministic evaluation.
-- `src/DurableStateMachine.Persistence/` — EF Core SQLite records and transactional runtime operations.
-- `src/DurableStateMachine.Api/` — HTTP endpoints, DTOs, error mapping and OpenAPI document.
+- `src/DurableStateMachine.Persistence/` — EF Core SQLite records and transactional runtime/input operations.
+- `src/DurableStateMachine.Api/` — HTTP endpoints, DTOs, error mapping and generated OpenAPI document.
 - `clients/DurableStateMachine.Cli/` — generic command-line HTTP client.
 - `clients/DurableStateMachine.OrionClient/` — Orion scenario using the HTTP contract only.
 - `clients/DurableStateMachine.MeridianClient/` — independent live HTTP demonstration of a Meridian decision bound to a generic workflow event.
@@ -29,6 +29,7 @@ dotnet test DurableStateMachine.slnx
 ```powershell
 $env:ASPNETCORE_URLS = "http://localhost:5000"
 $env:DURABLE_STATE_MACHINE_DB = ".\durable-state-machine.db"
+$env:DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY = "<set-a-local-random-value>"
 dotnet run --project src\DurableStateMachine.Api
 ```
 
@@ -59,13 +60,18 @@ The REST routes and request/response examples are in [gate-3-api.md](./docs/gate
 
 ## Orion client demonstration
 
-With the API running:
+The Orion definition is version 2.0 using language 1.1. Configure the same local-only demonstration key on the API and client process. It is a controlled test boundary, not production authentication:
 
 ```powershell
+$env:DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY = "<set-a-local-random-value>"
 dotnet run --project clients\DurableStateMachine.OrionClient -- definitions\orion-v1.json
 ```
 
-The client registers or reuses Orion definition version 1.0, creates an instance with synthetic facts, submits guarded document/eligibility and offer events, then submits `Cancel` from a terminal state to show a recorded rejection. It retrieves current state, attempts and accepted history through HTTP.
+The client registers or reuses the exact Orion definition, creates an instance with synthetic facts, submits a command, demonstrates a forged untrusted observation, seeds an expected operation through the controlled boundary, and submits a valid synthetic offer-generation observation. It then cancels while another operation is pending and demonstrates that the late result cannot reactivate the terminal instance. Inbound messages, attempts and accepted history are retrieved through HTTP.
+
+Language 1.1 definitions declare allowed command and observation mappings. Their direct `/events` endpoint is restricted; use `/commands` for requests and `/observations` for external claims. Observation authority requires an expected operation and the configured `X-State-Machine-Trusted-Ingestion-Key`; a claimed source label or `trusted` field is not authority. Configure the key for the API separately and set it in the client environment before running the Orion demo.
+
+See [gate-5-design.md](./docs/gate-5-design.md) for input identity, duplicate/stale semantics, expected-operation evidence, compatibility and the explicit local-demo limitations.
 
 ## Gate 4 fact-binding and Meridian demonstration
 
@@ -85,4 +91,4 @@ Start both services first. The client persists the keyed request before sending 
 
 Definitions are immutable by `(id, version)`; new versions coexist. Instances remain bound to the exact version used at creation, with their instance facts fixed for their lifetime. Explicit per-attempt facts are immutable evaluation-only inputs and never mutate those facts. Each event attempt (including rejected, ambiguous and unresolved evaluations) is stored separately from accepted transition history, together with a complete evaluation-evidence snapshot. Accepted state, revision, attempt, evidence and transition history commit in one SQLite transaction. The HTTP service serializes same-instance submissions within one process and checks the persisted revision during updates.
 
-Gate 4's Meridian client is a demonstration adapter, not a durable external-activity subsystem. Meridian's idempotency key plus a saved local request envelope support deliberate same-key/same-request retries, but there is no atomic transaction spanning Meridian and local SQLite and the key does not deduplicate state-machine events. Generic durable external effects, automatic retries, exactly-once delivery, input deduplication, timers, full replay, migrations, distributed locking, authentication, and hierarchical/parallel statecharts are not implemented. The runtime has no pending time-based or external work. See [gate-3-design.md](./docs/gate-3-design.md) for the existing transaction/concurrency boundaries and [gate-4-design.md](./docs/gate-4-design.md) for Gate 4's additional limits.
+The Meridian client remains a demonstration adapter, not a durable external-activity subsystem. Meridian's idempotency key plus a saved local request envelope support deliberate same-key/same-request retries, but there is no atomic transaction spanning Meridian and local SQLite and the key does not deduplicate state-machine events. Gate 5 adds local input identity checks, not distributed exactly-once semantics. Real external effects, automatic retries, timers, full replay, migrations, production authentication, distributed locking, and hierarchical/parallel statecharts remain unsupported. The trusted-ingestion credential is a controlled single-host training boundary; it does not prove provider identity or evidence authenticity. See [gate-3-design.md](./docs/gate-3-design.md), [gate-4-design.md](./docs/gate-4-design.md), and [gate-5-design.md](./docs/gate-5-design.md) for transaction, evidence and authority limits.
