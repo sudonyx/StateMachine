@@ -1,0 +1,39 @@
+{
+  "languageVersion": "1.0",
+  "id": "meridian-supplier-qualification",
+  "version": "1.0",
+  "initialState": "AwaitingQualification",
+  "states": [
+    { "id": "AwaitingQualification" },
+    { "id": "Qualified", "terminal": true },
+    { "id": "ManualReviewRequired", "terminal": true },
+    { "id": "Blocked", "terminal": true }
+  ],
+  "events": ["DecisionAvailable"],
+  "transitions": [
+    {
+      "id": "qualify-on-proceed",
+      "source": "AwaitingQualification",
+      "event": "DecisionAvailable",
+      "target": "Qualified",
+      "description": "A bound deterministic decision permits supplier qualification.",
+      "guard": { "op": "eq", "fact": "decisionOutcome", "value": "Proceed" }
+    },
+    {
+      "id": "refer-on-review",
+      "source": "AwaitingQualification",
+      "event": "DecisionAvailable",
+      "target": "ManualReviewRequired",
+      "description": "A bound deterministic decision requires manual review.",
+      "guard": { "op": "eq", "fact": "decisionOutcome", "value": "Review" }
+    },
+    {
+      "id": "block-on-blocked",
+      "source": "AwaitingQualification",
+      "event": "DecisionAvailable",
+      "target": "Blocked",
+      "description": "A bound deterministic decision blocks supplier qualification.",
+      "guard": { "op": "eq", "fact": "decisionOutcome", "value": "Blocked" }
+    }
+  ]
+}

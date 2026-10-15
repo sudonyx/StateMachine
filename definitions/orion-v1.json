@@ -8,6 +8,7 @@
     { "id": "AwaitingDocuments" },
     { "id": "AssessmentReady" },
     { "id": "ManualReview" },
+    { "id": "AwaitingOfferAcceptance" },
     { "id": "Approved", "terminal": true },
     { "id": "Rejected", "terminal": true },
     { "id": "Cancelled", "terminal": true }
@@ -17,6 +18,8 @@
     "DocumentsReceived",
     "ReferForReview",
     "Approve",
+    "IssueOffer",
+    "AcceptOffer",
     "Reject",
     "Cancel"
   ],
@@ -104,7 +107,35 @@
         "op": "and",
         "args": [
           { "op": "eq", "fact": "checksComplete", "value": true },
-          { "op": "eq", "fact": "eligible", "value": true }
+          { "op": "eq", "fact": "eligibilityDecision", "value": "Eligible" }
+        ]
+      }
+    },
+    {
+      "id": "issue-offer-after-eligibility",
+      "source": "AssessmentReady",
+      "event": "IssueOffer",
+      "target": "AwaitingOfferAcceptance",
+      "description": "An offer is issued only after checks and the bound eligibility decision permit it.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "eq", "fact": "checksComplete", "value": true },
+          { "op": "eq", "fact": "eligibilityDecision", "value": "Eligible" }
+        ]
+      }
+    },
+    {
+      "id": "accept-valid-offer",
+      "source": "AwaitingOfferAcceptance",
+      "event": "AcceptOffer",
+      "target": "Approved",
+      "description": "The offer is still valid at the explicitly supplied trusted evaluation time.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "eq", "fact": "offerValidAtEvaluation", "value": true },
+          { "op": "exists", "fact": "offerEvaluationTime" }
         ]
       }
     },
@@ -118,6 +149,7 @@
         "op": "and",
         "args": [
           { "op": "eq", "fact": "checksComplete", "value": true },
+          { "op": "eq", "fact": "manualReviewComplete", "value": true },
           { "op": "exists", "fact": "reviewerJustification" }
         ]
       }
@@ -134,28 +166,40 @@
       "source": "Draft",
       "event": "Cancel",
       "target": "Cancelled",
-      "description": "An unsubmitted application is cancelled."
+      "description": "An unsubmitted application is cancelled when the supplied assessment permits it.",
+      "guard": { "op": "eq", "fact": "cancellationPermitted", "value": true }
     },
     {
       "id": "cancel-awaiting-documents",
       "source": "AwaitingDocuments",
       "event": "Cancel",
       "target": "Cancelled",
-      "description": "The application is cancelled while waiting for documents."
+      "description": "The application is cancelled while waiting for documents when permitted.",
+      "guard": { "op": "eq", "fact": "cancellationPermitted", "value": true }
     },
     {
       "id": "cancel-assessment",
       "source": "AssessmentReady",
       "event": "Cancel",
       "target": "Cancelled",
-      "description": "The application is cancelled before a final decision."
+      "description": "The application is cancelled before a final decision when permitted.",
+      "guard": { "op": "eq", "fact": "cancellationPermitted", "value": true }
     },
     {
       "id": "cancel-manual-review",
       "source": "ManualReview",
       "event": "Cancel",
       "target": "Cancelled",
-      "description": "The application is cancelled during manual review."
+      "description": "The application is cancelled during manual review when permitted.",
+      "guard": { "op": "eq", "fact": "cancellationPermitted", "value": true }
+    },
+    {
+      "id": "cancel-awaiting-offer",
+      "source": "AwaitingOfferAcceptance",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "An offer-awaiting application is cancelled when the supplied assessment permits it.",
+      "guard": { "op": "eq", "fact": "cancellationPermitted", "value": true }
     }
   ]
 }

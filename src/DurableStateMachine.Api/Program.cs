@@ -28,6 +28,7 @@ await using (var scope = app.Services.CreateAsyncScope())
 {
     var database = scope.ServiceProvider.GetRequiredService<MachineDbContext>();
     await database.Database.EnsureCreatedAsync();
+    await database.EnsureGate4SchemaAsync();
 }
 
 app.Use(async (context, next) =>
@@ -108,7 +109,19 @@ instances.MapPost("/{id}/events", async (string id, SubmitEventRequest request, 
     {
         return Results.BadRequest(new ApiError("invalid-request", "Event must be a non-empty string."));
     }
-    var result = await store.SubmitEventAsync(id, request.Event, DateTimeOffset.UtcNow, cancellationToken);
+    var facts = new Dictionary<string, FactValue>(StringComparer.Ordinal);
+    foreach (var (name, value) in request.Facts ?? [])
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return Results.BadRequest(new ApiError("invalid-facts", "Fact names must not be empty."));
+        }
+        facts.Add(name, ParseFact(value));
+    }
+
+    var decisionEvidence = request.DecisionEvidence?.ToCoreEvidence();
+    var result = await store.SubmitEventAsync(id, request.Event, DateTimeOffset.UtcNow, cancellationToken,
+        facts, decisionEvidence, request.FactsProvenance);
     var response = new EventSubmissionResponse(result.Attempt.ToResponse(), result.Instance.ToResponse(),
         result.Transition?.ToResponse());
     return result.ConcurrencyConflict ? Results.Conflict(response) : Results.Ok(response);

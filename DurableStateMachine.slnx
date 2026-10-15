@@ -7,6 +7,7 @@
   <Folder Name="/clients/">
     <Project Path="clients/DurableStateMachine.Cli/DurableStateMachine.Cli.csproj" />
     <Project Path="clients/DurableStateMachine.OrionClient/DurableStateMachine.OrionClient.csproj" />
+    <Project Path="clients/DurableStateMachine.MeridianClient/DurableStateMachine.MeridianClient.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/DurableStateMachine.Tests/DurableStateMachine.Tests.csproj" />

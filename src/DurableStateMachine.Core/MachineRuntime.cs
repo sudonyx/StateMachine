@@ -51,10 +51,19 @@ public sealed class MachineRuntime
             : throw new KeyNotFoundException($"Instance '{instanceId}' does not exist.");
 
     public ExecutionResult Send(string instanceId, string eventName)
+        => Send(instanceId, eventName, new Dictionary<string, FactValue>());
+
+    public ExecutionResult Send(
+        string instanceId,
+        string eventName,
+        IReadOnlyDictionary<string, FactValue> attemptFacts,
+        ExternalDecisionEvidence? decisionEvidence = null,
+        IReadOnlyDictionary<string, string>? attemptFactProvenance = null)
     {
         var instance = GetInstance(instanceId);
         var definition = GetDefinition(instance.DefinitionId, instance.DefinitionVersion);
-        var evaluation = TransitionEvaluator.Evaluate(definition, instance.CurrentState, eventName, instance.Facts);
+        var context = TransitionEvaluationContext.Create(instance.Facts, attemptFacts, decisionEvidence, attemptFactProvenance);
+        var evaluation = TransitionEvaluator.Evaluate(definition, instance.CurrentState, eventName, context);
         if (evaluation.Status != EvaluationStatus.Accepted)
         {
             return new ExecutionResult(instance, evaluation);

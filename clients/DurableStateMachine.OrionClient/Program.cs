@@ -20,23 +20,46 @@ var created = await client.PostAsJsonAsync("api/instances", new
         riskScore = 75,
         equipmentValue = 50000,
         checksComplete = true,
-        eligible = true
+        eligibilityDecision = "Eligible"
     }
 });
 await PrintResponse(created);
 
 await Submit("Submit");
-await Submit("Approve");
+await Submit("IssueOffer");
+await Submit("AcceptOffer",
+    new Dictionary<string, object?>
+    {
+        ["offerValidAtEvaluation"] = true,
+        ["offerEvaluationTime"] = DateTimeOffset.UtcNow.ToString("O")
+    },
+    new Dictionary<string, string>
+    {
+        ["offerValidAtEvaluation"] = "Illustrative trusted evaluation input; not independently verified by this client.",
+        ["offerEvaluationTime"] = "Clock value explicitly supplied by the client."
+    });
 await Submit("Cancel");
 await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(instanceId)}"));
 await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(instanceId)}/history"));
 await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(instanceId)}/attempts"));
 
-async Task Submit(string eventName)
+async Task Submit(
+    string eventName,
+    IReadOnlyDictionary<string, object?>? facts = null,
+    IReadOnlyDictionary<string, string>? factsProvenance = null)
 {
     Console.WriteLine($"Submitting {eventName}");
+    var request = new Dictionary<string, object?> { ["event"] = eventName };
+    if (facts is not null)
+    {
+        request["facts"] = facts;
+    }
+    if (factsProvenance is not null)
+    {
+        request["factsProvenance"] = factsProvenance;
+    }
     await PrintResponse(await client.PostAsJsonAsync($"api/instances/{Uri.EscapeDataString(instanceId)}/events",
-        new { @event = eventName }));
+        request));
 }
 
 static async Task PrintResponse(HttpResponseMessage response)

@@ -126,4 +126,71 @@ public sealed class TransitionEvaluatorTests
         Assert.Equal("undeclared-event", TransitionEvaluator.Evaluate(definition, "Draft", "Unknown", facts).ReasonCode);
         Assert.Equal("terminal-state", TransitionEvaluator.Evaluate(definition, "Approved", "Submit", facts).ReasonCode);
     }
+
+    [Fact]
+    public void Preserves_unknown_and_unavailable_fact_states_as_unresolved_guard_findings()
+    {
+        var definition = MachineDefinitionLoader.Load(TestSupport.MinimalDefinition(
+            """{ "id": "go", "source": "A", "event": "Go", "target": "B", "guard": { "op": "eq", "fact": "decision", "value": "Proceed" } }"""));
+        var unknownEvidence = DecisionEvidence(DecisionOutcomeState.Unknown, unknownFacts: ["decision"]);
+        var unavailableEvidence = DecisionEvidence(DecisionOutcomeState.Unavailable, unavailableFacts: ["decision"]);
+
+        var unknown = TransitionEvaluator.Evaluate(
+            definition, "A", "Go",
+            TransitionEvaluationContext.Create(TestSupport.Facts(), decisionEvidence: unknownEvidence));
+        var unavailable = TransitionEvaluator.Evaluate(
+            definition, "A", "Go",
+            TransitionEvaluationContext.Create(TestSupport.Facts(), decisionEvidence: unavailableEvidence));
+
+        Assert.Equal(EvaluationStatus.Unresolved, unknown.Status);
+        Assert.Equal("unknown-fact", Assert.Single(unknown.GuardFindings).Code);
+        Assert.Equal(EvaluationStatus.Unresolved, unavailable.Status);
+        Assert.Equal("unavailable-fact", Assert.Single(unavailable.GuardFindings).Code);
+    }
+
+    [Fact]
+    public void Rejects_fact_collisions_and_provenance_for_unbound_per_attempt_facts()
+    {
+        var instanceFacts = TestSupport.Facts(("score", FactValue.From(4m)));
+        Assert.Throws<ArgumentException>(() => TransitionEvaluationContext.Create(
+            instanceFacts,
+            TestSupport.Facts(("score", FactValue.From(5m)))));
+        Assert.Throws<ArgumentException>(() => TransitionEvaluationContext.Create(
+            instanceFacts,
+            attemptFactProvenance: new Dictionary<string, string> { ["missing"] = "caller label" }));
+    }
+
+    [Fact]
+    public void Copies_external_evidence_collections_into_the_immutable_evaluation_context()
+    {
+        var unknownFacts = new List<string> { "decision" };
+        var evidence = DecisionEvidence(DecisionOutcomeState.Unknown, unknownFacts: unknownFacts);
+
+        var context = TransitionEvaluationContext.Create(TestSupport.Facts(), decisionEvidence: evidence);
+        unknownFacts.Add("later-mutation");
+
+        Assert.Equal(["decision"], context.DecisionEvidence!.UnknownFacts);
+        Assert.DoesNotContain("later-mutation", context.UnresolvedFacts.Keys);
+    }
+
+    private static ExternalDecisionEvidence DecisionEvidence(
+        DecisionOutcomeState outcomeState,
+        IReadOnlyList<string>? unknownFacts = null,
+        IReadOnlyList<string>? unavailableFacts = null) =>
+        new(
+            "example-decision-system",
+            "external-evaluation-1",
+            outcomeState,
+            null,
+            DateTimeOffset.Parse("2026-10-14T12:00:00Z"),
+            "2026-10-14",
+            DateTimeOffset.Parse("2026-10-14T12:00:00Z"),
+            "source-fact-digest",
+            ["policy-version-1"],
+            "local-evidence-digest",
+            """{"evidence":{}}""",
+            "unverified caller-provided provenance",
+            [],
+            unknownFacts ?? [],
+            unavailableFacts ?? []);
 }

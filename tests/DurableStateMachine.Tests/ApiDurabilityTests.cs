@@ -292,5 +292,157 @@ public sealed class ApiDurabilityTests
         }
     }
 
+    [Fact]
+    public async Task Attempt_context_and_complete_decision_evidence_survive_restart_for_accepted_and_unresolved_results()
+    {
+        var database = Path.Combine(Path.GetTempPath(), $"dsm-{Guid.NewGuid():N}.db");
+        var previousDatabase = Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_DB");
+        Environment.SetEnvironmentVariable("DURABLE_STATE_MACHINE_DB", database);
+        const string guardedDefinition = """
+            {
+              "languageVersion": "1.0",
+              "id": "evidence-test",
+              "version": "1",
+              "initialState": "Draft",
+              "states": [{ "id": "Draft" }, { "id": "Done", "terminal": true }],
+              "events": ["Complete"],
+              "transitions": [
+                { "id": "complete", "source": "Draft", "event": "Complete", "target": "Done",
+                  "guard": { "op": "eq", "fact": "decisionOutcome", "value": "Proceed" } }
+              ]
+            }
+            """;
+        const string originalResponse = """{"evidence":{"evaluationId":"external-1","factSet":{"digest":"source-digest"},"finalDecision":"Proceed"},"selectedPolicySourceVersionIds":["policy-v1"]}""";
+        try
+        {
+            string acceptedInstanceId;
+            string unresolvedInstanceId;
+            string acceptedAttemptId;
+            using (var factory = new WebApplicationFactory<Program>())
+            using (var client = factory.CreateClient())
+            {
+                Assert.Equal(HttpStatusCode.OK,
+                    (await client.PostAsync("/api/definitions", Json(guardedDefinition))).StatusCode);
+                acceptedInstanceId = $"evidence-{Guid.NewGuid():N}";
+                unresolvedInstanceId = $"evidence-null-{Guid.NewGuid():N}";
+                foreach (var id in new[] { acceptedInstanceId, unresolvedInstanceId })
+                {
+                    Assert.Equal(HttpStatusCode.Created, (await client.PostAsJsonAsync("/api/instances", new
+                    {
+                        id,
+                        definitionId = "evidence-test",
+                        definitionVersion = "1",
+                        facts = new { source = "immutable-instance-fact" }
+                    })).StatusCode);
+                }
+
+                var acceptedResponse = await client.PostAsJsonAsync(
+                    $"/api/instances/{acceptedInstanceId}/events",
+                    new
+                    {
+                        @event = "Complete",
+                        facts = new { decisionOutcome = "Proceed" },
+                        factsProvenance = new { decisionOutcome = "caller asserted Meridian response mapping" },
+                        decisionEvidence = CreateDecisionEvidence(originalResponse, "Proceed", "Present")
+                    });
+                Assert.Equal(HttpStatusCode.OK, acceptedResponse.StatusCode);
+                using (var acceptedJson = JsonDocument.Parse(await acceptedResponse.Content.ReadAsStringAsync()))
+                {
+                    var attempt = acceptedJson.RootElement.GetProperty("attempt");
+                    acceptedAttemptId = attempt.GetProperty("id").GetString()!;
+                    Assert.Equal("Accepted", attempt.GetProperty("status").GetString());
+                    var evidence = attempt.GetProperty("evaluationEvidence");
+                    Assert.Equal("evidence-test", evidence.GetProperty("definitionId").GetString());
+                    Assert.Equal(0, evidence.GetProperty("instanceRevision").GetInt64());
+                    Assert.Equal("immutable-instance-fact",
+                        evidence.GetProperty("instanceFacts").GetProperty("source").GetProperty("stringValue").GetString());
+                    Assert.Equal("Proceed",
+                        evidence.GetProperty("attemptFacts").GetProperty("decisionOutcome").GetProperty("stringValue").GetString());
+                    Assert.Equal("caller asserted Meridian response mapping",
+                        evidence.GetProperty("attemptFactProvenance").GetProperty("decisionOutcome").GetString());
+                    Assert.Equal(originalResponse,
+                        evidence.GetProperty("decisionEvidence").GetProperty("originalResponseJson").GetString());
+                    Assert.Equal("source-digest",
+                        evidence.GetProperty("decisionEvidence").GetProperty("inputFactSetDigest").GetString());
+                    Assert.Equal(64, attempt.GetProperty("evaluationEvidenceDigest").GetString()!.Length);
+                }
+
+                var nullResponse = """{"evidence":{"evaluationId":"external-2","finalDecision":null}}""";
+                var unresolvedResponse = await client.PostAsJsonAsync(
+                    $"/api/instances/{unresolvedInstanceId}/events",
+                    new
+                    {
+                        @event = "Complete",
+                        facts = new { decisionOutcome = (string?)null },
+                        decisionEvidence = CreateDecisionEvidence(nullResponse, null, "ExplicitNull")
+                    });
+                Assert.Equal(HttpStatusCode.OK, unresolvedResponse.StatusCode);
+                using (var unresolvedJson = JsonDocument.Parse(await unresolvedResponse.Content.ReadAsStringAsync()))
+                {
+                    var attempt = unresolvedJson.RootElement.GetProperty("attempt");
+                    Assert.Equal("Unresolved", attempt.GetProperty("status").GetString());
+                    Assert.Equal("null-fact", attempt.GetProperty("guardFindings")[0].GetProperty("code").GetString());
+                    Assert.Equal("ExplicitNull",
+                        attempt.GetProperty("evaluationEvidence").GetProperty("decisionEvidence").GetProperty("outcomeState").ToString());
+                    Assert.Equal(0, unresolvedJson.RootElement.GetProperty("instance").GetProperty("revision").GetInt64());
+                }
+
+                var collision = await client.PostAsJsonAsync(
+                    $"/api/instances/{acceptedInstanceId}/events",
+                    new { @event = "Complete", facts = new { source = "attempt-overrides-instance" } });
+                Assert.Equal(HttpStatusCode.BadRequest, collision.StatusCode);
+            }
+
+            using (var restartedFactory = new WebApplicationFactory<Program>())
+            using (var restartedClient = restartedFactory.CreateClient())
+            {
+                var acceptedAttempts = await restartedClient.GetFromJsonAsync<JsonElement[]>(
+                    $"/api/instances/{acceptedInstanceId}/attempts");
+                Assert.NotNull(acceptedAttempts);
+                Assert.Single(acceptedAttempts);
+                Assert.Equal(acceptedAttemptId, acceptedAttempts[0].GetProperty("id").GetString());
+                Assert.Equal(originalResponse, acceptedAttempts[0].GetProperty("evaluationEvidence")
+                    .GetProperty("decisionEvidence").GetProperty("originalResponseJson").GetString());
+                Assert.Single(await restartedClient.GetFromJsonAsync<JsonElement[]>(
+                    $"/api/instances/{acceptedInstanceId}/history") ?? []);
+
+                var unresolvedAttempts = await restartedClient.GetFromJsonAsync<JsonElement[]>(
+                    $"/api/instances/{unresolvedInstanceId}/attempts");
+                Assert.NotNull(unresolvedAttempts);
+                Assert.Equal("ExplicitNull", unresolvedAttempts[0].GetProperty("evaluationEvidence")
+                    .GetProperty("decisionEvidence").GetProperty("outcomeState").ToString());
+                Assert.Empty(await restartedClient.GetFromJsonAsync<JsonElement[]>(
+                    $"/api/instances/{unresolvedInstanceId}/history") ?? []);
+            }
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DURABLE_STATE_MACHINE_DB", previousDatabase);
+            SqliteConnection.ClearAllPools();
+            if (File.Exists(database))
+            {
+                File.Delete(database);
+            }
+        }
+    }
+
+    private static object CreateDecisionEvidence(string originalResponseJson, string? outcome, string outcomeState) => new
+    {
+        decisionSystemIdentity = "training-decision-system",
+        externalEvaluationId = $"evaluation-{Guid.NewGuid():N}",
+        outcomeState,
+        outcome,
+        evaluatedAt = DateTimeOffset.Parse("2026-10-14T15:37:00Z"),
+        businessEffectiveAt = "2026-10-14",
+        knowledgeCutoff = DateTimeOffset.Parse("2026-10-14T15:37:00Z"),
+        inputFactSetDigest = "source-digest",
+        policyVersionIdentities = new[] { "policy-v1" },
+        provenance = "caller supplied; authenticity not verified",
+        originalResponseJson,
+        missingFacts = Array.Empty<string>(),
+        unknownFacts = Array.Empty<string>(),
+        unavailableFacts = Array.Empty<string>()
+    };
+
     private static StringContent Json(string content) => new(content, Encoding.UTF8, "application/json");
 }

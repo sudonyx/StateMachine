@@ -34,11 +34,18 @@ public static class TransitionEvaluator
         string currentState,
         string eventName,
         IReadOnlyDictionary<string, FactValue> facts)
+        => Evaluate(definition, currentState, eventName, TransitionEvaluationContext.FromResolvedFacts(facts));
+
+    public static TransitionEvaluation Evaluate(
+        MachineDefinition definition,
+        string currentState,
+        string eventName,
+        TransitionEvaluationContext context)
     {
         ArgumentNullException.ThrowIfNull(definition);
         ArgumentNullException.ThrowIfNull(currentState);
         ArgumentNullException.ThrowIfNull(eventName);
-        ArgumentNullException.ThrowIfNull(facts);
+        ArgumentNullException.ThrowIfNull(context);
 
         if (!definition.States.TryGetValue(currentState, out var state))
         {
@@ -68,7 +75,7 @@ public static class TransitionEvaluator
         {
             var guardResult = transition.Guard is null
                 ? GuardResult.Enabled
-                : EvaluateGuard(transition.Guard, facts);
+                : EvaluateGuard(transition.Guard, context);
             findings.Add(new GuardFinding(transition.Id, guardResult.Status, guardResult.Code, guardResult.Explanation));
             if (guardResult.Status == GuardStatus.Enabled)
             {
@@ -111,12 +118,19 @@ public static class TransitionEvaluator
             "transition-enabled", selected.Description ?? $"Transition '{selected.Id}' is enabled.");
     }
 
-    private static GuardResult EvaluateGuard(GuardExpression expression, IReadOnlyDictionary<string, FactValue> facts)
+    private static GuardResult EvaluateGuard(GuardExpression expression, TransitionEvaluationContext context)
     {
         switch (expression)
         {
             case GuardExpression.Presence presence:
-                var present = facts.TryGetValue(presence.Fact, out var presentValue);
+                var present = context.ResolvedFacts.ContainsKey(presence.Fact);
+                if (!present && context.UnresolvedFacts.TryGetValue(presence.Fact, out var presenceKnowledge) &&
+                    presenceKnowledge is FactKnowledgeState.Unknown or FactKnowledgeState.Unavailable)
+                {
+                    var presenceCode = presenceKnowledge == FactKnowledgeState.Unknown ? "unknown-fact" : "unavailable-fact";
+                    return GuardResult.UnresolvedResult(presenceCode,
+                        $"Fact '{presence.Fact}' is {presenceKnowledge.ToString().ToLowerInvariant()}.");
+                }
                 var exists = presence.Operator == "exists";
                 var matched = present == exists;
                 return matched
@@ -124,8 +138,18 @@ public static class TransitionEvaluator
                     : new GuardResult(GuardStatus.Disabled, "presence-check-failed", $"Presence check '{presence.Operator}' for '{presence.Fact}' was false.");
 
             case GuardExpression.Comparison comparison:
-                if (!facts.TryGetValue(comparison.Fact, out var actual))
+                if (!context.ResolvedFacts.TryGetValue(comparison.Fact, out var actual))
                 {
+                    if (context.UnresolvedFacts.TryGetValue(comparison.Fact, out var knowledgeState))
+                    {
+                        var code = knowledgeState switch
+                        {
+                            FactKnowledgeState.Unknown => "unknown-fact",
+                            FactKnowledgeState.Unavailable => "unavailable-fact",
+                            _ => "missing-fact"
+                        };
+                        return GuardResult.UnresolvedResult(code, $"Fact '{comparison.Fact}' is {knowledgeState.ToString().ToLowerInvariant()}.");
+                    }
                     return GuardResult.UnresolvedResult("missing-fact", $"Fact '{comparison.Fact}' is absent.");
                 }
                 if (actual.Kind == FactKind.Null)
@@ -139,7 +163,7 @@ public static class TransitionEvaluator
                 return Compare(comparison, actual);
 
             case GuardExpression.Logical logical:
-                var values = logical.Arguments.Select(argument => EvaluateGuard(argument, facts)).ToArray();
+                var values = logical.Arguments.Select(argument => EvaluateGuard(argument, context)).ToArray();
                 if (logical.Operator == "and")
                 {
                     if (values.Any(value => value.Status == GuardStatus.Disabled))
@@ -163,7 +187,7 @@ public static class TransitionEvaluator
                 return new GuardResult(GuardStatus.Disabled, "logical-or-false", "Every operand of 'or' is false.");
 
             case GuardExpression.Negation negation:
-                var inner = EvaluateGuard(negation.Argument, facts);
+                var inner = EvaluateGuard(negation.Argument, context);
                 return inner.Status switch
                 {
                     GuardStatus.Enabled => new GuardResult(GuardStatus.Disabled, "logical-not-false", "The operand of 'not' is true."),

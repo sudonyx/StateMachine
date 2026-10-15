@@ -130,7 +130,14 @@ public sealed class MachineStore(MachineDbContext db)
         return ToDetails(record);
     }
 
-    public async Task<SubmissionResult> SubmitEventAsync(string instanceId, string eventName, DateTimeOffset now, CancellationToken cancellationToken)
+    public async Task<SubmissionResult> SubmitEventAsync(
+        string instanceId,
+        string eventName,
+        DateTimeOffset now,
+        CancellationToken cancellationToken,
+        IReadOnlyDictionary<string, FactValue>? attemptFacts = null,
+        ExternalDecisionEvidence? decisionEvidence = null,
+        IReadOnlyDictionary<string, string>? attemptFactProvenance = null)
     {
         InstanceGate gate;
         lock (InstanceLocksSync)
@@ -155,11 +162,24 @@ public sealed class MachineStore(MachineDbContext db)
                 ?? throw new InvalidOperationException($"The registered definition for instance '{instanceId}' is missing.");
             var definition = MachineDefinitionLoader.Load(definitionRecord.DefinitionJson);
             var facts = DeserializeFacts(instance.FactsJson);
-            var evaluation = TransitionEvaluator.Evaluate(definition, instance.CurrentState, eventName, facts);
+            var context = TransitionEvaluationContext.Create(facts, attemptFacts, decisionEvidence, attemptFactProvenance);
+            var evaluation = TransitionEvaluator.Evaluate(definition, instance.CurrentState, eventName, context);
             var attemptId = Guid.NewGuid().ToString("N");
             var revisionBefore = instance.Revision;
             var revisionAfter = evaluation.Status == EvaluationStatus.Accepted ? checked(revisionBefore + 1) : revisionBefore;
-            var attempt = CreateAttempt(attemptId, instanceId, eventName, now, evaluation, revisionBefore, revisionAfter);
+            var attempt = CreateAttempt(
+                attemptId,
+                instanceId,
+                eventName,
+                now,
+                evaluation,
+                context,
+                instance.DefinitionId,
+                instance.DefinitionVersion,
+                revisionBefore,
+                revisionAfter,
+                evaluation.Status == EvaluationStatus.Accepted ? evaluation.TargetState! : instance.CurrentState,
+                evaluation.Status == EvaluationStatus.Accepted ? "Committed" : "NoChange");
 
             if (evaluation.Status == EvaluationStatus.Accepted)
             {
@@ -176,6 +196,10 @@ public sealed class MachineStore(MachineDbContext db)
                     attempt.RevisionAfter = revisionBefore;
                     attempt.ReasonCode = "concurrency-conflict";
                     attempt.Explanation = "The instance changed while this event was being evaluated.";
+                    SetEvidence(attempt, CreateEvidence(
+                        instance.DefinitionId, instance.DefinitionVersion, instanceId, revisionBefore,
+                        eventName, now, context, evaluation, instance.CurrentState, "ConcurrencyConflict",
+                        "concurrency-conflict"));
                     db.InputAttempts.Add(attempt);
                     await db.SaveChangesAsync(cancellationToken);
                     await transaction.CommitAsync(cancellationToken);
@@ -273,9 +297,15 @@ public sealed class MachineStore(MachineDbContext db)
         string eventName,
         DateTimeOffset now,
         TransitionEvaluation evaluation,
+        TransitionEvaluationContext context,
+        string definitionId,
+        string definitionVersion,
         long revisionBefore,
-        long revisionAfter) =>
-        new()
+        long revisionAfter,
+        string resultingState,
+        string commitStatus)
+    {
+        var attempt = new InputAttemptRecord
         {
             Id = id,
             InstanceId = instanceId,
@@ -289,8 +319,55 @@ public sealed class MachineStore(MachineDbContext db)
             RevisionAfter = revisionAfter,
             ReasonCode = evaluation.ReasonCode,
             Explanation = evaluation.Explanation,
-            GuardFindingsJson = JsonSerializer.Serialize(evaluation.GuardFindings, StoredJsonOptions)
+            GuardFindingsJson = JsonSerializer.Serialize(evaluation.GuardFindings, StoredJsonOptions),
+            EvaluationEvidenceJson = "{}",
+            EvaluationEvidenceDigest = string.Empty
         };
+        SetEvidence(attempt, CreateEvidence(
+            definitionId, definitionVersion, instanceId, revisionBefore, eventName, now, context, evaluation,
+            resultingState, commitStatus, evaluation.ReasonCode));
+        return attempt;
+    }
+
+    private static TransitionEvaluationEvidence CreateEvidence(
+        string definitionId,
+        string definitionVersion,
+        string instanceId,
+        long revision,
+        string eventName,
+        DateTimeOffset now,
+        TransitionEvaluationContext context,
+        TransitionEvaluation evaluation,
+        string resultingState,
+        string commitStatus,
+        string reasonCode) =>
+        new(
+            definitionId,
+            definitionVersion,
+            instanceId,
+            revision,
+            eventName,
+            now,
+            context.InstanceFacts,
+            context.AttemptFacts,
+            context.AttemptFactProvenance,
+            context.ResolvedFacts,
+            context.UnresolvedFacts,
+            context.DecisionEvidence,
+            evaluation.GuardFindings,
+            commitStatus,
+            evaluation.Status,
+            evaluation.TransitionId,
+            reasonCode,
+            evaluation.PreviousState,
+            resultingState);
+
+    private static void SetEvidence(InputAttemptRecord attempt, TransitionEvaluationEvidence evidence)
+    {
+        attempt.EvaluationEvidenceJson = JsonSerializer.Serialize(evidence, StoredJsonOptions);
+        attempt.EvaluationEvidenceDigest = Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(attempt.EvaluationEvidenceJson)));
+    }
 
     private static DefinitionSummary ToSummary(DefinitionRecord record) =>
         new(record.Id, record.Version, record.LanguageVersion, record.ContentDigest, record.RegisteredAt);

@@ -1,0 +1,579 @@
+openapi: 3.1.0
+info:
+  title: Meridian Decision API - Gate 4 Integration
+  version: 1.0.0
+  summary: Decision API contract for durable state-machine guarded transitions.
+  description: |
+    This contract is scoped to the deterministic, layered supplier decision and
+    historical replay operations needed by Gate 4 of the state-machine course.
+    The API evaluates supplier facts against its layered policy rules and returns
+    a decision with evidence and the exact policy-version IDs selected.
+
+    Gate 4 integration requirements:
+    - Call the layered evaluation from a durable workflow activity using a
+      fact snapshot already bound to that transition evaluation.
+    - Persist the complete response (including evaluationId, fact-set digest,
+      temporal context, decision evidence, and selected policy version IDs) in
+      workflow history before using the result to advance state.
+    - Do not call this API from a replayed guard to recompute a historical
+      decision. Use the recorded activity result or the exact historical replay
+      operation for verification.
+    - The layered evaluation creates a new evaluationId for each request. There
+      is no idempotency-key parameter or workflow-state/transition API. Retries
+      must be handled by the caller's durable activity mechanism.
+    - Missing, unavailable, or unknown facts must not be treated as satisfied;
+      inspect the returned rule and fact evidence.
+    - The fact-acquisition endpoint is intentionally excluded: external live
+      acquisition is not a deterministic guard input boundary.
+servers:
+  - url: http://localhost:5267
+    description: Local development server using the repository's http launch profile.
+tags:
+  - name: Gate 4 decisions
+    description: Deterministic evaluation and verification for guarded transitions.
+  - name: Policy history
+    description: Read-only policy-source and version discovery.
+paths:
+  /supplier-qualifications/layered:
+    post:
+      tags: [Gate 4 decisions]
+      operationId: evaluateLayeredSupplierDecision
+      summary: Evaluate bound supplier facts against layered policy.
+      description: |
+        Evaluates the supplied supplier facts using policy versions selected for
+        businessEffectiveAt and knownAt. Both temporal fields are optional; if
+        omitted, the API derives them from its clock. Gate 4 clients should
+        supply both explicitly for reproducible evaluation. A successful result
+        is also persisted to the API's local historical-decision store.
+      x-gate4-durable-activity: true
+      x-idempotency-supported: false
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SupplierQualificationRequest'
+            example:
+              supplierId: SUP-0001
+              supplierCountry: Exampleland
+              countryRiskClassification: Standard
+              supplierCategory: Software
+              annualContractValue: 25000
+              currency: USD
+              handlesPersonalData: false
+              handlesPaymentCardData: false
+              insuranceStatus: Current
+              completeYearsTrading: 5
+              sanctionsScreeningStatus: Clear
+              usesSubcontractors: false
+              businessUnit: Finance
+              requestedPaymentTermsDays: 30
+              customerId: CUSTOMER-001
+              contractId: CONTRACT-001
+              qualificationDate: '2026-10-14'
+              businessEffectiveAt: '2026-10-14'
+              knownAt: '2026-10-14T15:37:00Z'
+      responses:
+        '200':
+          description: Decision evaluation and evidence. Persist this result with the workflow history.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LayeredSupplierDecisionResponse'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /historical-decisions/{evaluationId}/replay:
+    post:
+      tags: [Gate 4 decisions]
+      operationId: replayHistoricalDecision
+      summary: Re-evaluate a persisted decision using its exact stored inputs and policy versions.
+      description: |
+        Replays the evaluation identified by evaluationId using the stored fact
+        snapshot and exact policy-source version IDs. This does not select
+        current policy versions. The response reports whether the reproduced
+        outcome matches the stored outcome and lists detected differences.
+        The local API store must still contain the evaluation.
+      x-gate4-durable-activity: true
+      parameters:
+        - name: evaluationId
+          in: path
+          required: true
+          description: evaluationId returned by the layered evaluation operation.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Reproduced evidence and comparison with the stored evaluation.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HistoricalReplayResult'
+        '500':
+          description: Evaluation is missing from the local store, stored evidence is inconsistent, or replay failed.
+  /policy-sources:
+    get:
+      tags: [Policy history]
+      operationId: listPolicySources
+      summary: List policy sources available to the evaluator.
+      description: Read-only discovery operation; returned sources are not a substitute for the versions recorded with an evaluation.
+      responses:
+        '200':
+          description: Policy sources.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PolicySource'
+        '500':
+          $ref: '#/components/responses/ServerError'
+  /policy-sources/{sourceId}/versions:
+    get:
+      tags: [Policy history]
+      operationId: listPolicySourceVersions
+      summary: List registered versions for one policy source.
+      description: Returns version metadata and digests, not policy source contents or executable rules.
+      parameters:
+        - name: sourceId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Registered version metadata; an unknown source can yield an empty array.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PolicySourceVersionSummary'
+        '500':
+          $ref: '#/components/responses/ServerError'
+components:
+  responses:
+    ServerError:
+      description: An unhandled server-side evaluation or persistence failure. This API does not currently guarantee a standardized error response body.
+  schemas:
+    SupplierQualificationRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        Supplier fact inputs for layered evaluation. All fields are optional and
+        nullable in the current API model; omitted or null facts are not
+        automatically considered satisfied. Date-only fields use YYYY-MM-DD.
+      properties:
+        supplierId: { type: [string, 'null'] }
+        supplierCountry: { type: [string, 'null'] }
+        region: { type: [string, 'null'] }
+        countryRiskClassification:
+          anyOf:
+            - $ref: '#/components/schemas/CountryRiskClassification'
+            - type: 'null'
+        supplierCategory:
+          anyOf:
+            - $ref: '#/components/schemas/SupplierCategory'
+            - type: 'null'
+        annualContractValue: { type: [number, 'null'] }
+        currency: { type: [string, 'null'] }
+        handlesPersonalData: { type: [boolean, 'null'] }
+        isApprovedDataProcessingSupplier: { type: [boolean, 'null'] }
+        handlesPaymentCardData: { type: [boolean, 'null'] }
+        additionalSecurityAssessmentComplete: { type: [boolean, 'null'] }
+        insuranceStatus:
+          anyOf:
+            - $ref: '#/components/schemas/InsuranceStatus'
+            - type: 'null'
+        insuranceLimit: { type: [number, 'null'] }
+        insuranceLimitCurrency: { type: [string, 'null'] }
+        completeYearsTrading: { type: [integer, 'null'], format: int32 }
+        isApprovedPublicSectorBody: { type: [boolean, 'null'] }
+        sanctionsScreeningStatus:
+          anyOf:
+            - $ref: '#/components/schemas/SanctionsScreeningStatus'
+            - type: 'null'
+        usesSubcontractors: { type: [boolean, 'null'] }
+        hasProductionSystemAccess: { type: [boolean, 'null'] }
+        subcontractorsHaveProductionAccess: { type: [boolean, 'null'] }
+        subcontractorProductionAccessApproved: { type: [boolean, 'null'] }
+        businessUnit:
+          anyOf:
+            - $ref: '#/components/schemas/BusinessUnit'
+            - type: 'null'
+        requestedPaymentTermsDays: { type: [integer, 'null'], format: int32 }
+        customerId: { type: [string, 'null'] }
+        contractId: { type: [string, 'null'] }
+        qualificationDate: { type: [string, 'null'], format: date }
+        insuranceEvidenceDate: { type: [string, 'null'], format: date }
+        sanctionsScreeningDate: { type: [string, 'null'], format: date }
+        personalDataEvidenceDate: { type: [string, 'null'], format: date }
+        paymentCardEvidenceDate: { type: [string, 'null'], format: date }
+        businessEffectiveAt:
+          type: [string, 'null']
+          format: date
+          description: Business-effective date used for policy version selection and date expressions.
+        knownAt:
+          type: [string, 'null']
+          format: date-time
+          description: Knowledge cutoff used for policy version selection; provide an explicit UTC timestamp for reproducibility.
+        servicesEntirelyRemote: { type: [boolean, 'null'] }
+        supplierPersonnelAttendMeridianSite: { type: [boolean, 'null'] }
+        operatesInMeridianProduction: { type: [boolean, 'null'] }
+        maintainsSoftwareComponentInformation: { type: [boolean, 'null'] }
+        criticalVulnerabilityRemediationDays: { type: [integer, 'null'], format: int32 }
+        isFinanceCriticalSupplier: { type: [boolean, 'null'] }
+        financeGovernanceReviewComplete: { type: [boolean, 'null'] }
+        isCriticalNorthRegionSite: { type: [boolean, 'null'] }
+        continuityExerciseDate: { type: [string, 'null'], format: date }
+        isBusinessCriticalApolloService: { type: [boolean, 'null'] }
+        apolloTransitionPlanProvided: { type: [boolean, 'null'] }
+        apolloPrivilegedAccessExists: { type: [boolean, 'null'] }
+        apolloPrivilegedAccessReviewDate: { type: [string, 'null'], format: date }
+        securityTestingEvidenceDate: { type: [string, 'null'], format: date }
+        isNorthRegionOperationallyCritical: { type: [boolean, 'null'] }
+        northRegionServiceExpectedOver12Months: { type: [boolean, 'null'] }
+        isNorthRegionOperationalService: { type: [boolean, 'null'] }
+        supplierHostedSoftware: { type: [boolean, 'null'] }
+        criticalVulnerabilityAffectsProduction: { type: [boolean, 'null'] }
+        apolloSupplierRegistered: { type: [boolean, 'null'] }
+        remoteInsuranceExceptionEvidenceDocumented: { type: [boolean, 'null'] }
+        softwareComponentInformationAvailableBeforeProduction: { type: [boolean, 'null'] }
+        apolloSupplierRegisteredDate: { type: [string, 'null'], format: date }
+        contractSignatureDate: { type: [string, 'null'], format: date }
+        serviceCommencementDate: { type: [string, 'null'], format: date }
+        apolloTransitionPlanComplete: { type: [boolean, 'null'] }
+    LayeredSupplierDecisionResponse:
+      type: object
+      required: [evidence, selectedPolicySourceVersionIds]
+      properties:
+        evidence:
+          $ref: '#/components/schemas/DecisionEvidence'
+        selectedPolicySourceVersionIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+    DecisionEvidence:
+      type: object
+      required: [evaluationId, evaluatedAt, factSet, ruleSources, composition, finalDecision, justification, contributingRules, conflicts, unknownFacts, unavailableFacts, validationSummary, engineMetadata, businessEffectiveAt, knownAt, factAcquisition]
+      properties:
+        evaluationId: { type: string, format: uuid }
+        evaluatedAt: { type: string, format: date-time }
+        factSet: { $ref: '#/components/schemas/FactSnapshot' }
+        ruleSources:
+          type: array
+          items: { $ref: '#/components/schemas/DecisionSourceEvidence' }
+        composition: { $ref: '#/components/schemas/DecisionCompositionEvidence' }
+        finalDecision:
+          anyOf:
+            - $ref: '#/components/schemas/LayeredDecision'
+            - type: 'null'
+        justification: { $ref: '#/components/schemas/DecisionJustification' }
+        contributingRules:
+          type: array
+          items: { $ref: '#/components/schemas/DecisionRuleRef' }
+        conflicts:
+          type: array
+          items: { $ref: '#/components/schemas/DecisionConflictEvidence' }
+        unknownFacts:
+          type: array
+          items: { type: string }
+        unavailableFacts:
+          type: array
+          items: { type: string }
+        validationSummary: { $ref: '#/components/schemas/RuleValidationSummary' }
+        engineMetadata: { $ref: '#/components/schemas/EngineMetadata' }
+        businessEffectiveAt: { type: [string, 'null'], format: date }
+        knownAt: { type: [string, 'null'], format: date-time }
+        factAcquisition:
+          anyOf:
+            - $ref: '#/components/schemas/FactAcquisitionEvidence'
+            - type: 'null'
+    FactSnapshot:
+      type: object
+      required: [entries, digestAlgorithm, digest]
+      properties:
+        entries:
+          type: array
+          items: { $ref: '#/components/schemas/FactSnapshotEntry' }
+        digestAlgorithm: { type: string, example: SHA-256 }
+        digest: { type: string, description: SHA-256 hex digest of the canonical fact snapshot. }
+    FactSnapshotEntry:
+      type: object
+      required: [name, type, state, value]
+      properties:
+        name: { type: string }
+        type: { $ref: '#/components/schemas/RuleValueType' }
+        state: { $ref: '#/components/schemas/FactSnapshotState' }
+        value:
+          anyOf:
+            - $ref: '#/components/schemas/RuleValue'
+            - type: 'null'
+    RuleValue:
+      type: object
+      required: [type, stringValue, integerValue, decimalValue, booleanValue, dateValue, stringListValue]
+      description: Value container; the populated value field corresponds to type and other fields may be null.
+      properties:
+        type: { $ref: '#/components/schemas/RuleValueType' }
+        stringValue: { type: [string, 'null'] }
+        integerValue: { type: [integer, 'null'], format: int64 }
+        decimalValue: { type: [number, 'null'] }
+        booleanValue: { type: [boolean, 'null'] }
+        dateValue: { type: [string, 'null'], format: date }
+        stringListValue:
+          type: [array, 'null']
+          items: { type: string }
+    DecisionSourceEvidence:
+      type: object
+      required: [sourceId, sourceName, sourceKind, languageVersion, digestAlgorithm, digest, applicability, applicabilityEvidence, rules, policySourceVersionId, versionNumber, recordedAt, effectiveFrom, effectiveTo, policySourceDigest, executableRuleDigest]
+      properties:
+        sourceId: { type: string }
+        sourceName: { type: string }
+        sourceKind: { type: string }
+        languageVersion: { type: string }
+        digestAlgorithm: { type: string }
+        digest: { type: string }
+        applicability: { $ref: '#/components/schemas/ApplicabilityState' }
+        applicabilityEvidence:
+          anyOf:
+            - $ref: '#/components/schemas/ExpressionEvaluation'
+            - type: 'null'
+        rules:
+          type: array
+          items: { $ref: '#/components/schemas/DecisionRuleEvidence' }
+        policySourceVersionId: { type: [string, 'null'], format: uuid }
+        versionNumber: { type: [integer, 'null'], format: int32 }
+        recordedAt: { type: [string, 'null'], format: date-time }
+        effectiveFrom: { type: [string, 'null'], format: date }
+        effectiveTo: { type: [string, 'null'], format: date }
+        policySourceDigest: { type: [string, 'null'] }
+        executableRuleDigest: { type: [string, 'null'] }
+    DecisionRuleEvidence:
+      type: object
+      required: [sourceId, sourceName, ruleId, clauseReference, description, requirementSubject, compositionMode, applicability, requirementState, conditionResult, consequence, consequenceContributed, factsConsumed, applicabilityMissingFacts, applicabilityUnavailableFacts, applicabilityUnknownFacts, missingFacts, unavailableFacts, unknownFacts, policySourceVersionId, ruleVersionIdentity]
+      properties:
+        sourceId: { type: string }
+        sourceName: { type: string }
+        ruleId: { type: string }
+        clauseReference: { type: string }
+        description: { type: string }
+        requirementSubject: { type: [string, 'null'] }
+        compositionMode: { $ref: '#/components/schemas/CompositionMode' }
+        applicability: { $ref: '#/components/schemas/ApplicabilityState' }
+        requirementState: { $ref: '#/components/schemas/RequirementState' }
+        conditionResult:
+          anyOf:
+            - $ref: '#/components/schemas/TruthValue'
+            - type: 'null'
+        consequence:
+          anyOf:
+            - $ref: '#/components/schemas/RuleConsequence'
+            - type: 'null'
+        consequenceContributed: { type: boolean }
+        factsConsumed: { type: array, items: { type: string } }
+        applicabilityMissingFacts: { type: array, items: { type: string } }
+        applicabilityUnavailableFacts: { type: array, items: { type: string } }
+        applicabilityUnknownFacts: { type: array, items: { type: string } }
+        missingFacts: { type: array, items: { type: string } }
+        unavailableFacts: { type: array, items: { type: string } }
+        unknownFacts: { type: array, items: { type: string } }
+        policySourceVersionId: { type: [string, 'null'], format: uuid }
+        ruleVersionIdentity:
+          anyOf:
+            - $ref: '#/components/schemas/RuleVersionIdentity'
+            - type: 'null'
+    DecisionCompositionEvidence:
+      type: object
+      required: [effectiveRequirements, replacedOrSuppressedRequirements, conflicts, businessDecision, compositionState]
+      properties:
+        effectiveRequirements: { type: array, items: { $ref: '#/components/schemas/DecisionRuleRef' } }
+        replacedOrSuppressedRequirements: { type: array, items: { $ref: '#/components/schemas/DecisionRuleRef' } }
+        conflicts: { type: array, items: { $ref: '#/components/schemas/DecisionConflictEvidence' } }
+        businessDecision:
+          anyOf:
+            - $ref: '#/components/schemas/LayeredDecision'
+            - type: 'null'
+        compositionState: { type: string }
+    DecisionJustification:
+      type: object
+      required: [compositionState, businessDecision, contributingRules, conflicts, unresolvedRules]
+      properties:
+        compositionState: { type: string }
+        businessDecision:
+          anyOf:
+            - $ref: '#/components/schemas/LayeredDecision'
+            - type: 'null'
+        contributingRules: { type: array, items: { $ref: '#/components/schemas/DecisionRuleRef' } }
+        conflicts: { type: array, items: { $ref: '#/components/schemas/DecisionConflictEvidence' } }
+        unresolvedRules: { type: array, items: { $ref: '#/components/schemas/DecisionRuleRef' } }
+    DecisionRuleRef:
+      type: object
+      required: [sourceId, ruleId, clauseReference]
+      properties:
+        sourceId: { type: string }
+        ruleId: { type: string }
+        clauseReference: { type: string }
+    DecisionConflictEvidence:
+      type: object
+      required: [subject, conflictType, rules, explanation]
+      properties:
+        subject: { type: string }
+        conflictType: { $ref: '#/components/schemas/ConflictType' }
+        rules: { type: array, items: { $ref: '#/components/schemas/DecisionRuleRef' } }
+        explanation: { type: string }
+    ExpressionEvaluation:
+      type: object
+      required: [result, missingFacts, unavailableFacts, unknownFacts, diagnostics, factsConsumed]
+      properties:
+        result: { $ref: '#/components/schemas/TruthValue' }
+        missingFacts: { type: array, items: { type: string } }
+        unavailableFacts: { type: array, items: { type: string } }
+        unknownFacts: { type: array, items: { type: string } }
+        diagnostics: { type: array, items: { type: string } }
+        factsConsumed: { type: array, items: { type: string } }
+    RuleValidationSummary:
+      type: object
+      required: [validatedSourceCount, validatedRuleCount, invalidSourceCount, invalidRuleCount, unsupportedSourceCount, unsupportedRuleCount]
+      properties:
+        validatedSourceCount: { type: integer, format: int32 }
+        validatedRuleCount: { type: integer, format: int32 }
+        invalidSourceCount: { type: integer, format: int32 }
+        invalidRuleCount: { type: integer, format: int32 }
+        unsupportedSourceCount: { type: integer, format: int32 }
+        unsupportedRuleCount: { type: integer, format: int32 }
+    EngineMetadata:
+      type: object
+      required: [engineName, engineVersion, ruleLanguageVersions]
+      properties:
+        engineName: { type: string }
+        engineVersion: { type: string }
+        ruleLanguageVersions: { type: array, items: { type: string } }
+    RuleVersionIdentity:
+      type: object
+      required: [policySourceVersionId, ruleId]
+      properties:
+        policySourceVersionId: { type: string, format: uuid }
+        ruleId: { type: string }
+    FactAcquisitionEvidence:
+      type: object
+      required: [acquisitionId, acquiredAt, acquiredFactSetDigest, harnessExecutions, factProvenance, mappingDiagnostics, suppliedFactNames]
+      properties:
+        acquisitionId: { type: string, format: uuid }
+        acquiredAt: { type: string, format: date-time }
+        acquiredFactSetDigest: { type: string }
+        harnessExecutions: { type: array, items: { $ref: '#/components/schemas/HarnessExecutionEvidence' } }
+        factProvenance: { type: array, items: { $ref: '#/components/schemas/AcquiredFactProvenance' } }
+        mappingDiagnostics: { type: array, items: { type: string } }
+        suppliedFactNames:
+          type: [array, 'null']
+          items: { type: string }
+    HarnessExecutionEvidence:
+      type: object
+      required: [harnessExecutionId, providerId, apiDescriptionVersionId, operationKey, executionState, requestedAt, completedAt, sourceResponseDigest, harnessEvidenceIds]
+      properties:
+        harnessExecutionId: { type: string, format: uuid }
+        providerId: { type: string, format: uuid }
+        apiDescriptionVersionId: { type: string, format: uuid }
+        operationKey: { type: string }
+        executionState: { type: string }
+        requestedAt: { type: string, format: date-time }
+        completedAt: { type: [string, 'null'], format: date-time }
+        sourceResponseDigest: { type: [string, 'null'] }
+        harnessEvidenceIds: { type: [array, 'null'], items: { type: string, format: uuid } }
+    AcquiredFactProvenance:
+      type: object
+      required: [targetFactName, type, state, value, providerId, apiDescriptionVersionId, operationKey, harnessExecutionId, acquiredAt, observedAt, validUntil, sourceResponseDigest, diagnostic]
+      properties:
+        targetFactName: { type: string }
+        type: { $ref: '#/components/schemas/RuleValueType' }
+        state: { $ref: '#/components/schemas/AcquiredFactState' }
+        value:
+          anyOf:
+            - $ref: '#/components/schemas/RuleValue'
+            - type: 'null'
+        providerId: { type: string, format: uuid }
+        apiDescriptionVersionId: { type: string, format: uuid }
+        operationKey: { type: string }
+        harnessExecutionId: { type: [string, 'null'], format: uuid }
+        acquiredAt: { type: string, format: date-time }
+        observedAt: { type: [string, 'null'], format: date-time }
+        validUntil: { type: [string, 'null'], format: date-time }
+        sourceResponseDigest: { type: [string, 'null'] }
+        diagnostic: { type: [string, 'null'] }
+    HistoricalReplayResult:
+      type: object
+      required: [evaluationId, reproducedEvidence, matchesStoredOutcome, differences]
+      properties:
+        evaluationId: { type: string, format: uuid }
+        reproducedEvidence: { $ref: '#/components/schemas/DecisionEvidence' }
+        matchesStoredOutcome: { type: boolean }
+        differences: { type: array, items: { type: string } }
+    PolicySource:
+      type: object
+      required: [sourceId, name, kind]
+      properties:
+        sourceId: { type: string }
+        name: { type: string }
+        kind: { type: string }
+    PolicySourceVersionSummary:
+      type: object
+      required: [versionId, sourceId, versionNumber, recordedAt, announcedAt, discoveredAt, effectiveFrom, effectiveTo, supersedesVersionId, sourceDigest, ruleDigest, retiredRuleIds]
+      properties:
+        versionId: { type: string, format: uuid }
+        sourceId: { type: string }
+        versionNumber: { type: integer, format: int32 }
+        recordedAt: { type: string, format: date-time }
+        announcedAt: { type: [string, 'null'], format: date-time }
+        discoveredAt: { type: [string, 'null'], format: date-time }
+        effectiveFrom: { type: string, format: date }
+        effectiveTo: { type: [string, 'null'], format: date }
+        supersedesVersionId: { type: [string, 'null'], format: uuid }
+        sourceDigest: { type: string }
+        ruleDigest: { type: string }
+        retiredRuleIds: { type: [array, 'null'], items: { type: string } }
+    CountryRiskClassification:
+      type: string
+      enum: [Standard, EnhancedReview, Restricted]
+    SupplierCategory:
+      type: string
+      enum: [Software, Facilities, ProfessionalServices, Other]
+    InsuranceStatus:
+      type: string
+      enum: [Current, NoBusinessInsurance]
+    SanctionsScreeningStatus:
+      type: string
+      enum: [Pending, Clear, ConfirmedAdverseMatch]
+    BusinessUnit:
+      type: string
+      enum: [Finance, InternalServices, Commercial, Operations, Other]
+    LayeredDecision:
+      type: string
+      enum: [Proceed, Review, Blocked]
+    ApplicabilityState:
+      type: string
+      enum: [Applicable, NotApplicable, Unknown]
+    RequirementState:
+      type: string
+      enum: [Satisfied, Breached, Unresolved, NotEvaluated]
+    CompositionMode:
+      type: string
+      enum: [Independent, Narrowing, Replacement, Exception, Permission, Prohibition]
+    RuleConsequence:
+      type: string
+      enum: [Review, Blocked]
+    TruthValue:
+      type: string
+      enum: [False, True, Unknown]
+    ConflictType:
+      type: string
+      enum: [ContradictoryRequirements, UnauthorisedWeakening, EqualStandingConflict]
+    RuleValueType:
+      type: string
+      enum: [String, Integer, Decimal, Boolean, Date, StringList]
+    FactSnapshotState:
+      type: string
+      enum: [Present, Missing, Unavailable, Unknown]
+    AcquiredFactState:
+      type: string
+      enum: [Present, Stale, Missing, Unavailable, Unknown]

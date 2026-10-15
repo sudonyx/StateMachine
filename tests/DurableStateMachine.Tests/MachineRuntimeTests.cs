@@ -57,12 +57,12 @@ public sealed class MachineRuntimeTests
         runtime.Register(definition);
 
         runtime.Create("happy", definition.Id, definition.Version,
-            TestSupport.Facts(("documentsComplete", FactValue.From(true)), ("riskScore", FactValue.From(75m)), ("equipmentValue", FactValue.From(50000m)), ("checksComplete", FactValue.From(true)), ("eligible", FactValue.From(true))));
+            TestSupport.Facts(("documentsComplete", FactValue.From(true)), ("riskScore", FactValue.From(75m)), ("equipmentValue", FactValue.From(50000m)), ("checksComplete", FactValue.From(true)), ("eligibilityDecision", FactValue.From("Eligible"))));
         Assert.Equal("AssessmentReady", runtime.Send("happy", "Submit").Instance.CurrentState);
         Assert.Equal("Approved", runtime.Send("happy", "Approve").Instance.CurrentState);
 
         runtime.Create("review", definition.Id, definition.Version,
-            TestSupport.Facts(("documentsComplete", FactValue.From(true)), ("riskScore", FactValue.From(50m)), ("equipmentValue", FactValue.From(50000m)), ("checksComplete", FactValue.From(true)), ("reviewerJustification", FactValue.From("reviewed"))));
+            TestSupport.Facts(("documentsComplete", FactValue.From(true)), ("riskScore", FactValue.From(50m)), ("equipmentValue", FactValue.From(50000m)), ("checksComplete", FactValue.From(true)), ("manualReviewComplete", FactValue.From(true)), ("reviewerJustification", FactValue.From("reviewed"))));
         Assert.Equal("ManualReview", runtime.Send("review", "Submit").Instance.CurrentState);
         Assert.Equal("Approved", runtime.Send("review", "Approve").Instance.CurrentState);
 
@@ -72,7 +72,9 @@ public sealed class MachineRuntimeTests
         Assert.Equal(EvaluationStatus.Rejected, runtime.Send("rejected", "Cancel").Evaluation.Status);
 
         runtime.Create("cancelled", definition.Id, definition.Version);
-        Assert.Equal("Cancelled", runtime.Send("cancelled", "Cancel").Instance.CurrentState);
+        Assert.Equal(EvaluationStatus.Unresolved, runtime.Send("cancelled", "Cancel").Evaluation.Status);
+        Assert.Equal("Cancelled", runtime.Send("cancelled", "Cancel",
+            TestSupport.Facts(("cancellationPermitted", FactValue.From(true)))).Instance.CurrentState);
     }
 
     [Fact]
@@ -101,5 +103,64 @@ public sealed class MachineRuntimeTests
         Assert.Throws<InvalidOperationException>(() => runtime.Register(definition));
         Assert.Throws<KeyNotFoundException>(() => runtime.Create("missing", "unknown", "1"));
         Assert.Throws<KeyNotFoundException>(() => runtime.GetInstance("missing"));
+    }
+
+    [Fact]
+    public void Per_attempt_facts_are_immutable_evaluation_inputs_and_never_change_instance_facts()
+    {
+        var definition = MachineDefinitionLoader.Load(TestSupport.MinimalDefinition(
+            """{ "id": "go", "source": "A", "event": "Go", "target": "B", "guard": { "op": "eq", "fact": "approved", "value": true } }"""));
+        var runtime = new MachineRuntime();
+        runtime.Register(definition);
+        var created = runtime.Create("context", definition.Id, definition.Version,
+            TestSupport.Facts(("owner", FactValue.From("team-a"))));
+
+        var result = runtime.Send("context", "Go",
+            TestSupport.Facts(("approved", FactValue.From(true))));
+
+        Assert.Equal(EvaluationStatus.Accepted, result.Evaluation.Status);
+        Assert.Equal("B", result.Instance.CurrentState);
+        Assert.Equal(TestSupport.Facts(("owner", FactValue.From("team-a"))), created.Facts);
+        Assert.Equal(TestSupport.Facts(("owner", FactValue.From("team-a"))), runtime.GetInstance("context").Facts);
+        Assert.Throws<ArgumentException>(() => runtime.Send("context", "Go",
+            TestSupport.Facts(("owner", FactValue.From("different")))));
+    }
+
+    [Fact]
+    public void Orion_offer_validity_and_cancellation_use_explicit_evaluation_facts()
+    {
+        var definition = TestSupport.LoadWorkflow("orion-v1.json");
+        var runtime = new MachineRuntime();
+        runtime.Register(definition);
+        runtime.Create("offer", definition.Id, definition.Version,
+            TestSupport.Facts(
+                ("documentsComplete", FactValue.From(true)),
+                ("riskScore", FactValue.From(75m)),
+                ("equipmentValue", FactValue.From(50000m)),
+                ("checksComplete", FactValue.From(true)),
+                ("eligibilityDecision", FactValue.From("Eligible"))));
+        runtime.Create("cancel", definition.Id, definition.Version);
+
+        Assert.Equal("AssessmentReady", runtime.Send("offer", "Submit").Instance.CurrentState);
+        Assert.Equal("AwaitingOfferAcceptance", runtime.Send("offer", "IssueOffer").Instance.CurrentState);
+        Assert.Equal(EvaluationStatus.Rejected, runtime.Send("offer", "AcceptOffer",
+            TestSupport.Facts(("offerValidAtEvaluation", FactValue.From(true)))).Evaluation.Status);
+        Assert.Equal("Approved", runtime.Send("offer", "AcceptOffer",
+            TestSupport.Facts(
+                ("offerValidAtEvaluation", FactValue.From(true)),
+                ("offerEvaluationTime", FactValue.From("2026-10-14T15:37:00Z"))),
+            decisionEvidence: null,
+            attemptFactProvenance: new Dictionary<string, string>
+            {
+                ["offerValidAtEvaluation"] = "bound from trusted offer check",
+                ["offerEvaluationTime"] = "explicit evaluation timestamp"
+            }).Instance.CurrentState);
+
+        Assert.Equal(EvaluationStatus.Unresolved, runtime.Send("cancel", "Cancel").Evaluation.Status);
+        Assert.Equal(EvaluationStatus.Rejected, runtime.Send("cancel", "Cancel",
+            TestSupport.Facts(("cancellationPermitted", FactValue.From(false)))).Evaluation.Status);
+        Assert.Equal("Cancelled", runtime.Send("cancel", "Cancel",
+            TestSupport.Facts(("cancellationPermitted", FactValue.From(true)))).Instance.CurrentState);
+        Assert.DoesNotContain("offerEvaluationTime", runtime.GetInstance("offer").Facts.Keys);
     }
 }

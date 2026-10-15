@@ -61,15 +61,49 @@ Fact values must be scalar strings, numbers, booleans or `null`. The response is
 
 ## Event submission
 
-`POST /api/instances/{id}/events` takes:
+`POST /api/instances/{id}/events` accepts the original event-only shape:
 
 ```json
 { "event": "Submit" }
 ```
 
+It also accepts optional per-evaluation facts, provenance labels for those facts, and a generic external-decision evidence snapshot:
+
+```json
+{
+  "event": "DecisionAvailable",
+  "facts": { "decisionOutcome": "Proceed" },
+  "factsProvenance": {
+    "decisionOutcome": "Mapped from a received decision response; not independently verified."
+  },
+  "decisionEvidence": {
+    "decisionSystemIdentity": "Example deterministic decision system",
+    "externalEvaluationId": "evaluation-123",
+    "outcomeState": "Present",
+    "outcome": "Proceed",
+    "evaluatedAt": "2026-10-14T15:37:02Z",
+    "businessEffectiveAt": "2026-10-14",
+    "knowledgeCutoff": "2026-10-14T15:37:00Z",
+    "inputFactSetDigest": "upstream-digest",
+    "policyVersionIdentities": ["policy-version-1"],
+    "provenance": "Caller supplied; authenticity is not verified.",
+    "originalResponseJson": "{\"evidence\":{\"finalDecision\":\"Proceed\"}}",
+    "missingFacts": [],
+    "unknownFacts": [],
+    "unavailableFacts": []
+  }
+}
+```
+
+`outcomeState` is `Present`, `ExplicitNull`, `Missing`, `Unknown` or `Unavailable`. `outcome` is a scalar fact value; an explicit null is represented by `ExplicitNull` and a JSON `null` outcome. Facts for a single attempt cannot shadow instance facts: any name collision returns `400 Bad Request`. Provenance labels are recorded claims, not authenticated evidence. Existing callers that submit only `event` continue to evaluate against instance facts.
+
+The context is immutable for that evaluation: durable instance facts and attempt facts are resolved without mutation, and only the former remain on the instance. A missing or null comparison remains unresolved. Facts marked unknown or unavailable by attached evidence remain unresolved and retain their classification.
+
 Valid workflow evaluations return `200 OK`, including refusals. This distinguishes a valid request that the workflow rejects from malformed HTTP input. The response envelope includes the persistent `attempt`, resulting `instance` snapshot and an accepted `transition` record (or `null` when none was accepted).
 
-An attempt includes `status` (`Accepted`, `Rejected`, `Ambiguous`, or `Unresolved`), `reasonCode`, `explanation`, `guardFindings`, previous/target state and before/after revisions. A rejected, ambiguous or unresolved attempt has no accepted transition history and leaves the instance state and revision unchanged.
+An attempt includes `status` (`Accepted`, `Rejected`, `Ambiguous`, or `Unresolved`), `reasonCode`, `explanation`, `guardFindings`, previous/target state and before/after revisions. Gate 4 also exposes `evaluationEvidence` and `evaluationEvidenceDigest`. The evidence snapshot records the exact definition version, instance revision, timestamp, instance/attempt/resolved fact values, per-fact provenance, decision evidence including the complete received response, guard findings, evaluator result, selected transition/refusal, and local commit status. The digest is SHA-256 over the serialized local evidence snapshot; it is not the external decision service's fact-set digest.
+
+A rejected, ambiguous or unresolved attempt has no accepted transition history and leaves the instance state and revision unchanged, while retaining its evaluation evidence.
 
 For example, an event refused in a terminal state is still a successful HTTP operation:
 
@@ -156,7 +190,7 @@ Application errors use `{ "code": "...", "message": "...", "issues": [...] }` wh
 
 | HTTP status | Meaning |
 | --- | --- |
-| `400` | Malformed request, invalid scalar facts, or missing required request values |
+| `400` | Malformed request, invalid scalar facts, missing required request values, unsupported evidence values, or fact-binding collision |
 | `404` | Unknown definition, instance, attempt or history entry |
 | `409` | Immutable definition identity conflict, duplicate instance ID, or concurrency conflict |
 | `422` | Invalid or unsupported machine definition |

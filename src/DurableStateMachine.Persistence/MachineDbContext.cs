@@ -9,6 +9,50 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
     public DbSet<InputAttemptRecord> InputAttempts => Set<InputAttemptRecord>();
     public DbSet<TransitionHistoryRecord> TransitionHistory => Set<TransitionHistoryRecord>();
 
+    public async Task EnsureGate4SchemaAsync(CancellationToken cancellationToken = default)
+    {
+        var connection = Database.GetDbConnection();
+        var closeWhenDone = connection.State != System.Data.ConnectionState.Open;
+        if (closeWhenDone)
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+
+        try
+        {
+            var columns = new HashSet<string>(StringComparer.Ordinal);
+            await using (var inspect = connection.CreateCommand())
+            {
+                inspect.CommandText = "PRAGMA table_info('InputAttempts')";
+                await using var reader = await inspect.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    columns.Add(reader.GetString(1));
+                }
+            }
+
+            if (!columns.Contains(nameof(InputAttemptRecord.EvaluationEvidenceJson)))
+            {
+                await using var addEvidence = connection.CreateCommand();
+                addEvidence.CommandText = "ALTER TABLE InputAttempts ADD COLUMN EvaluationEvidenceJson TEXT NOT NULL DEFAULT '{}'";
+                await addEvidence.ExecuteNonQueryAsync(cancellationToken);
+            }
+            if (!columns.Contains(nameof(InputAttemptRecord.EvaluationEvidenceDigest)))
+            {
+                await using var addDigest = connection.CreateCommand();
+                addDigest.CommandText = "ALTER TABLE InputAttempts ADD COLUMN EvaluationEvidenceDigest TEXT NOT NULL DEFAULT ''";
+                await addDigest.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            if (closeWhenDone)
+            {
+                await connection.CloseAsync();
+            }
+        }
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<DefinitionRecord>().HasKey(record => new { record.Id, record.Version });
@@ -68,6 +112,8 @@ public sealed class InputAttemptRecord
     public required string ReasonCode { get; set; }
     public required string Explanation { get; set; }
     public required string GuardFindingsJson { get; set; }
+    public required string EvaluationEvidenceJson { get; set; }
+    public required string EvaluationEvidenceDigest { get; set; }
 }
 
 public sealed class TransitionHistoryRecord

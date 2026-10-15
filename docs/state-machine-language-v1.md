@@ -65,7 +65,11 @@ Logical expressions use three-valued, decisive evaluation:
 - `true OR unresolved` is true; otherwise an unresolved operand makes `or` unresolved.
 - `not unresolved` is unresolved.
 
-Guards read only supplied facts. They cannot read time, call external services, mutate data, or execute code.
+Guards read only the immutable resolved facts supplied for one evaluation. These comprise the instance's long-lived facts and any explicitly submitted per-attempt facts. A per-attempt fact is never merged into or retained as an instance fact. If both sources bind the same name, the evaluation request is refused; attempt facts do not override instance facts.
+
+Missing, explicitly null, unknown and unavailable inputs remain distinct. Missing comparison facts, null comparisons and incompatible types are unresolved rather than false. Where decision evidence identifies a fact as unknown or unavailable, a comparison remains unresolved with that specific finding. Presence checks distinguish a known missing fact from null; unknown or unavailable facts do not become a false presence result.
+
+Guards cannot read time, call external services, mutate data, or execute code. Time-sensitive facts such as offer validity must be calculated before submission and bound explicitly, with their evaluation time preserved as evidence. External business decisions are ordinary bound data to the generic runtime; decision-system-specific interpretation stays outside Core.
 
 ## Transition selection
 
@@ -77,3 +81,5 @@ The evaluator first refuses unknown current states, terminal states and undeclar
 4. Exactly one enabled transition and no unresolved guard is `Accepted`.
 
 Definition order never breaks ties. Results include the prior state, event, selected transition and target when accepted, guard findings, a reason code, and an explanation. Rejected, ambiguous and unresolved results do not change an instance.
+
+The definition format and language version remain `1.0`; Gate 4 extends the event-submission context, not the JSON definition grammar.

@@ -1,6 +1,6 @@
 # Durable State Machine
 
-A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 3 adds a SQLite-backed API and two independent HTTP clients while preserving the Gate 2 deterministic evaluator.
+A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 4 adds immutable per-evaluation facts, recorded decision evidence and an independent Meridian HTTP integration while preserving the earlier evaluator and persistence semantics.
 
 ## Requirements, build and tests
 
@@ -18,6 +18,7 @@ dotnet test DurableStateMachine.slnx
 - `src/DurableStateMachine.Api/` — HTTP endpoints, DTOs, error mapping and OpenAPI document.
 - `clients/DurableStateMachine.Cli/` — generic command-line HTTP client.
 - `clients/DurableStateMachine.OrionClient/` — Orion scenario using the HTTP contract only.
+- `clients/DurableStateMachine.MeridianClient/` — independent live HTTP demonstration of a Meridian decision bound to a generic workflow event.
 - `tests/DurableStateMachine.Tests/` — Gate 2 regression tests and SQLite-backed HTTP integration tests.
 - `definitions/` — Orion and document-review examples.
 - `docs/` — supported language, API and design documentation.
@@ -64,10 +65,24 @@ With the API running:
 dotnet run --project clients\DurableStateMachine.OrionClient -- definitions\orion-v1.json
 ```
 
-The client registers or reuses Orion definition version 1.0, creates an instance with synthetic facts, submits `Submit` and `Approve`, then submits `Cancel` from a terminal state to show a recorded rejection. It retrieves current state, attempts and accepted history through HTTP.
+The client registers or reuses Orion definition version 1.0, creates an instance with synthetic facts, submits guarded document/eligibility and offer events, then submits `Cancel` from a terminal state to show a recorded rejection. It retrieves current state, attempts and accepted history through HTTP.
+
+## Gate 4 fact-binding and Meridian demonstration
+
+Event submissions may provide additional typed `facts` for that evaluation only. They are never merged into durable instance facts, and a per-attempt fact name that collides with an instance fact is rejected. Optional `factsProvenance` labels and generic `decisionEvidence` are preserved with the attempt; caller-supplied provenance is not proof of authenticity. The exact context, findings, decision evidence, result and a local evidence digest can be inspected at the attempt endpoints.
+
+The new [Meridian supplier definition](./definitions/meridian-supplier-qualification-v1.json) exercises the same generic evaluator as Orion and Document Review. The standalone client calls the actual Meridian HTTP endpoint, explicitly supplies its temporal context, submits the result to the state-machine API, inspects persisted evidence, and explicitly invokes historical decision replay:
+
+```powershell
+$env:MERIDIAN_DECISION_API_URL = "http://localhost:5267"
+$env:DURABLE_STATE_MACHINE_API_URL = "http://localhost:5000"
+dotnet run --project clients\DurableStateMachine.MeridianClient
+```
+
+Start both services first. See [gate-4-meridian-integration.md](./docs/gate-4-meridian-integration.md) for configuration, live verification and retry limitations, and [gate-4-design.md](./docs/gate-4-design.md) for evidence and binding semantics. Controlled HTTP contract tests do not count as live service verification.
 
 ## Semantics and limitations
 
-Definitions are immutable by `(id, version)`; new versions coexist. Instances remain bound to the exact version used at creation, with facts fixed for their lifetime. Each event attempt (including rejected, ambiguous and unresolved evaluations) is stored separately from accepted transition history. Accepted state, revision, attempt and transition history commit in one SQLite transaction. The HTTP service serializes same-instance submissions within one process and checks the persisted revision during updates.
+Definitions are immutable by `(id, version)`; new versions coexist. Instances remain bound to the exact version used at creation, with their instance facts fixed for their lifetime. Explicit per-attempt facts are immutable evaluation-only inputs and never mutate those facts. Each event attempt (including rejected, ambiguous and unresolved evaluations) is stored separately from accepted transition history, together with a complete evaluation-evidence snapshot. Accepted state, revision, attempt, evidence and transition history commit in one SQLite transaction. The HTTP service serializes same-instance submissions within one process and checks the persisted revision during updates.
 
-This gate does not implement mutable facts, timers, external effects, a scheduler, retries, exactly-once delivery, input deduplication, replay, migrations, distributed locking, authentication, or hierarchical/parallel statecharts. The current supported runtime has no pending time-based or external work. See [gate-3-design.md](./docs/gate-3-design.md) for transaction boundaries, concurrency limits and deferred work.
+Gate 4's Meridian client is a demonstration adapter, not a durable external-activity subsystem. There is no atomic transaction spanning Meridian and local SQLite, and a retried Meridian request creates a new evaluation. Generic durable external effects, automatic retries, exactly-once delivery, input deduplication, timers, full replay, migrations, distributed locking, authentication, and hierarchical/parallel statecharts are not implemented. The runtime has no pending time-based or external work. See [gate-3-design.md](./docs/gate-3-design.md) for the existing transaction/concurrency boundaries and [gate-4-design.md](./docs/gate-4-design.md) for Gate 4's additional limits.
