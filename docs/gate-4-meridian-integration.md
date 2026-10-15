@@ -10,6 +10,10 @@ The standalone client uses:
 - `--business-effective-at YYYY-MM-DD` — explicit effective date; defaults to today's UTC date.
 - `--known-at ISO-8601` — explicit knowledge cutoff; defaults to the current UTC timestamp.
 - `--decision-url URL` and `--workflow-url URL` — per-run URL overrides.
+- `--assessment-file PATH` — saved assessment envelope; defaults to `meridian-assessment.json`.
+- `--assessment-id ID` and `--idempotency-key KEY` — set the identity for a new assessment.
+- `--verify-conflict` — send a deliberately changed request with the saved key and verify the API rejects it.
+- `--decision-only` — verify the decision API without submitting a workflow event.
 
 The Meridian routes and request/response types are specified by [`../references/gate4-decision-api.openapi.yaml`](../references/gate4-decision-api.openapi.yaml). Start the Meridian API using its repository's documented launch instructions and confirm that the configured base URL serves that contract. The integration client does not start or emulate Meridian.
 
@@ -29,7 +33,17 @@ $env:DURABLE_STATE_MACHINE_API_URL = "http://localhost:5000"
 dotnet run --project clients\DurableStateMachine.MeridianClient
 ```
 
-The command makes a real `POST /supplier-qualifications/layered` request. It supplies `businessEffectiveAt` and `knownAt` explicitly. It does not retry the request because each successful call creates a new evaluation ID and the contract offers no idempotency key.
+Before contacting Meridian, the client creates a local envelope containing the operation ID, idempotency key and exact request JSON. By default it reuses `meridian-assessment.json` on later invocations; retain that file to retry an uncertain call. A new assessment requires a new `--assessment-file` path and therefore a new operation identity/key. The client also re-sends the same key and request after a completed response and verifies that Meridian returns the original evaluation ID and response.
+
+The supplied contract accepts an optional `Idempotency-Key` of 1-128 ASCII characters from `[A-Za-z0-9._~-]`. For keyed calls, `businessEffectiveAt` and `knownAt` must be explicit. A same-key/same-request repeat returns the original evaluation; a different request under that key is a conflict. An HTTP 409 with `Retry-After` is reported as in progress and does not submit a workflow event. A timeout, lost response, malformed success response or server error is an uncertain outcome: invoke the client again with the same saved envelope rather than creating a new key. A conflict without `Retry-After` is surfaced as a key/request conflict, not treated as success.
+
+For example, verify the service's changed-payload conflict behavior without creating a workflow instance:
+
+```powershell
+dotnet run --project clients\DurableStateMachine.MeridianClient -- --assessment-file .\meridian-assessment.json --verify-conflict --decision-only
+```
+
+Do not change the saved request, temporal inputs or key to resolve an uncertain result. To intentionally reassess, use a new envelope path and a new operation/key. The envelope is local retry input, not a general activity journal or distributed guarantee; preserve it on a persistent filesystem and do not treat a missing/corrupt file as proof that Meridian did not process the request.
 
 ## Mapping and persisted evidence
 
@@ -43,12 +57,12 @@ The demo checks the attempt response, retrieves persisted attempts and accepted 
 
 ## Tests and live-verification distinction
 
-`MeridianAdapterTests` uses controlled HTTP responses. It verifies contract field parsing, outcome mapping, explicit null handling, temporal request fields, response preservation and that a failed/non-idempotent request is not retried. These are **Meridian contract tests**, not evidence that a live Meridian service was reached.
+`MeridianAdapterTests` uses controlled HTTP responses. It verifies key validation and transmission, explicit temporal inputs, exact saved request reuse, repeat response identity, conflict and in-progress handling, uncertain transport/server/malformed-response outcomes, explicit null handling and envelope reload behavior. These are **Meridian contract tests**, not evidence that a live Meridian service was reached.
 
 The console integration above is the **live end-to-end demonstration**. Its output is meaningful only when both APIs are available and the decision API retains the new evaluation for historical replay. A connection failure, non-success status, malformed response or failed historical lookup is reported as an error; it is not reported as a successful live verification.
 
 ## Retry, crash-window and troubleshooting limitations
 
-There is no atomic transaction spanning Meridian and the local SQLite database. Meridian may persist a decision before the client receives the HTTP response. A lost response leaves the caller uncertain; repeating the layered request may create a second evaluation. Gate 4 intentionally supplies no automatic retry, idempotency mechanism, durable external scheduler or reconciliation workflow.
+There is no atomic transaction spanning Meridian and the local SQLite database. Meridian's HTTP idempotency key supports deliberate same-key/same-payload retries for that API operation only, and the local envelope preserves the retry identity across client-process restarts. It does not deduplicate state-machine events, coordinate different client filesystems or replicas, or provide automatic retries, a durable external scheduler, or reconciliation. A lost or malformed response therefore remains uncertain until the caller retries with the same saved envelope or reconciles through the decision service.
 
 If the decision API is unavailable, verify its URL and health/OpenAPI endpoint, then rerun the client only after deciding how to reconcile any request whose response may have been lost. If the workflow API is unavailable after a decision was received, retain that response and evaluation ID for inspection; do not assume a new layered evaluation is equivalent. Historical replay also fails when the decision API no longer has the evaluation in its local store.

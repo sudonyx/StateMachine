@@ -18,9 +18,10 @@ info:
     - Do not call this API from a replayed guard to recompute a historical
       decision. Use the recorded activity result or the exact historical replay
       operation for verification.
-    - The layered evaluation creates a new evaluationId for each request. There
-      is no idempotency-key parameter or workflow-state/transition API. Retries
-      must be handled by the caller's durable activity mechanism.
+    - The layered evaluation supports an optional Idempotency-Key for durable
+      retry recovery. It does not provide a workflow-state/transition API.
+      Retries of the same logical operation must reuse the same key and exact
+      parsed request; intentional reassessments must use a new key.
     - Missing, unavailable, or unknown facts must not be treated as satisfied;
       inspect the returned rule and fact evidence.
     - The fact-acquisition endpoint is intentionally excluded: external live
@@ -45,8 +46,37 @@ paths:
         omitted, the API derives them from its clock. Gate 4 clients should
         supply both explicitly for reproducible evaluation. A successful result
         is also persisted to the API's local historical-decision store.
+        The fingerprint covers every parsed request property, includes nulls,
+        sorts properties by ordinal name, uses enum names, and normalizes JSON
+        numbers as invariant decimal values. Property order and whitespace do
+        not change the fingerprint; strings and the knownAt offset remain exact.
+        Optionally supply Idempotency-Key (1-128 ASCII characters matching
+        [A-Za-z0-9._~-]). When supplied, businessEffectiveAt and knownAt must
+        both be explicit. The key is scoped to this operation and is
+        case-sensitive. Repeating the key with the same parsed request returns
+        the original response and evaluationId; reusing it for a different
+        request returns 409. A concurrent operation may return a retryable 409
+        with Retry-After: 1. Completed mappings and complete evidence are stored
+        together in the local historical JSON store and survive application
+        restarts on the same persistent filesystem. This is not a distributed
+        guarantee for replicas using separate stores.
       x-gate4-durable-activity: true
-      x-idempotency-supported: false
+      x-idempotency-supported: true
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: false
+          description: |
+            Opaque, case-sensitive key for one logical layered evaluation.
+            1-128 ASCII characters from A-Z, a-z, 0-9, '.', '_', '~', or '-'.
+            Whitespace, empty values, multiple header values and other
+            characters are rejected with 400. Keys must not contain business
+            facts or supplier identifiers.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: '^[A-Za-z0-9._~-]+$'
       requestBody:
         required: true
         content:
@@ -75,11 +105,18 @@ paths:
               knownAt: '2026-10-14T15:37:00Z'
       responses:
         '200':
-          description: Decision evaluation and evidence. Persist this result with the workflow history.
+          description: Decision evaluation and evidence. Identical keyed retries return the original response.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/LayeredSupplierDecisionResponse'
+        '400':
+          description: Invalid Idempotency-Key or missing explicit temporal context on a keyed request.
+        '409':
+          description: |
+            The key was already used with a different request, or another
+            operation is still in progress. The in-progress response includes
+            Retry-After; retry with the same key and request.
         '500':
           $ref: '#/components/responses/ServerError'
   /historical-decisions/{evaluationId}/replay:
@@ -216,7 +253,7 @@ components:
         knownAt:
           type: [string, 'null']
           format: date-time
-          description: Knowledge cutoff used for policy version selection; provide an explicit UTC timestamp for reproducibility.
+          description: Knowledge cutoff used for policy version selection; provide an explicit ISO-8601 timestamp with offset for reproducibility.
         servicesEntirelyRemote: { type: [boolean, 'null'] }
         supplierPersonnelAttendMeridianSite: { type: [boolean, 'null'] }
         operatesInMeridianProduction: { type: [boolean, 'null'] }

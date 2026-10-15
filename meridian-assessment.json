@@ -1,0 +1,6 @@
+{
+  "formatVersion": 1,
+  "operationId": "a48838ad2b8942b591b0ed988fe456f1",
+  "idempotencyKey": "assessment-a48838ad2b8942b591b0ed988fe456f1",
+  "requestJson": "{\u0022supplierId\u0022:\u0022SUP-0001\u0022,\u0022supplierCountry\u0022:\u0022Exampleland\u0022,\u0022countryRiskClassification\u0022:\u0022Standard\u0022,\u0022supplierCategory\u0022:\u0022Software\u0022,\u0022annualContractValue\u0022:25000,\u0022currency\u0022:\u0022USD\u0022,\u0022handlesPersonalData\u0022:false,\u0022handlesPaymentCardData\u0022:false,\u0022insuranceStatus\u0022:\u0022Current\u0022,\u0022completeYearsTrading\u0022:5,\u0022sanctionsScreeningStatus\u0022:\u0022Clear\u0022,\u0022usesSubcontractors\u0022:false,\u0022businessUnit\u0022:\u0022Finance\u0022,\u0022requestedPaymentTermsDays\u0022:30,\u0022customerId\u0022:\u0022CUSTOMER-001\u0022,\u0022contractId\u0022:\u0022CONTRACT-001\u0022,\u0022qualificationDate\u0022:\u00222026-10-15\u0022,\u0022businessEffectiveAt\u0022:\u00222026-10-15\u0022,\u0022knownAt\u0022:\u00222026-10-15T13:57:09.0910673\\u002B00:00\u0022}"
+}
