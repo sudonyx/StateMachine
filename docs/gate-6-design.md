@@ -1,5 +1,7 @@
 # Gate 6 design — external effects and truthful outcomes
 
+> Historical Gate 6 implementation: this direct synthetic-provider coordinator is retained only for development/test comparison. Gate 7's primary `/effects` API is harness-backed; the direct version is available at `/direct-effects` only when the API is in Development and `DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS=true`. See [gate-7-design.md](./gate-7-design.md).
+
 ## Scope
 
 Gate 6 adds three Orion-only synthetic capabilities outside Core's transition evaluator:
@@ -71,22 +73,22 @@ Successful provider evidence is submitted internally through the same `MachineSt
 
 ## API and fault controls
 
-- `POST /api/instances/{id}/effects` starts one of the three declared synthetic capabilities.
-- `POST /api/instances/{id}/effects/{operationId}/resume` explicitly resumes a specific operation.
+- `POST /api/instances/{id}/direct-effects` starts one of the three declared synthetic capabilities.
+- `POST /api/instances/{id}/direct-effects/{operationId}/resume` explicitly resumes a specific operation.
 - `GET /api/instances/{id}/effects` and `GET /api/instances/{id}/effects/{operationId}` inspect workflow-side evidence.
 - `GET /api/providers/{providerIdentity}/requests?operationId=...` inspects independent provider-side request records.
-- `GET /api/instances/{id}/pending-work` lists unresolved Gate 6 effects; timers remain unsupported.
+- `GET /api/instances/{id}/pending-work` lists unresolved direct-provider effects; timers remain unsupported.
 
 Start, resume and expected-operation registration require `DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY` in `X-State-Machine-Trusted-Ingestion-Key`. Deterministic one-shot fault controls are only mapped when the API runs in Development and `DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS=true`; they are not available from normal production configuration. Supported points include before intent creation, after local commit, after provider-boundary dispatch, after provider commit/before response, after response/before local persistence, before observation submission, after Gate 5 observation commit/before coordinator acknowledgement persistence, and a provider-confirmed synthetic failure.
 
 ## Limitations and trade-offs
 
 - The coordinator runs inline in the API request. There is no scheduler, durable worker, automatic retry, outbox dispatcher or long-running execution harness.
-- The synthetic provider call is an in-process service boundary backed by a separate SQLite file, not a real network protocol. Fault hooks model transport and persistence boundaries deterministically.
+- The direct Gate 6 synthetic provider call is an in-process service boundary backed by a separate SQLite file. Gate 7 separately hosts these synthetic providers over HTTP for Generic Harness invocation.
 - Crash tests use controlled fault injection. A representative test restarts a new API host over the same database, but no test kills an operating-system process.
 - The shared trusted key is not multi-tenant authorization, authentication of human actors, provider signatures or external evidence verification.
 - Per-instance concurrency remains governed by Gate 5's single-process serialization model; there is no cross-process lock or distributed exactly-once guarantee.
 - Recovery is explicit and provider-specific. Historical evidence is not rewritten to imply a response that the workflow never persisted.
-- Timers, compensation, automatic retries, replay/reconstruction, execution-harness integration and Gate 7 are not implemented.
+- Timers, compensation, automatic retries, replay/reconstruction and distributed exactly-once guarantees are not implemented.
 
 The Gate 6 crash outcomes and their tests are detailed in [gate-6-crash-matrix.md](./gate-6-crash-matrix.md).

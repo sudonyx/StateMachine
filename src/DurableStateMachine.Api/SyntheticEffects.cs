@@ -44,7 +44,23 @@ public sealed record EffectAttemptResponse(
     string LocalPersistenceOutcome,
     string ObservationStatus,
     string? ObservationReceiptId,
-    string? Error);
+    string? Error,
+    string? HarnessExecutionId = null,
+    int? HarnessExecutionState = null,
+    int? HarnessResponseStatusCode = null,
+    bool? HarnessResponseTruncated = null,
+    int? HarnessRejectionReason = null,
+    string? HarnessFailureCode = null,
+    string? HarnessFailureMessage = null,
+    IReadOnlyList<string>? HarnessAttemptIds = null,
+    IReadOnlyList<string>? HarnessEvidenceIds = null,
+    int? IdempotencyDecision = null,
+    int? ReplayDecision = null,
+    string? OutcomeConfidence = null,
+    string? WorkflowTransitionId = null,
+    string? WorkflowStateBefore = null,
+    string? WorkflowStateAfter = null,
+    long? WorkflowRevisionAfter = null);
 
 public sealed record EffectOperationResponse(
     string InstanceId,
@@ -59,7 +75,17 @@ public sealed record EffectOperationResponse(
     string Status,
     DateTimeOffset RequestedAt,
     DateTimeOffset UpdatedAt,
-    IReadOnlyList<EffectAttemptResponse> Attempts);
+    IReadOnlyList<EffectAttemptResponse> Attempts,
+    string? HarnessProviderId = null,
+    string? ApiDescriptionVersionId = null,
+    string? HarnessOperationKey = null,
+    string? HarnessExecutionId = null,
+    string? HarnessIdempotencyKey = null,
+    int? HarnessExecutionState = null,
+    int? OperationReplaySafety = null,
+    int? IdempotencyDecision = null,
+    int? ReplayDecision = null,
+    string? OutcomeConfidence = null);
 
 public sealed record ProviderRequestResponse(
     string Id,
@@ -85,7 +111,9 @@ public sealed class EffectFaultPlan
         "AfterProviderResponseBeforeLocalPersistence",
         "BeforeObservationAcceptance",
         "AfterObservationCommitBeforeLocalPersistence",
-        "ProviderConfirmedFailure"
+        "ProviderConfirmedFailure",
+        "AfterLocalIntentCommitBeforeHarness",
+        "AfterHarnessResponseBeforeLocalPersistence"
     ];
 
     public void Arm(string operationId, string point)
@@ -513,7 +541,17 @@ public sealed class EffectCoordinator(
             status,
             operation.RequestedAt,
             operation.UpdatedAt,
-            responses);
+            responses,
+            operation.HarnessProviderId,
+            operation.ApiDescriptionVersionId,
+            operation.HarnessOperationKey,
+            operation.HarnessExecutionId,
+            operation.HarnessIdempotencyKey,
+            operation.HarnessExecutionState,
+            operation.OperationReplaySafety,
+            operation.IdempotencyDecision,
+            operation.ReplayDecision,
+            operation.OutcomeConfidence);
     }
 
     public Task<IReadOnlyList<EffectOperationRecord>> ListAsync(
@@ -623,11 +661,12 @@ public sealed class EffectCoordinator(
 
         ThrowIfArmed(operation.OperationId, "AfterObservationCommitBeforeLocalPersistence");
         var accepted = result.Message.Status == "Accepted";
+        InputAttemptRecord? acceptedAttempt = result.Submission?.Attempt;
         if (result.Message.Status == "Duplicate" && result.Message.AttemptId is not null)
         {
-            var priorAttempt = await machineStore.GetAttemptAsync(
+            acceptedAttempt = await machineStore.GetAttemptAsync(
                 operation.InstanceId, result.Message.AttemptId, cancellationToken);
-            accepted = priorAttempt.Status == "Accepted";
+            accepted = acceptedAttempt.Status == "Accepted";
         }
         var persistedAttempt = await db.EffectAttempts.SingleAsync(
             record => record.Id == attempt.Id, cancellationToken);
@@ -635,12 +674,16 @@ public sealed class EffectCoordinator(
             record => record.Id == operation.Id, cancellationToken);
         persistedAttempt.ObservationStatus = result.Message.Status;
         persistedAttempt.ObservationReceiptId = result.Message.Id;
+        persistedAttempt.WorkflowTransitionId = acceptedAttempt?.TransitionId;
+        persistedAttempt.WorkflowStateBefore = acceptedAttempt?.PreviousState;
+        persistedAttempt.WorkflowStateAfter = acceptedAttempt?.TargetState;
+        persistedAttempt.WorkflowRevisionAfter = acceptedAttempt?.RevisionAfter;
         persistedOperation.Status = accepted ? "ObservationAccepted" : "ObservationRefused";
         persistedOperation.UpdatedAt = DateTimeOffset.UtcNow;
         await db.SaveChangesAsync(cancellationToken);
     }
 
-    private static SyntheticEffectRequest NormalizeRequest(StartEffectRequest request)
+    internal static SyntheticEffectRequest NormalizeRequest(StartEffectRequest request)
     {
         if (string.IsNullOrWhiteSpace(request.OperationId) || request.OperationId.Length > 96)
         {
@@ -694,8 +737,27 @@ public sealed class EffectCoordinator(
             attempt.LocalPersistenceOutcome,
             attempt.ObservationStatus,
             attempt.ObservationReceiptId,
-            attempt.Error);
+            attempt.Error,
+            attempt.HarnessExecutionId,
+            attempt.HarnessExecutionState,
+            attempt.HarnessResponseStatusCode,
+            attempt.HarnessResponseTruncated,
+            attempt.HarnessRejectionReason,
+            attempt.HarnessFailureCode,
+            attempt.HarnessFailureMessage,
+            DeserializeStringList(attempt.HarnessAttemptIdsJson),
+            DeserializeStringList(attempt.HarnessEvidenceIdsJson),
+            attempt.IdempotencyDecision,
+            attempt.ReplayDecision,
+            attempt.OutcomeConfidence,
+            attempt.WorkflowTransitionId,
+            attempt.WorkflowStateBefore,
+            attempt.WorkflowStateAfter,
+            attempt.WorkflowRevisionAfter);
     }
+
+    private static IReadOnlyList<string>? DeserializeStringList(string? json) =>
+        json is null ? null : JsonSerializer.Deserialize<string[]>(json, JsonOptions);
 
     private void ThrowIfArmed(string operationId, string point)
     {

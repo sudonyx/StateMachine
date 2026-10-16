@@ -236,6 +236,78 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
         }
     }
 
+    public async Task EnsureGate7SchemaAsync(CancellationToken cancellationToken = default)
+    {
+        var additions = new Dictionary<string, string[]>
+        {
+            [nameof(EffectOperationRecord.HarnessProviderId)] = ["EffectOperations", "TEXT NULL"],
+            [nameof(EffectOperationRecord.CredentialBindingId)] = ["EffectOperations", "TEXT NULL"],
+            [nameof(EffectOperationRecord.ApiDescriptionVersionId)] = ["EffectOperations", "TEXT NULL"],
+            [nameof(EffectOperationRecord.HarnessOperationKey)] = ["EffectOperations", "TEXT NULL"],
+            [nameof(EffectOperationRecord.HarnessExecutionId)] = ["EffectOperations", "TEXT NULL"],
+            [nameof(EffectOperationRecord.HarnessIdempotencyKey)] = ["EffectOperations", "TEXT NULL"],
+            [nameof(EffectOperationRecord.HarnessExecutionState)] = ["EffectOperations", "INTEGER NULL"],
+            [nameof(EffectOperationRecord.OperationReplaySafety)] = ["EffectOperations", "INTEGER NULL"],
+            [nameof(EffectOperationRecord.IdempotencyDecision)] = ["EffectOperations", "INTEGER NULL"],
+            [nameof(EffectOperationRecord.ReplayDecision)] = ["EffectOperations", "INTEGER NULL"],
+            [nameof(EffectOperationRecord.OutcomeConfidence)] = ["EffectOperations", "TEXT NULL"],
+            [nameof(EffectAttemptRecord.HarnessExecutionId)] = ["EffectAttempts", "TEXT NULL"],
+            [nameof(EffectAttemptRecord.HarnessExecutionState)] = ["EffectAttempts", "INTEGER NULL"],
+            [nameof(EffectAttemptRecord.HarnessResponseStatusCode)] = ["EffectAttempts", "INTEGER NULL"],
+            [nameof(EffectAttemptRecord.HarnessResponseTruncated)] = ["EffectAttempts", "INTEGER NULL"],
+            [nameof(EffectAttemptRecord.HarnessRejectionReason)] = ["EffectAttempts", "INTEGER NULL"],
+            [nameof(EffectAttemptRecord.HarnessFailureCode)] = ["EffectAttempts", "TEXT NULL"],
+            [nameof(EffectAttemptRecord.HarnessFailureMessage)] = ["EffectAttempts", "TEXT NULL"],
+            [nameof(EffectAttemptRecord.HarnessAttemptIdsJson)] = ["EffectAttempts", "TEXT NULL"],
+            [nameof(EffectAttemptRecord.HarnessEvidenceIdsJson)] = ["EffectAttempts", "TEXT NULL"],
+            [nameof(EffectAttemptRecord.IdempotencyDecision)] = ["EffectAttempts", "INTEGER NULL"],
+            [nameof(EffectAttemptRecord.ReplayDecision)] = ["EffectAttempts", "INTEGER NULL"],
+            [nameof(EffectAttemptRecord.OutcomeConfidence)] = ["EffectAttempts", "TEXT NULL"],
+            [nameof(EffectAttemptRecord.WorkflowTransitionId)] = ["EffectAttempts", "TEXT NULL"],
+            [nameof(EffectAttemptRecord.WorkflowStateBefore)] = ["EffectAttempts", "TEXT NULL"],
+            [nameof(EffectAttemptRecord.WorkflowStateAfter)] = ["EffectAttempts", "TEXT NULL"],
+            [nameof(EffectAttemptRecord.WorkflowRevisionAfter)] = ["EffectAttempts", "INTEGER NULL"]
+        };
+
+        var connection = Database.GetDbConnection();
+        var closeWhenDone = connection.State != System.Data.ConnectionState.Open;
+        if (closeWhenDone)
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        try
+        {
+            foreach (var (columnName, definition) in additions)
+            {
+                var tableName = definition[0];
+                var columns = new HashSet<string>(StringComparer.Ordinal);
+                await using (var inspect = connection.CreateCommand())
+                {
+                    inspect.CommandText = $"PRAGMA table_info('{tableName}')";
+                    await using var reader = await inspect.ExecuteReaderAsync(cancellationToken);
+                    while (await reader.ReadAsync(cancellationToken))
+                    {
+                        columns.Add(reader.GetString(1));
+                    }
+                }
+                if (columns.Contains(columnName))
+                {
+                    continue;
+                }
+                await using var add = connection.CreateCommand();
+                add.CommandText = $"ALTER TABLE {tableName} ADD COLUMN {columnName} {definition[1]}";
+                await add.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            if (closeWhenDone)
+            {
+                await connection.CloseAsync();
+            }
+        }
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<DefinitionRecord>().HasKey(record => new { record.Id, record.Version });
@@ -402,6 +474,17 @@ public sealed class EffectOperationRecord
     public required string RequestJson { get; set; }
     public required string RequestDigest { get; set; }
     public required string Status { get; set; }
+    public string? HarnessProviderId { get; set; }
+    public string? CredentialBindingId { get; set; }
+    public string? ApiDescriptionVersionId { get; set; }
+    public string? HarnessOperationKey { get; set; }
+    public string? HarnessExecutionId { get; set; }
+    public string? HarnessIdempotencyKey { get; set; }
+    public int? HarnessExecutionState { get; set; }
+    public int? OperationReplaySafety { get; set; }
+    public int? IdempotencyDecision { get; set; }
+    public int? ReplayDecision { get; set; }
+    public string? OutcomeConfidence { get; set; }
     public DateTimeOffset RequestedAt { get; set; }
     public DateTimeOffset UpdatedAt { get; set; }
 }
@@ -422,4 +505,20 @@ public sealed class EffectAttemptRecord
     public required string ObservationStatus { get; set; }
     public string? ObservationReceiptId { get; set; }
     public string? Error { get; set; }
+    public string? HarnessExecutionId { get; set; }
+    public int? HarnessExecutionState { get; set; }
+    public int? HarnessResponseStatusCode { get; set; }
+    public bool? HarnessResponseTruncated { get; set; }
+    public int? HarnessRejectionReason { get; set; }
+    public string? HarnessFailureCode { get; set; }
+    public string? HarnessFailureMessage { get; set; }
+    public string? HarnessAttemptIdsJson { get; set; }
+    public string? HarnessEvidenceIdsJson { get; set; }
+    public int? IdempotencyDecision { get; set; }
+    public int? ReplayDecision { get; set; }
+    public string? OutcomeConfidence { get; set; }
+    public string? WorkflowTransitionId { get; set; }
+    public string? WorkflowStateBefore { get; set; }
+    public string? WorkflowStateAfter { get; set; }
+    public long? WorkflowRevisionAfter { get; set; }
 }

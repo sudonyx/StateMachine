@@ -208,9 +208,9 @@ Definitions with an input policy reject `POST /api/instances/{id}/events` with `
 
 The generated OpenAPI document at `GET /openapi/v1.json` includes the command, observation, expected-operation, inbound-message, effect-coordination and provider-inspection routes.
 
-## Gate 6 synthetic effects
+## Gate 7 harness-backed effects
 
-Gate 6 adds a controlled application-service path for three Orion effects. `POST /api/instances/{id}/effects` requires the trusted-ingestion header and accepts a stable operation ID plus fictional request data:
+`POST /api/instances/{id}/effects` is the primary Gate 7 path. It requires the trusted-ingestion header and accepts a stable workflow operation ID plus fictional request data:
 
 ```json
 {
@@ -221,19 +221,22 @@ Gate 6 adds a controlled application-service path for three Orion effects. `POST
 }
 ```
 
-The other capabilities are `equipment-reservation` (requires `assetId`) and `customer-notification` (requires `customerReference` and `messageTemplate`). The endpoint persists the effect intent and corresponding Gate 5 expected operation together before invoking a provider. A successful provider response is stored locally and submitted to Gate 5; provider success alone does not accept a workflow event or transition. Synthetic provider IDs are selected by capability, not supplied by the caller.
+The other capabilities are `equipment-reservation` (requires `assetId`) and `customer-notification` (requires `customerReference` and `messageTemplate`). The endpoint commits the effect intent and Gate 5 expected operation before calling the independently running Generic Harness. The exact provider ID, API-description version, operation key and stable idempotency key are snapshotted with the intent. The harness response is inspected and correlated before any trusted observation is submitted; the generic evaluator remains the only component that can accept a transition.
+
+The harness accepts or rejects requests in its own execution record. A `201 Created` harness response does not mean the provider business operation succeeded. The state machine preserves the integer-valued execution/replay enums, separate outcome confidence, harness attempts/evidence IDs, provider response data legitimately returned to the invocation caller, and the Gate 5 receipt/transition result. Rejected, failed, unknown, provider-refused, and workflow-refused results are not collapsed into one status.
 
 Inspect workflow-side intent and attempts with:
 
 - `GET /api/instances/{id}/effects`
 - `GET /api/instances/{id}/effects/{operationId}`
-- `GET /api/instances/{id}/pending-work` (unresolved Gate 6 effects; no timers)
+- `GET /api/instances/{id}/effects/{operationId}/inspection` (harness execution, attempts, evidence and non-invoking replay-safety evaluation)
+- `GET /api/instances/{id}/pending-work` (unresolved external effects; no timers)
 
-Inspect provider-side request evidence separately with `GET /api/providers/{providerIdentity}/requests?operationId=...`. Provider files are independent SQLite databases selected by `DURABLE_STATE_MACHINE_PROVIDER_DB_DIR`. A provider record may show success while workflow-side status remains `OutcomeUnknown`.
+`POST /api/instances/{id}/effects/{operationId}/resume` dispatches only an intent that has never created a local harness attempt, or inspects a known harness execution. It never retries the provider. If the `POST /executions` response is lost before its execution ID is persisted, there is no published lookup-by-idempotency-key API; the workflow retains `OutcomeUnknown` and does not submit another execution.
 
-`POST /api/instances/{id}/effects/{operationId}/resume` explicitly retries/reconciles one operation. Offer generation is idempotent by operation ID. Equipment reservations enforce unique assets and resolve a same-operation retry to the original reservation. Customer notifications are non-idempotent; an uncertain notification retry is refused with `409 Conflict` because it might send twice. No general retry worker is present.
+Retry configuration is conservative (`maxAttempts: 1`); the harness owns provider execution, attempt evidence and replay-safety decisions. `POST /executions/{executionId}/replay` only evaluates historical safety and does not call the provider. The live import currently reports the offer `PUT` as non-idempotent; the adapter does not infer replay safety from the HTTP method or synthetic provider behavior. A caller-supplied idempotency key does not change the harness's replay-safety decision.
 
-Fault injection endpoints are only registered when the API runs in Development and `DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS=true`. They are test/demo controls, not normal production routes. See [gate-6-design.md](./gate-6-design.md) for the boundary contract and [gate-6-crash-matrix.md](./gate-6-crash-matrix.md) for all seven tested failure windows and the distinction between injected faults and process termination.
+The direct Gate 6 provider route is retained only for development/test comparison at `POST /api/instances/{id}/direct-effects`; it is mapped only when the API is Development and `DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS=true`. Gate 7's Orion client uses `/effects`, not the direct route. See [gate-7-design.md](./gate-7-design.md), [gate-7-integration.md](./gate-7-integration.md), and the historical [gate-6-design.md](./gate-6-design.md).
 
 ## Attempts and accepted-transition history
 
@@ -246,7 +249,7 @@ Attempts have stable GUID identifiers. History entries link back to their origin
 
 ## Pending work
 
-`GET /api/instances/{id}/pending-work` reports unresolved Gate 6 effect operations. Timers and scheduled background work remain unsupported; pending effects are not automatically dispatched or retried.
+`GET /api/instances/{id}/pending-work` reports unresolved effect operations. Timers and scheduled background work remain unsupported; pending work is not automatically dispatched or retried.
 
 ## Errors
 
@@ -257,9 +260,9 @@ Application errors use `{ "code": "...", "message": "...", "issues": [...] }` wh
 | `400` | Malformed request, invalid scalar facts, missing required request values, unsupported evidence values, or fact-binding collision |
 | `403` | Missing trusted-ingestion credential for an observation or effect-control path |
 | `404` | Unknown definition, instance, attempt, history entry or effect operation |
-| `409` | Immutable identity conflict, duplicate instance ID, concurrency conflict, or retry refused by a non-idempotent provider |
+| `409` | Immutable identity conflict, duplicate instance ID, concurrency conflict, or conflicting/reused operation identity |
 | `422` | Invalid or unsupported machine definition |
-| `503` | A configured development-only Gate 6 interruption was injected at a named boundary |
+| `503` | A configured development-only effect interruption was injected at a named boundary |
 | `500` | Unexpected server error; details are logged server-side and not returned |
 
 Malformed JSON bodies are rejected by ASP.NET Core as `400 Bad Request`. Workflow-level rejections are not HTTP errors; inspect the response attempt status and reason.

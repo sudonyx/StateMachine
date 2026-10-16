@@ -60,23 +60,29 @@ await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(
 await CreateInstance(lateInstanceId);
 await SubmitCommand(lateInstanceId, "SubmitApplication");
 var lateOperationId = $"late-offer-{Guid.NewGuid():N}";
-var lateRevision = await CurrentRevision(lateInstanceId);
-await PrintResponse(await client.PostAsJsonAsync(
-    $"api/instances/{Uri.EscapeDataString(lateInstanceId)}/expected-operations", new
+using (var armed = await client.PostAsync(
+           $"api/test-controls/effects/{Uri.EscapeDataString(lateOperationId)}/BeforeObservationAcceptance",
+           content: null))
+{
+    await EnsureSuccess(armed);
+}
+using (var pendingResult = await PostEffect(lateInstanceId, "offer-document", lateOperationId, new
+       {
+           customerReference = "synthetic-customer-1",
+           offerReference = "synthetic-late-offer"
+       }))
+{
+    if (pendingResult.StatusCode != System.Net.HttpStatusCode.ServiceUnavailable)
     {
-        operationId = lateOperationId,
-        observationType = "OfferDocumentGenerated",
-        sourceIdentity = "synthetic-offer-provider",
-        expectedRevision = lateRevision
-    }));
+        await EnsureSuccess(pendingResult);
+        throw new InvalidOperationException("The controlled late-result interruption was not reached.");
+    }
+    Console.WriteLine("Harness completed the provider effect; Gate 5 observation acceptance is still pending.");
+}
 await SubmitCommand(lateInstanceId, "CancelApplication");
-await SubmitObservation(
-    lateInstanceId,
-    $"late-result-{Guid.NewGuid():N}",
-    lateOperationId,
-    lateRevision,
-    "synthetic-offer-provider",
-    new { documentId = "late-document", offerDigest = "sha256:late-offer" });
+await PrintResponse(await client.PostAsync(
+    $"api/instances/{Uri.EscapeDataString(lateInstanceId)}/effects/{Uri.EscapeDataString(lateOperationId)}/resume",
+    content: null));
 await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(lateInstanceId)}"));
 await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(lateInstanceId)}/inbound-messages"));
 
@@ -129,34 +135,42 @@ async Task SubmitCommand(string id, string commandType, object? facts = null)
 async Task StartEffect(string id, string capability, string operationId, object request)
 {
     Console.WriteLine($"Starting synthetic {capability} operation {operationId}");
-    var body = JsonSerializer.SerializeToElement(request);
-    var values = body.EnumerateObject().ToDictionary(property => property.Name, property => property.Value.Clone());
-    values["operationId"] = JsonSerializer.SerializeToElement(operationId);
-    values["capability"] = JsonSerializer.SerializeToElement(capability);
-    await PrintResponse(await client.PostAsJsonAsync(
-        $"api/instances/{Uri.EscapeDataString(id)}/effects", values));
+    await PrintResponse(await PostEffect(id, capability, operationId, request));
 }
 
 async Task SubmitObservation(
     string id,
     string messageId,
-    string correlationId,
+    string operationId,
     long expectedRevision,
     string source,
     object evidence)
 {
-    Console.WriteLine($"Submitting observation {correlationId} at revision {expectedRevision}");
     await PrintResponse(await client.PostAsJsonAsync(
-        $"api/instances/{Uri.EscapeDataString(id)}/observations", new
+        $"api/instances/{Uri.EscapeDataString(id)}/observations",
+        new
         {
             messageId,
             type = "OfferDocumentGenerated",
+            correlationId = operationId,
             expectedRevision,
-            correlationId,
             source,
-            occurredAt = DateTimeOffset.UtcNow,
             evidence
         }));
+}
+
+async Task<HttpResponseMessage> PostEffect(
+    string id,
+    string capability,
+    string operationId,
+    object request)
+{
+    var body = JsonSerializer.SerializeToElement(request);
+    var values = body.EnumerateObject().ToDictionary(property => property.Name, property => property.Value.Clone());
+    values["operationId"] = JsonSerializer.SerializeToElement(operationId);
+    values["capability"] = JsonSerializer.SerializeToElement(capability);
+    return await client.PostAsJsonAsync(
+        $"api/instances/{Uri.EscapeDataString(id)}/effects", values);
 }
 
 async Task<long> CurrentRevision(string id)

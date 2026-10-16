@@ -25,6 +25,9 @@ builder.Services.AddScoped<MachineStore>();
 builder.Services.AddSingleton<EffectFaultPlan>();
 builder.Services.AddSingleton<SyntheticProviderStore>();
 builder.Services.AddScoped<EffectCoordinator>();
+builder.Services.AddHttpClient<HarnessExecutionClient>();
+builder.Services.AddScoped<HarnessCapabilityBindings>();
+builder.Services.AddScoped<HarnessEffectCoordinator>();
 
 var app = builder.Build();
 await using (var scope = app.Services.CreateAsyncScope())
@@ -34,6 +37,7 @@ await using (var scope = app.Services.CreateAsyncScope())
     await database.EnsureGate4SchemaAsync();
     await database.EnsureGate5SchemaAsync();
     await database.EnsureGate6SchemaAsync();
+    await database.EnsureGate7SchemaAsync();
 }
 
 app.Use(async (context, next) =>
@@ -51,6 +55,10 @@ app.Use(async (context, next) =>
             DefinitionConflictException conflict => (StatusCodes.Status409Conflict, "conflict", conflict.Message, (IReadOnlyList<ValidationIssue>?)null),
             ResourceNotFoundException missing => (StatusCodes.Status404NotFound, "not-found", missing.Message, (IReadOnlyList<ValidationIssue>?)null),
             EffectInterruptionException interrupted => (StatusCodes.Status503ServiceUnavailable, "effect-interrupted", interrupted.Message, (IReadOnlyList<ValidationIssue>?)null),
+            HarnessConfigurationException configuration => (StatusCodes.Status503ServiceUnavailable, "harness-not-configured", configuration.Message, (IReadOnlyList<ValidationIssue>?)null),
+            HarnessHttpException harnessError => (StatusCodes.Status502BadGateway, "harness-http-error", harnessError.Message, (IReadOnlyList<ValidationIssue>?)null),
+            HttpRequestException harnessUnavailable => (StatusCodes.Status502BadGateway, "harness-unavailable", harnessUnavailable.Message, (IReadOnlyList<ValidationIssue>?)null),
+            InvalidDataException invalidHarnessData => (StatusCodes.Status502BadGateway, "invalid-harness-response", invalidHarnessData.Message, (IReadOnlyList<ValidationIssue>?)null),
             BadHttpRequestException badRequest => (badRequest.StatusCode, "invalid-request", badRequest.Message, (IReadOnlyList<ValidationIssue>?)null),
             JsonException malformed => (StatusCodes.Status400BadRequest, "malformed-json", malformed.Message, (IReadOnlyList<ValidationIssue>?)null),
             ArgumentException argument => (StatusCodes.Status400BadRequest, "invalid-request", argument.Message, (IReadOnlyList<ValidationIssue>?)null),
@@ -235,7 +243,7 @@ instances.MapGet("/{id}/history/{historyId}", async (string id, string historyId
     Results.Ok((await store.GetHistoryEntryAsync(id, historyId, cancellationToken)).ToResponse()))
     .WithName("GetTransitionHistory").WithSummary("Inspect one accepted transition.");
 instances.MapGet("/{id}/pending-work", async (
-    string id, MachineStore store, EffectCoordinator coordinator, CancellationToken cancellationToken) =>
+    string id, MachineStore store, HarnessEffectCoordinator coordinator, CancellationToken cancellationToken) =>
 {
     await store.GetInstanceAsync(id, cancellationToken);
     var operations = await coordinator.ListAsync(id, cancellationToken);
@@ -250,9 +258,13 @@ instances.MapGet("/{id}/pending-work", async (
     }
     return Results.Ok(new { instanceId = id, supported = true, items = pending });
 })
-    .WithName("ListPendingWork").WithSummary("Inspect unresolved Gate 6 effects; timers and scheduled work remain unsupported.");
+    .WithName("ListPendingWork").WithSummary("Inspect unresolved harness-backed or development-only direct effects; timers and scheduled work remain unsupported.");
 
-instances.MapPost("/{id}/effects", async (
+if (app.Environment.IsDevelopment() &&
+    string.Equals(Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS"), "true",
+        StringComparison.OrdinalIgnoreCase))
+{
+instances.MapPost("/{id}/direct-effects", async (
     string id, StartEffectRequest request, HttpRequest httpRequest, EffectCoordinator coordinator,
     CancellationToken cancellationToken) =>
 {
@@ -265,20 +277,53 @@ instances.MapPost("/{id}/effects", async (
     var operation = await coordinator.RequestAsync(id, request, DateTimeOffset.UtcNow, cancellationToken);
     return Results.Ok(operation);
 }).WithName("StartSyntheticEffect").WithSummary("Persist an effect intent, invoke a separate synthetic provider, and submit its result through Gate 5.");
-instances.MapPost("/{id}/effects/{operationId}/resume", async (
+
+instances.MapPost("/{id}/direct-effects/{operationId}/resume", async (
     string id, string operationId, HttpRequest httpRequest, EffectCoordinator coordinator,
     CancellationToken cancellationToken) =>
 {
     if (!IsTrustedIngestion(httpRequest))
     {
         return Results.Json(new ApiError("trusted-ingestion-required",
-            "Effect recovery is restricted to the configured controlled demonstration boundary."),
+            "Direct Gate 6 provider recovery is restricted to the development-only comparison route."),
             statusCode: StatusCodes.Status403Forbidden);
     }
     return Results.Ok(await coordinator.ResumeAsync(id, operationId, DateTimeOffset.UtcNow, cancellationToken));
-}).WithName("ResumeSyntheticEffect").WithSummary("Explicitly resume a specific effect according to its provider retry semantics.");
+}).WithName("ResumeDirectSyntheticEffect").WithSummary("Development-only historical Gate 6 direct provider recovery route.");
+}
+
+instances.MapPost("/{id}/effects", async (
+    string id, StartEffectRequest request, HttpRequest httpRequest, HarnessEffectCoordinator coordinator,
+    CancellationToken cancellationToken) =>
+{
+    if (!IsTrustedIngestion(httpRequest))
+    {
+        return Results.Json(new ApiError("trusted-ingestion-required",
+            "Harness-backed effects can only be initiated through the configured controlled demonstration boundary."),
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+    return Results.Ok(await coordinator.RequestAsync(id, request, DateTimeOffset.UtcNow, cancellationToken));
+}).WithName("StartHarnessEffect").WithSummary("Commit workflow intent, invoke the configured Generic Harness operation, and submit only verified observations through Gate 5.");
+
+instances.MapPost("/{id}/effects/{operationId}/resume", async (
+    string id, string operationId, HttpRequest httpRequest, HarnessEffectCoordinator coordinator,
+    CancellationToken cancellationToken) =>
+{
+    if (!IsTrustedIngestion(httpRequest))
+    {
+        return Results.Json(new ApiError("trusted-ingestion-required",
+            "Harness-backed effect inspection and continuation are restricted to the configured controlled demonstration boundary."),
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+    return Results.Ok(await coordinator.ResumeAsync(id, operationId, cancellationToken));
+}).WithName("ResumeHarnessEffect").WithSummary("Inspect known harness work or dispatch durable work that has never left the local pending state; never creates a replacement execution after an unresolved dispatch.");
+
+instances.MapGet("/{id}/effects/{operationId}/inspection", async (
+    string id, string operationId, HarnessEffectCoordinator coordinator, CancellationToken cancellationToken) =>
+    Results.Ok(await coordinator.InspectHarnessAsync(id, operationId, cancellationToken)))
+    .WithName("InspectHarnessEffect").WithSummary("Inspect the correlated harness execution, attempts, evidence and non-invoking replay-safety decision.");
 instances.MapGet("/{id}/effects", async (
-    string id, EffectCoordinator coordinator, CancellationToken cancellationToken) =>
+    string id, HarnessEffectCoordinator coordinator, CancellationToken cancellationToken) =>
 {
     var effects = await coordinator.ListAsync(id, cancellationToken);
     var results = new List<EffectOperationResponse>(effects.Count);
@@ -289,7 +334,7 @@ instances.MapGet("/{id}/effects", async (
     return Results.Ok(results);
 }).WithName("ListSyntheticEffects").WithSummary("Inspect durable external-effect intents and their attempts.");
 instances.MapGet("/{id}/effects/{operationId}", async (
-    string id, string operationId, EffectCoordinator coordinator, CancellationToken cancellationToken) =>
+    string id, string operationId, HarnessEffectCoordinator coordinator, CancellationToken cancellationToken) =>
     Results.Ok(await coordinator.GetResponseAsync(id, operationId, cancellationToken)))
     .WithName("GetSyntheticEffect").WithSummary("Inspect one external-effect operation and its known outcomes.");
 app.MapGet("/api/providers/{providerIdentity}/requests", async (

@@ -105,6 +105,10 @@ public sealed class Gate6EffectTests
         var pending = await runtime.GetEffectAsync(instanceId, afterCommit);
         Assert.Equal("Pending", pending.GetProperty("status").GetString());
         Assert.Empty(pending.GetProperty("attempts").EnumerateArray());
+        var pendingWork = await runtime.Client.GetFromJsonAsync<JsonElement>(
+            $"/api/instances/{instanceId}/pending-work");
+        Assert.Contains(pendingWork.GetProperty("items").EnumerateArray(), item =>
+            item.GetProperty("operationId").GetString() == afterCommit);
         Assert.Empty(await runtime.GetProviderRequestsAsync("synthetic-offer-provider", afterCommit));
         await runtime.RestartApiAsync();
         var pendingAfterRestart = await runtime.GetEffectAsync(instanceId, afterCommit);
@@ -256,7 +260,7 @@ public sealed class Gate6EffectTests
             (await runtime.PostEffectAsync(instanceId, "customer-notification", uncertainNotification,
                 customerReference: "synthetic-customer", messageTemplate: "Synthetic status")).StatusCode);
         using var refusedRetry = await runtime.Client.PostAsync(
-            $"/api/instances/{instanceId}/effects/{uncertainNotification}/resume", content: null);
+            $"/api/instances/{instanceId}/direct-effects/{uncertainNotification}/resume", content: null);
         Assert.Equal(HttpStatusCode.Conflict, refusedRetry.StatusCode);
         Assert.Single(await runtime.GetProviderRequestsAsync(
             "synthetic-notification-provider", uncertainNotification));
@@ -444,7 +448,7 @@ public sealed class Gate6EffectTests
                 .ToDictionary(property => property.Name, property => property.Value.Clone());
             values["operationId"] = JsonSerializer.SerializeToElement(operationId);
             values["capability"] = JsonSerializer.SerializeToElement(capability);
-            return Client.PostAsJsonAsync($"/api/instances/{instanceId}/effects", values);
+            return Client.PostAsJsonAsync($"/api/instances/{instanceId}/direct-effects", values);
         }
 
         public async Task<JsonElement> StartEffectAsync(
@@ -484,7 +488,7 @@ public sealed class Gate6EffectTests
         public async Task<JsonElement> ResumeEffectAsync(string instanceId, string operationId)
         {
             using var response = await Client.PostAsync(
-                $"/api/instances/{instanceId}/effects/{operationId}/resume", content: null);
+                $"/api/instances/{instanceId}/direct-effects/{operationId}/resume", content: null);
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             return await response.Content.ReadFromJsonAsync<JsonElement>();
         }

@@ -150,7 +150,8 @@ public sealed class MachineStore(MachineDbContext db)
         string requestJson,
         string requestDigest,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        EffectHarnessBinding? harnessBinding = null)
     {
         if (string.IsNullOrWhiteSpace(operationId) || string.IsNullOrWhiteSpace(capability) ||
             string.IsNullOrWhiteSpace(providerIdentity) || string.IsNullOrWhiteSpace(observationType))
@@ -238,6 +239,12 @@ public sealed class MachineStore(MachineDbContext db)
                 RequestJson = requestJson,
                 RequestDigest = requestDigest,
                 Status = "Pending",
+                HarnessProviderId = harnessBinding?.ProviderId,
+                CredentialBindingId = harnessBinding?.CredentialBindingId,
+                ApiDescriptionVersionId = harnessBinding?.ApiDescriptionVersionId,
+                HarnessOperationKey = harnessBinding?.OperationKey,
+                HarnessIdempotencyKey = harnessBinding?.IdempotencyKey,
+                OperationReplaySafety = harnessBinding?.OperationReplaySafety,
                 RequestedAt = now,
                 UpdatedAt = now
             };
@@ -1177,6 +1184,14 @@ public sealed record SubmissionResult(InputAttemptRecord Attempt, MachineInstanc
     TransitionHistoryRecord? Transition, bool ConcurrencyConflict);
 public sealed record InboundProcessingResult(InboundMessageRecord Message, SubmissionResult? Submission);
 public sealed record EffectIntentResult(EffectOperationRecord Operation, bool AlreadyRequested);
+
+public sealed record EffectHarnessBinding(
+    string ProviderId,
+    string ApiDescriptionVersionId,
+    string OperationKey,
+    string IdempotencyKey,
+    int? OperationReplaySafety,
+    string? CredentialBindingId = null);
 
 public sealed class DefinitionConflictException(string message) : Exception(message);
 public sealed class ResourceNotFoundException(string message) : Exception(message);
