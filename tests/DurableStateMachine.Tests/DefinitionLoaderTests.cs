@@ -12,7 +12,7 @@ public sealed class DefinitionLoaderTests
 
         Assert.Equal("orion-equipment-lease", orion.Id);
         Assert.Equal("1.1", orion.LanguageVersion);
-        Assert.Equal("2.0", orion.Version);
+        Assert.Equal("3.0", orion.Version);
         Assert.Contains("AcceptOffer", orion.InputPolicy!.Commands.Keys);
         Assert.Contains("OfferDocumentGenerated", orion.InputPolicy.Observations.Keys);
         Assert.Equal("internal-document-review", documents.Id);

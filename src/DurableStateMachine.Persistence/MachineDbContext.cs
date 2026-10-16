@@ -10,6 +10,8 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
     public DbSet<TransitionHistoryRecord> TransitionHistory => Set<TransitionHistoryRecord>();
     public DbSet<InboundMessageRecord> InboundMessages => Set<InboundMessageRecord>();
     public DbSet<ExpectedOperationRecord> ExpectedOperations => Set<ExpectedOperationRecord>();
+    public DbSet<EffectOperationRecord> EffectOperations => Set<EffectOperationRecord>();
+    public DbSet<EffectAttemptRecord> EffectAttempts => Set<EffectAttemptRecord>();
 
     public async Task EnsureGate4SchemaAsync(CancellationToken cancellationToken = default)
     {
@@ -109,6 +111,7 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
         {
             await connection.OpenAsync(cancellationToken);
         }
+
         try
         {
             var columns = new HashSet<string>(StringComparer.Ordinal);
@@ -159,6 +162,80 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
         }
     }
 
+    public async Task EnsureGate6SchemaAsync(CancellationToken cancellationToken = default)
+    {
+        await Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS EffectOperations (
+                Id TEXT NOT NULL CONSTRAINT PK_EffectOperations PRIMARY KEY,
+                InstanceId TEXT NOT NULL,
+                OperationId TEXT NOT NULL,
+                DefinitionId TEXT NOT NULL,
+                DefinitionVersion TEXT NOT NULL,
+                ExecutionRevision INTEGER NOT NULL,
+                Capability TEXT NOT NULL,
+                ProviderIdentity TEXT NOT NULL,
+                ObservationType TEXT NOT NULL,
+                RequestJson TEXT NOT NULL,
+                RequestDigest TEXT NOT NULL,
+                Status TEXT NOT NULL,
+                RequestedAt INTEGER NOT NULL,
+                UpdatedAt INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_EffectOperations_InstanceId_OperationId
+                ON EffectOperations (InstanceId, OperationId);
+            CREATE TABLE IF NOT EXISTS EffectAttempts (
+                Id TEXT NOT NULL CONSTRAINT PK_EffectAttempts PRIMARY KEY,
+                EffectOperationId TEXT NOT NULL,
+                AttemptNumber INTEGER NOT NULL,
+                StartedAt INTEGER NOT NULL,
+                CompletedAt INTEGER NULL,
+                TransportOutcome TEXT NOT NULL,
+                ProviderOutcome TEXT NOT NULL,
+                ProviderEffectId TEXT NULL,
+                ProviderOccurredAt INTEGER NULL,
+                ProviderEvidenceJson TEXT NULL,
+                LocalPersistenceOutcome TEXT NOT NULL,
+                ObservationStatus TEXT NOT NULL,
+                ObservationReceiptId TEXT NULL,
+                Error TEXT NULL
+            );
+            CREATE INDEX IF NOT EXISTS IX_EffectAttempts_EffectOperationId_AttemptNumber
+                ON EffectAttempts (EffectOperationId, AttemptNumber);
+            """, cancellationToken);
+
+        var connection = Database.GetDbConnection();
+        var closeWhenDone = connection.State != System.Data.ConnectionState.Open;
+        if (closeWhenDone)
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        try
+        {
+            var columns = new HashSet<string>(StringComparer.Ordinal);
+            await using var inspect = connection.CreateCommand();
+            inspect.CommandText = "PRAGMA table_info('EffectAttempts')";
+            await using var reader = await inspect.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                columns.Add(reader.GetString(1));
+            }
+            await reader.DisposeAsync();
+            if (!columns.Contains(nameof(EffectAttemptRecord.ProviderOccurredAt)))
+            {
+                await using var addOccurredAt = connection.CreateCommand();
+                addOccurredAt.CommandText = "ALTER TABLE EffectAttempts ADD COLUMN ProviderOccurredAt INTEGER NULL";
+                await addOccurredAt.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            if (closeWhenDone)
+            {
+                await connection.CloseAsync();
+            }
+        }
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<DefinitionRecord>().HasKey(record => new { record.Id, record.Version });
@@ -173,6 +250,10 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
         modelBuilder.Entity<InboundMessageRecord>().HasIndex(record => new { record.InstanceId, record.InputKind, record.MessageId });
         modelBuilder.Entity<ExpectedOperationRecord>().HasKey(record => record.Id);
         modelBuilder.Entity<ExpectedOperationRecord>().HasIndex(record => new { record.InstanceId, record.OperationId }).IsUnique();
+        modelBuilder.Entity<EffectOperationRecord>().HasKey(record => record.Id);
+        modelBuilder.Entity<EffectOperationRecord>().HasIndex(record => new { record.InstanceId, record.OperationId }).IsUnique();
+        modelBuilder.Entity<EffectAttemptRecord>().HasKey(record => record.Id);
+        modelBuilder.Entity<EffectAttemptRecord>().HasIndex(record => new { record.EffectOperationId, record.AttemptNumber }).IsUnique();
         modelBuilder.Entity<DefinitionRecord>().Property(record => record.RegisteredAt)
             .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
         modelBuilder.Entity<InstanceRecord>().Property(record => record.CreatedAt)
@@ -193,6 +274,18 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
                 value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
         modelBuilder.Entity<ExpectedOperationRecord>().Property(record => record.ExpectedAt)
             .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        modelBuilder.Entity<EffectOperationRecord>().Property(record => record.RequestedAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        modelBuilder.Entity<EffectOperationRecord>().Property(record => record.UpdatedAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        modelBuilder.Entity<EffectAttemptRecord>().Property(record => record.StartedAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        modelBuilder.Entity<EffectAttemptRecord>().Property(record => record.CompletedAt)
+            .HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null,
+                value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+        modelBuilder.Entity<EffectAttemptRecord>().Property(record => record.ProviderOccurredAt)
+            .HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null,
+                value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
     }
 }
 
@@ -293,4 +386,40 @@ public sealed class ExpectedOperationRecord
     public required string Status { get; set; }
     public string? ResultDigest { get; set; }
     public DateTimeOffset? ResolvedAt { get; set; }
+}
+
+public sealed class EffectOperationRecord
+{
+    public required string Id { get; set; }
+    public required string InstanceId { get; set; }
+    public required string OperationId { get; set; }
+    public required string DefinitionId { get; set; }
+    public required string DefinitionVersion { get; set; }
+    public long ExecutionRevision { get; set; }
+    public required string Capability { get; set; }
+    public required string ProviderIdentity { get; set; }
+    public required string ObservationType { get; set; }
+    public required string RequestJson { get; set; }
+    public required string RequestDigest { get; set; }
+    public required string Status { get; set; }
+    public DateTimeOffset RequestedAt { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class EffectAttemptRecord
+{
+    public required string Id { get; set; }
+    public required string EffectOperationId { get; set; }
+    public int AttemptNumber { get; set; }
+    public DateTimeOffset StartedAt { get; set; }
+    public DateTimeOffset? CompletedAt { get; set; }
+    public required string TransportOutcome { get; set; }
+    public required string ProviderOutcome { get; set; }
+    public string? ProviderEffectId { get; set; }
+    public DateTimeOffset? ProviderOccurredAt { get; set; }
+    public string? ProviderEvidenceJson { get; set; }
+    public required string LocalPersistenceOutcome { get; set; }
+    public required string ObservationStatus { get; set; }
+    public string? ObservationReceiptId { get; set; }
+    public string? Error { get; set; }
 }

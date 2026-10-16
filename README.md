@@ -1,6 +1,6 @@
 # Durable State Machine
 
-A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
+A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 6 adds three independently persisted synthetic Orion effects and records uncertain outcomes across the workflow/provider boundary. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
 
 ## Requirements, build and tests
 
@@ -14,8 +14,8 @@ dotnet test DurableStateMachine.slnx
 ## Solution structure
 
 - `src/DurableStateMachine.Core/` — definition loading, validation, typed facts and pure deterministic evaluation.
-- `src/DurableStateMachine.Persistence/` — EF Core SQLite records and transactional runtime/input operations.
-- `src/DurableStateMachine.Api/` — HTTP endpoints, DTOs, error mapping and generated OpenAPI document.
+- `src/DurableStateMachine.Persistence/` — EF Core SQLite records and transactional runtime/input/effect-intent operations.
+- `src/DurableStateMachine.Api/` — HTTP endpoints, Gate 6 effect coordinator, three separate synthetic provider stores, DTOs, error mapping and generated OpenAPI document.
 - `clients/DurableStateMachine.Cli/` — generic command-line HTTP client.
 - `clients/DurableStateMachine.OrionClient/` — Orion scenario using the HTTP contract only.
 - `clients/DurableStateMachine.MeridianClient/` — independent live HTTP demonstration of a Meridian decision bound to a generic workflow event.
@@ -34,6 +34,8 @@ dotnet run --project src\DurableStateMachine.Api
 ```
 
 The default database file is `durable-state-machine.db` in the API's working directory. `DURABLE_STATE_MACHINE_DB` selects another SQLite path. The service creates its schema on startup. OpenAPI is served at `http://localhost:5000/openapi/v1.json`.
+
+Synthetic providers use independent SQLite files in `synthetic-provider-data` by default. Set `DURABLE_STATE_MACHINE_PROVIDER_DB_DIR` to choose another directory. Each provider file is outside the workflow transaction and remains inspectable after API restart.
 
 ## Register and operate a definition
 
@@ -60,18 +62,26 @@ The REST routes and request/response examples are in [gate-3-api.md](./docs/gate
 
 ## Orion client demonstration
 
-The Orion definition is version 2.0 using language 1.1. Configure the same local-only demonstration key on the API and client process. It is a controlled test boundary, not production authentication:
+The Orion definition is version 3.0 using language 1.1. Configure the same local-only demonstration key on the API and client process. It is a controlled test boundary, not production authentication:
 
 ```powershell
 $env:DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY = "<set-a-local-random-value>"
 dotnet run --project clients\DurableStateMachine.OrionClient -- definitions\orion-v1.json
 ```
 
-The client registers or reuses the exact Orion definition, creates an instance with synthetic facts, submits a command, demonstrates a forged untrusted observation, seeds an expected operation through the controlled boundary, and submits a valid synthetic offer-generation observation. It then cancels while another operation is pending and demonstrates that the late result cannot reactivate the terminal instance. Inbound messages, attempts and accepted history are retrieved through HTTP.
+The client registers or reuses the exact Orion definition, creates a synthetic instance, demonstrates that an untrusted forged observation cannot progress it, then runs offer-document generation, asset reservation and customer notification through the effect coordinator. Each provider writes to its own SQLite database; a successful result advances Orion only through a Gate 5 accepted observation. A second instance demonstrates cancellation and a late stale observation.
 
 Language 1.1 definitions declare allowed command and observation mappings. Their direct `/events` endpoint is restricted; use `/commands` for requests and `/observations` for external claims. Observation authority requires an expected operation and the configured `X-State-Machine-Trusted-Ingestion-Key`; a claimed source label or `trusted` field is not authority. Configure the key for the API separately and set it in the client environment before running the Orion demo.
 
-See [gate-5-design.md](./docs/gate-5-design.md) for input identity, duplicate/stale semantics, expected-operation evidence, compatibility and the explicit local-demo limitations.
+See [gate-5-design.md](./docs/gate-5-design.md) for input identity, duplicate/stale semantics, expected-operation evidence and the explicit local-demo limitations.
+
+## Gate 6 external effects
+
+`POST /api/instances/{id}/effects` accepts `offer-document`, `equipment-reservation` or `customer-notification` with a stable operation ID and synthetic business data. Effect inspection is available at `/api/instances/{id}/effects` and `/api/instances/{id}/effects/{operationId}`; provider-side request evidence is available at `/api/providers/{providerIdentity}/requests`. `POST /api/instances/{id}/effects/{operationId}/resume` explicitly retries or recovers an operation according to its provider semantics. Starting and resuming effects require the trusted ingestion key; inspection is read-only.
+
+Offer generation is idempotent by operation ID. Equipment reservations enforce one reservation per fictional asset and resolve a same-operation retry to the original result. Notifications are intentionally non-idempotent; resending an uncertain notification may deliver twice, so the coordinator refuses such a retry. An interrupted request is not treated as provider failure: inspect workflow and provider evidence independently before deciding what is safe.
+
+Fault injection is available only when the API is in Development with `DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS=true`. It is intended for controlled Gate 6 demonstrations, not production use. See [gate-6-design.md](./docs/gate-6-design.md) and the seven-scenario [gate-6-crash-matrix.md](./docs/gate-6-crash-matrix.md) for commit boundaries, fault semantics, test fidelity and limitations.
 
 ## Gate 4 fact-binding and Meridian demonstration
 
@@ -91,4 +101,4 @@ Start both services first. The client persists the keyed request before sending 
 
 Definitions are immutable by `(id, version)`; new versions coexist. Instances remain bound to the exact version used at creation, with their instance facts fixed for their lifetime. Explicit per-attempt facts are immutable evaluation-only inputs and never mutate those facts. Each event attempt (including rejected, ambiguous and unresolved evaluations) is stored separately from accepted transition history, together with a complete evaluation-evidence snapshot. Accepted state, revision, attempt, evidence and transition history commit in one SQLite transaction. The HTTP service serializes same-instance submissions within one process and checks the persisted revision during updates.
 
-The Meridian client remains a demonstration adapter, not a durable external-activity subsystem. Meridian's idempotency key plus a saved local request envelope support deliberate same-key/same-request retries, but there is no atomic transaction spanning Meridian and local SQLite and the key does not deduplicate state-machine events. Gate 5 adds local input identity checks, not distributed exactly-once semantics. Real external effects, automatic retries, timers, full replay, migrations, production authentication, distributed locking, and hierarchical/parallel statecharts remain unsupported. The trusted-ingestion credential is a controlled single-host training boundary; it does not prove provider identity or evidence authenticity. See [gate-3-design.md](./docs/gate-3-design.md), [gate-4-design.md](./docs/gate-4-design.md), and [gate-5-design.md](./docs/gate-5-design.md) for transaction, evidence and authority limits.
+The Meridian client remains a demonstration adapter, not a durable external-activity subsystem. Meridian's idempotency key plus a saved local request envelope support deliberate same-key/same-request retries, but there is no atomic transaction spanning Meridian and local SQLite and the key does not deduplicate state-machine events. Gate 6 supports only the three local synthetic providers; production external services, background scheduling, automatic retry orchestration, timers, full replay, migrations, production authentication, distributed locking and hierarchical/parallel statecharts remain unsupported. The trusted-ingestion credential is a controlled single-host training boundary; it does not prove provider identity or evidence authenticity. See [gate-3-design.md](./docs/gate-3-design.md), [gate-4-design.md](./docs/gate-4-design.md), [gate-5-design.md](./docs/gate-5-design.md) and [gate-6-design.md](./docs/gate-6-design.md) for transaction, evidence and authority limits.

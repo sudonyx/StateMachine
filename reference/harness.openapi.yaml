@@ -1,0 +1,968 @@
+openapi: 3.0.3
+info:
+  title: Generic Harness HTTP API
+  version: 1.0.0
+  description: >-
+    HTTP API for registering providers and their OpenAPI descriptions,
+    managing credential bindings, invoking imported operations, and inspecting
+    durable execution evidence. Enum values are serialized as integers.
+servers:
+  - url: /
+    description: The current harness host
+paths:
+  /providers/{providerId}:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+    get:
+      operationId: getProvider
+      summary: Get a provider
+      responses:
+        '200':
+          description: Provider found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Provider'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /providers/{providerId}/api-descriptions:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+    get:
+      operationId: listApiDescriptions
+      summary: List imported API description versions
+      responses:
+        '200':
+          description: API description versions for the provider
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ApiDescription'
+    post:
+      operationId: registerApiDescription
+      summary: Import an OpenAPI description for a provider
+      description: >-
+        Parses and registers the supplied OpenAPI document and discovers its
+        operations. Unsupported document constructs can cause a 400 response.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: An OpenAPI document in JSON format; YAML input is not supported.
+              additionalProperties: true
+      responses:
+        '201':
+          description: API description registered
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URI of the registered API description
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiDescriptionRegistration'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /providers/{providerId}/credential-bindings:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+    post:
+      operationId: createCredentialBinding
+      summary: Create a credential binding
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateCredentialBindingRequest'
+      responses:
+        '201':
+          description: Credential binding created
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URI of the created credential binding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialBinding'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /providers/{providerId}/credential-bindings/{bindingId}:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+      - $ref: '#/components/parameters/BindingId'
+    get:
+      operationId: getCredentialBinding
+      summary: Get a credential binding
+      responses:
+        '200':
+          description: Credential binding found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialBinding'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /providers/{providerId}/credential-bindings/{bindingId}/secret:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+      - $ref: '#/components/parameters/BindingId'
+    put:
+      operationId: updateCredentialSecret
+      summary: Replace a credential binding's secret
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CredentialSecretRequest'
+      responses:
+        '204':
+          description: Secret updated
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /providers/{providerId}/credential-bindings/{bindingId}/rotate:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+      - $ref: '#/components/parameters/BindingId'
+    post:
+      operationId: rotateCredentialSecret
+      summary: Rotate a credential binding's secret reference and secret
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CredentialRotationRequest'
+      responses:
+        '200':
+          description: Credential binding updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialBinding'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /providers/{providerId}/credential-bindings/{bindingId}/disable:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+      - $ref: '#/components/parameters/BindingId'
+    post:
+      operationId: disableCredentialBinding
+      summary: Disable a credential binding
+      responses:
+        '200':
+          description: Credential binding disabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialBinding'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /providers/{providerId}/credential-bindings/{bindingId}/enable:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+      - $ref: '#/components/parameters/BindingId'
+    post:
+      operationId: enableCredentialBinding
+      summary: Enable a credential binding
+      responses:
+        '200':
+          description: Credential binding enabled
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CredentialBinding'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api-descriptions/{apiDescriptionId}/operations:
+    parameters:
+      - $ref: '#/components/parameters/ApiDescriptionId'
+    get:
+      operationId: listOperations
+      summary: List all operations in an API description
+      responses:
+        '200':
+          description: Operations in the API description
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Operation'
+
+  /api-descriptions/{apiDescriptionId}/callable-operations:
+    parameters:
+      - $ref: '#/components/parameters/ApiDescriptionId'
+    get:
+      operationId: listCallableOperations
+      summary: List operations supported for execution
+      responses:
+        '200':
+          description: Callable operations in the API description
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Operation'
+
+  /executions:
+    post:
+      operationId: requestExecution
+      summary: Execute an imported operation
+      description: >-
+        Submits a generic operation invocation. A provider response body is
+        returned only to this invocation's caller; it is not stored in durable
+        execution evidence. Idempotency replays and requests that do not
+        produce a provider response return null for providerResponse.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RequestExecution'
+      responses:
+        '201':
+          description: Execution accepted and processed
+          headers:
+            Location:
+              schema:
+                type: string
+              description: URI of the created execution
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFoundWithError'
+
+  /executions/{executionId}:
+    parameters:
+      - $ref: '#/components/parameters/ExecutionId'
+    get:
+      operationId: getExecution
+      summary: Get an execution
+      responses:
+        '200':
+          description: Execution found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Execution'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /executions/{executionId}/inspection:
+    parameters:
+      - $ref: '#/components/parameters/ExecutionId'
+    get:
+      operationId: inspectExecution
+      summary: Inspect an execution with its durable evidence
+      responses:
+        '200':
+          description: Execution inspection
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ExecutionInspection'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /executions/{executionId}/replay:
+    parameters:
+      - $ref: '#/components/parameters/ExecutionId'
+    post:
+      operationId: evaluateExecutionReplay
+      summary: Evaluate replay safety from historical evidence
+      description: This endpoint does not repeat the provider request.
+      responses:
+        '200':
+          description: Replay evaluation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayEvaluation'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /executions/{executionId}/evidence:
+    parameters:
+      - $ref: '#/components/parameters/ExecutionId'
+    get:
+      operationId: listExecutionEvidence
+      summary: List durable evidence for an execution
+      responses:
+        '200':
+          description: Durable evidence entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExecutionEvidence'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /executions/{executionId}/attempts:
+    parameters:
+      - $ref: '#/components/parameters/ExecutionId'
+    get:
+      operationId: listExecutionAttempts
+      summary: List attempts for an execution
+      responses:
+        '200':
+          description: Execution attempts
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ExecutionAttempt'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /providers/{providerId}/executions:
+    parameters:
+      - $ref: '#/components/parameters/ProviderId'
+    get:
+      operationId: listProviderExecutions
+      summary: List executions for a provider
+      responses:
+        '200':
+          description: Executions belonging to the provider
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Execution'
+
+components:
+  parameters:
+    ProviderId:
+      name: providerId
+      in: path
+      required: true
+      description: Provider identifier
+      schema:
+        type: string
+        format: uuid
+    BindingId:
+      name: bindingId
+      in: path
+      required: true
+      description: Credential binding identifier
+      schema:
+        type: string
+        format: uuid
+    ApiDescriptionId:
+      name: apiDescriptionId
+      in: path
+      required: true
+      description: API description version identifier
+      schema:
+        type: string
+        format: uuid
+    ExecutionId:
+      name: executionId
+      in: path
+      required: true
+      description: Execution identifier
+      schema:
+        type: string
+        format: uuid
+  responses:
+    BadRequest:
+      description: Request was invalid
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    NotFound:
+      description: Resource not found
+    NotFoundWithError:
+      description: Referenced resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+  schemas:
+    Error:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+    Provider:
+      type: object
+      required:
+        - id
+        - name
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          nullable: true
+    ApiDescription:
+      type: object
+      required:
+        - id
+        - providerId
+        - sourceVersion
+        - contentHash
+        - servers
+      properties:
+        id:
+          type: string
+          format: uuid
+        providerId:
+          type: string
+          format: uuid
+        sourceVersion:
+          type: string
+          nullable: true
+        contentHash:
+          type: string
+        servers:
+          type: array
+          items:
+            type: string
+            format: uri-reference
+    ApiDescriptionRegistration:
+      type: object
+      required:
+        - provider
+        - apiDescription
+        - operations
+      properties:
+        provider:
+          $ref: '#/components/schemas/Provider'
+        apiDescription:
+          $ref: '#/components/schemas/ApiDescription'
+        operations:
+          type: array
+          items:
+            $ref: '#/components/schemas/ImportedOperation'
+    ImportedOperation:
+      type: object
+      required:
+        - id
+        - apiDescriptionVersionId
+        - operationId
+        - key
+        - method
+        - path
+        - supportStatus
+      properties:
+        id:
+          type: string
+          format: uuid
+        apiDescriptionVersionId:
+          type: string
+          format: uuid
+        operationId:
+          type: string
+          nullable: true
+        key:
+          type: string
+          example: GET:/widgets/{widgetId}
+        method:
+          type: string
+          example: GET
+        path:
+          type: string
+          example: /widgets/{widgetId}
+        supportStatus:
+          $ref: '#/components/schemas/OperationSupportStatus'
+    Operation:
+      type: object
+      required:
+        - id
+        - apiDescriptionVersionId
+        - operationId
+        - key
+        - method
+        - path
+        - supportStatus
+        - replaySafety
+      properties:
+        id:
+          type: string
+          format: uuid
+        apiDescriptionVersionId:
+          type: string
+          format: uuid
+        operationId:
+          type: string
+          nullable: true
+        key:
+          type: string
+          example: GET:/widgets/{widgetId}
+        method:
+          type: string
+          example: GET
+        path:
+          type: string
+          example: /widgets/{widgetId}
+        supportStatus:
+          $ref: '#/components/schemas/OperationSupportStatus'
+        replaySafety:
+          $ref: '#/components/schemas/OperationReplaySafety'
+    OperationSupportStatus:
+      type: integer
+      description: '0 = Supported; 1 = Unsupported'
+      enum: [0, 1]
+    OperationReplaySafety:
+      type: integer
+      description: '0 = Idempotent; 1 = NonIdempotent; 2 = Unknown'
+      enum: [0, 1, 2]
+    CreateCredentialBindingRequest:
+      type: object
+      required:
+        - name
+        - headerName
+        - secretReference
+      properties:
+        name:
+          type: string
+        scheme:
+          $ref: '#/components/schemas/CredentialScheme'
+        headerName:
+          type: string
+        secretReference:
+          type: string
+        tokenEndpoint:
+          type: string
+          nullable: true
+        clientId:
+          type: string
+          nullable: true
+        secret:
+          type: string
+          nullable: true
+          writeOnly: true
+          description: Optional secret value to write to the secret provider.
+    CredentialSecretRequest:
+      type: object
+      required:
+        - secret
+      properties:
+        secret:
+          type: string
+          writeOnly: true
+    CredentialRotationRequest:
+      type: object
+      required:
+        - secretReference
+        - secret
+      properties:
+        secretReference:
+          type: string
+        secret:
+          type: string
+          writeOnly: true
+    CredentialScheme:
+      type: integer
+      description: '0 = ApiKey; 1 = BearerToken; 2 = OAuth2ClientCredentials'
+      enum: [0, 1, 2]
+    CredentialBinding:
+      type: object
+      required:
+        - id
+        - providerId
+        - name
+        - scheme
+        - headerName
+        - tokenEndpoint
+        - clientId
+        - isDisabled
+      properties:
+        id:
+          type: string
+          format: uuid
+        providerId:
+          type: string
+          format: uuid
+        name:
+          type: string
+        scheme:
+          $ref: '#/components/schemas/CredentialScheme'
+        headerName:
+          type: string
+        tokenEndpoint:
+          type: string
+          nullable: true
+        clientId:
+          type: string
+          nullable: true
+        isDisabled:
+          type: boolean
+    RequestExecution:
+      type: object
+      required:
+        - providerId
+        - apiDescriptionVersionId
+        - operationKey
+      properties:
+        providerId:
+          type: string
+          format: uuid
+        apiDescriptionVersionId:
+          type: string
+          format: uuid
+        operationKey:
+          type: string
+        credentialBindingId:
+          type: string
+          format: uuid
+          nullable: true
+        idempotencyKey:
+          type: string
+          nullable: true
+          maxLength: 200
+        maxAttempts:
+          type: integer
+          format: int32
+          nullable: true
+        retryableFailureCodes:
+          type: array
+          nullable: true
+          items:
+            type: string
+        retryBaseDelayMilliseconds:
+          type: integer
+          format: int32
+          nullable: true
+        retryMaxDelayMilliseconds:
+          type: integer
+          format: int32
+          nullable: true
+        retryJitterFactor:
+          type: number
+          format: double
+          nullable: true
+        pathParameters:
+          type: object
+          nullable: true
+          additionalProperties: {}
+          description: Values keyed by declared path parameter name
+        queryParameters:
+          type: object
+          nullable: true
+          additionalProperties: {}
+          description: Values keyed by declared query parameter name
+        headerParameters:
+          type: object
+          nullable: true
+          additionalProperties: {}
+          description: Values keyed by declared header parameter name
+        body:
+          description: Generic JSON request body for the imported operation
+    ExecutionResult:
+      type: object
+      required:
+        - execution
+        - providerResponse
+      properties:
+        execution:
+          $ref: '#/components/schemas/Execution'
+        providerResponse:
+          allOf:
+            - $ref: '#/components/schemas/ProviderResponse'
+          nullable: true
+          description: Transient response data; not persisted as execution evidence.
+    ProviderResponse:
+      type: object
+      required:
+        - statusCode
+        - contentType
+        - body
+        - truncated
+      properties:
+        statusCode:
+          type: integer
+          format: int32
+        contentType:
+          type: string
+          nullable: true
+        body:
+          type: string
+        truncated:
+          type: boolean
+    Execution:
+      type: object
+      required:
+        - id
+        - providerId
+        - apiDescriptionVersionId
+        - operationKey
+        - credentialBindingId
+        - idempotencyKey
+        - state
+        - requestedAt
+        - startedAt
+        - completedAt
+        - rejectionReason
+        - failureCode
+        - failureMessage
+        - responseStatusCode
+        - mutationSafety
+        - idempotencyDecision
+      properties:
+        id:
+          type: string
+          format: uuid
+        providerId:
+          type: string
+          format: uuid
+        apiDescriptionVersionId:
+          type: string
+          format: uuid
+        operationKey:
+          type: string
+        credentialBindingId:
+          type: string
+          format: uuid
+          nullable: true
+        idempotencyKey:
+          type: string
+          nullable: true
+        state:
+          $ref: '#/components/schemas/ExecutionState'
+        requestedAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        rejectionReason:
+          $ref: '#/components/schemas/ExecutionRejectionReason'
+          nullable: true
+        failureCode:
+          type: string
+          nullable: true
+        failureMessage:
+          type: string
+          nullable: true
+        responseStatusCode:
+          type: integer
+          format: int32
+          nullable: true
+        mutationSafety:
+          $ref: '#/components/schemas/MutationSafety'
+        idempotencyDecision:
+          $ref: '#/components/schemas/IdempotencyDecision'
+    ExecutionState:
+      type: integer
+      description: '0 = Requested; 1 = Running; 2 = Succeeded; 3 = Failed; 4 = Unknown; 5 = Rejected'
+      enum: [0, 1, 2, 3, 4, 5]
+    ExecutionRejectionReason:
+      type: integer
+      description: '0 = UnsupportedOperation; 1 = InvalidInput; 2 = CredentialUnavailable'
+      enum: [0, 1, 2]
+    MutationSafety:
+      type: integer
+      description: '0 = Safe; 1 = Unsafe; 2 = Unknown'
+      enum: [0, 1, 2]
+    IdempotencyDecision:
+      type: integer
+      description: '0 = SafeToRetry; 1 = UnsafeToRetry; 2 = Unknown'
+      enum: [0, 1, 2]
+    ExecutionInspection:
+      type: object
+      required:
+        - execution
+        - operation
+        - attempts
+        - evidence
+        - lastDurableCheckpoint
+        - outcomeConfidence
+        - unknownFacts
+        - replayDecision
+        - replayInvoked
+      properties:
+        execution:
+          $ref: '#/components/schemas/Execution'
+        operation:
+          allOf:
+            - $ref: '#/components/schemas/Operation'
+          nullable: true
+        attempts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExecutionAttempt'
+        evidence:
+          type: array
+          items:
+            $ref: '#/components/schemas/ExecutionEvidence'
+        lastDurableCheckpoint:
+          $ref: '#/components/schemas/ExecutionCheckpoint'
+        outcomeConfidence:
+          type: string
+          enum:
+            - RemoteOutcomeUnknown
+            - ObservedAndValidated
+            - NotApplicable
+        unknownFacts:
+          type: array
+          items:
+            type: string
+        replayDecision:
+          $ref: '#/components/schemas/ReplayDecision'
+        replayInvoked:
+          type: boolean
+          enum: [false]
+    ReplayEvaluation:
+      type: object
+      required:
+        - executionId
+        - replayDecision
+        - providerCalled
+        - reason
+      properties:
+        executionId:
+          type: string
+          format: uuid
+        replayDecision:
+          $ref: '#/components/schemas/ReplayDecision'
+        providerCalled:
+          type: boolean
+          enum: [false]
+        reason:
+          type: string
+    ReplayDecision:
+      type: integer
+      description: '0 = Allowed; 1 = Blocked; 2 = Unknown'
+      enum: [0, 1, 2]
+    ExecutionAttempt:
+      type: object
+      required:
+        - id
+        - executionId
+        - attemptNumber
+        - state
+        - requestedAt
+        - startedAt
+        - completedAt
+        - responseStatusCode
+        - failureCode
+        - failureMessage
+      properties:
+        id:
+          type: string
+          format: uuid
+        executionId:
+          type: string
+          format: uuid
+        attemptNumber:
+          type: integer
+          format: int32
+        state:
+          $ref: '#/components/schemas/ExecutionAttemptState'
+        requestedAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        responseStatusCode:
+          type: integer
+          format: int32
+          nullable: true
+        failureCode:
+          type: string
+          nullable: true
+        failureMessage:
+          type: string
+          nullable: true
+    ExecutionAttemptState:
+      type: integer
+      description: '0 = Created; 1 = Started; 2 = Sent; 3 = ResponseReceived; 4 = Failed; 5 = Unknown'
+      enum: [0, 1, 2, 3, 4, 5]
+    ExecutionEvidence:
+      type: object
+      required:
+        - id
+        - executionId
+        - kind
+        - occurredAt
+        - details
+        - attemptId
+        - checkpoint
+        - factsJson
+      properties:
+        id:
+          type: string
+          format: uuid
+        executionId:
+          type: string
+          format: uuid
+        kind:
+          $ref: '#/components/schemas/ExecutionEvidenceKind'
+        occurredAt:
+          type: string
+          format: date-time
+        details:
+          type: string
+          nullable: true
+        attemptId:
+          type: string
+          format: uuid
+          nullable: true
+        checkpoint:
+          $ref: '#/components/schemas/ExecutionCheckpoint'
+        factsJson:
+          type: string
+          nullable: true
+          description: Sanitized durable facts encoded as JSON text.
+    ExecutionEvidenceKind:
+      type: integer
+      description: >-
+        0 = ExecutionRequested; 1 = OperationResolved; 2 = InputValidated;
+        3 = ExecutionRejected; 4 = ExecutionStarted; 5 = RequestConstructed;
+        6 = RequestDispatchStarted; 7 = RequestSent; 8 = ResponseReceived;
+        9 = ResponseBodyObserved; 10 = ResponseSchemaValidated;
+        11 = ResponseSchemaRejected; 12 = CredentialResolution;
+        13 = AttemptFailed; 14 = RecoveryPerformed; 15 = ExecutionSucceeded;
+        16 = ExecutionFailed; 17 = ExecutionUnknown
+      enum: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]
+    ExecutionCheckpoint:
+      type: integer
+      description: >-
+        0 = None; 1 = Accepted; 2 = AttemptCreated; 3 = AttemptStarted;
+        4 = RequestConstructed; 5 = DispatchStarted; 6 = RequestSent;
+        7 = ResponseHeadersReceived; 8 = ResponseBodyObserved;
+        9 = ResponseValidated; 10 = AttemptFinalized;
+        11 = ExecutionFinalized; 12 = RecoveryPerformed
+      enum: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]

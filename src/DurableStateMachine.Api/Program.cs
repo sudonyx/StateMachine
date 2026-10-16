@@ -22,6 +22,9 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 builder.Services.AddOpenApi();
 builder.Services.AddScoped<MachineStore>();
+builder.Services.AddSingleton<EffectFaultPlan>();
+builder.Services.AddSingleton<SyntheticProviderStore>();
+builder.Services.AddScoped<EffectCoordinator>();
 
 var app = builder.Build();
 await using (var scope = app.Services.CreateAsyncScope())
@@ -30,6 +33,7 @@ await using (var scope = app.Services.CreateAsyncScope())
     await database.Database.EnsureCreatedAsync();
     await database.EnsureGate4SchemaAsync();
     await database.EnsureGate5SchemaAsync();
+    await database.EnsureGate6SchemaAsync();
 }
 
 app.Use(async (context, next) =>
@@ -46,6 +50,7 @@ app.Use(async (context, next) =>
             MachineDefinitionException validation => (StatusCodes.Status422UnprocessableEntity, "invalid-definition", validation.Message, validation.Issues),
             DefinitionConflictException conflict => (StatusCodes.Status409Conflict, "conflict", conflict.Message, (IReadOnlyList<ValidationIssue>?)null),
             ResourceNotFoundException missing => (StatusCodes.Status404NotFound, "not-found", missing.Message, (IReadOnlyList<ValidationIssue>?)null),
+            EffectInterruptionException interrupted => (StatusCodes.Status503ServiceUnavailable, "effect-interrupted", interrupted.Message, (IReadOnlyList<ValidationIssue>?)null),
             BadHttpRequestException badRequest => (badRequest.StatusCode, "invalid-request", badRequest.Message, (IReadOnlyList<ValidationIssue>?)null),
             JsonException malformed => (StatusCodes.Status400BadRequest, "malformed-json", malformed.Message, (IReadOnlyList<ValidationIssue>?)null),
             ArgumentException argument => (StatusCodes.Status400BadRequest, "invalid-request", argument.Message, (IReadOnlyList<ValidationIssue>?)null),
@@ -229,12 +234,79 @@ instances.MapGet("/{id}/history", async (string id, MachineStore store, Cancella
 instances.MapGet("/{id}/history/{historyId}", async (string id, string historyId, MachineStore store, CancellationToken cancellationToken) =>
     Results.Ok((await store.GetHistoryEntryAsync(id, historyId, cancellationToken)).ToResponse()))
     .WithName("GetTransitionHistory").WithSummary("Inspect one accepted transition.");
-instances.MapGet("/{id}/pending-work", async (string id, MachineStore store, CancellationToken cancellationToken) =>
+instances.MapGet("/{id}/pending-work", async (
+    string id, MachineStore store, EffectCoordinator coordinator, CancellationToken cancellationToken) =>
 {
     await store.GetInstanceAsync(id, cancellationToken);
-    return Results.Ok(new { instanceId = id, supported = false, items = Array.Empty<object>() });
+    var operations = await coordinator.ListAsync(id, cancellationToken);
+    var pending = new List<EffectOperationResponse>();
+    foreach (var operation in operations)
+    {
+        var response = await coordinator.GetResponseAsync(id, operation.OperationId, cancellationToken);
+        if (response.Status is "Pending" or "AttemptInitiated" or "OutcomeUnknown" or "ProviderSucceeded")
+        {
+            pending.Add(response);
+        }
+    }
+    return Results.Ok(new { instanceId = id, supported = true, items = pending });
 })
-    .WithName("ListPendingWork").WithSummary("Pending time-based and external work are not supported in language version 1.0.");
+    .WithName("ListPendingWork").WithSummary("Inspect unresolved Gate 6 effects; timers and scheduled work remain unsupported.");
+
+instances.MapPost("/{id}/effects", async (
+    string id, StartEffectRequest request, HttpRequest httpRequest, EffectCoordinator coordinator,
+    CancellationToken cancellationToken) =>
+{
+    if (!IsTrustedIngestion(httpRequest))
+    {
+        return Results.Json(new ApiError("trusted-ingestion-required",
+            "Synthetic effects can only be initiated through the configured controlled demonstration boundary."),
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+    var operation = await coordinator.RequestAsync(id, request, DateTimeOffset.UtcNow, cancellationToken);
+    return Results.Ok(operation);
+}).WithName("StartSyntheticEffect").WithSummary("Persist an effect intent, invoke a separate synthetic provider, and submit its result through Gate 5.");
+instances.MapPost("/{id}/effects/{operationId}/resume", async (
+    string id, string operationId, HttpRequest httpRequest, EffectCoordinator coordinator,
+    CancellationToken cancellationToken) =>
+{
+    if (!IsTrustedIngestion(httpRequest))
+    {
+        return Results.Json(new ApiError("trusted-ingestion-required",
+            "Effect recovery is restricted to the configured controlled demonstration boundary."),
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+    return Results.Ok(await coordinator.ResumeAsync(id, operationId, DateTimeOffset.UtcNow, cancellationToken));
+}).WithName("ResumeSyntheticEffect").WithSummary("Explicitly resume a specific effect according to its provider retry semantics.");
+instances.MapGet("/{id}/effects", async (
+    string id, EffectCoordinator coordinator, CancellationToken cancellationToken) =>
+{
+    var effects = await coordinator.ListAsync(id, cancellationToken);
+    var results = new List<EffectOperationResponse>(effects.Count);
+    foreach (var operation in effects)
+    {
+        results.Add(await coordinator.GetResponseAsync(id, operation.OperationId, cancellationToken));
+    }
+    return Results.Ok(results);
+}).WithName("ListSyntheticEffects").WithSummary("Inspect durable external-effect intents and their attempts.");
+instances.MapGet("/{id}/effects/{operationId}", async (
+    string id, string operationId, EffectCoordinator coordinator, CancellationToken cancellationToken) =>
+    Results.Ok(await coordinator.GetResponseAsync(id, operationId, cancellationToken)))
+    .WithName("GetSyntheticEffect").WithSummary("Inspect one external-effect operation and its known outcomes.");
+app.MapGet("/api/providers/{providerIdentity}/requests", async (
+    string providerIdentity, string? operationId, EffectCoordinator coordinator, CancellationToken cancellationToken) =>
+    Results.Ok(await coordinator.ListProviderRequestsAsync(providerIdentity, operationId, cancellationToken)))
+    .WithName("InspectSyntheticProvider").WithSummary("Inspect provider-side durable request records, separate from workflow evidence.");
+
+if (app.Environment.IsDevelopment() &&
+    string.Equals(Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS"), "true",
+        StringComparison.OrdinalIgnoreCase))
+{
+    app.MapPost("/api/test-controls/effects/{operationId}/{point}", (string operationId, string point, EffectFaultPlan plan) =>
+    {
+        plan.Arm(operationId, point);
+        return Results.Ok(new { operationId, point, armed = true });
+    }).WithName("ArmSyntheticEffectFault").WithSummary("Development-only one-shot fault injection for deterministic Gate 6 demonstrations.");
+}
 app.MapGet("/health", () => Results.Ok(new { status = "ok" })).WithTags("Operations");
 
 app.Run();

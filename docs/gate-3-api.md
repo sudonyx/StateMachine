@@ -206,7 +206,34 @@ The API returns `200 OK` with an inspectable message result for well-formed but 
 
 Definitions with an input policy reject `POST /api/instances/{id}/events` with `403 Forbidden`; the rejected legacy call is retained as an inbound receipt. Definitions without an input policy, including existing language 1.0 definitions and the Meridian integration workflow, retain the legacy event endpoint semantics. This is the explicit compatibility boundary; migrating a workflow to language 1.1 requires clients to use the declared input paths.
 
-The generated OpenAPI document at `GET /openapi/v1.json` includes the command, observation, expected-operation and inbound-message routes.
+The generated OpenAPI document at `GET /openapi/v1.json` includes the command, observation, expected-operation, inbound-message, effect-coordination and provider-inspection routes.
+
+## Gate 6 synthetic effects
+
+Gate 6 adds a controlled application-service path for three Orion effects. `POST /api/instances/{id}/effects` requires the trusted-ingestion header and accepts a stable operation ID plus fictional request data:
+
+```json
+{
+  "operationId": "offer-generation-123",
+  "capability": "offer-document",
+  "customerReference": "synthetic-customer-1",
+  "offerReference": "synthetic-offer-1"
+}
+```
+
+The other capabilities are `equipment-reservation` (requires `assetId`) and `customer-notification` (requires `customerReference` and `messageTemplate`). The endpoint persists the effect intent and corresponding Gate 5 expected operation together before invoking a provider. A successful provider response is stored locally and submitted to Gate 5; provider success alone does not accept a workflow event or transition. Synthetic provider IDs are selected by capability, not supplied by the caller.
+
+Inspect workflow-side intent and attempts with:
+
+- `GET /api/instances/{id}/effects`
+- `GET /api/instances/{id}/effects/{operationId}`
+- `GET /api/instances/{id}/pending-work` (unresolved Gate 6 effects; no timers)
+
+Inspect provider-side request evidence separately with `GET /api/providers/{providerIdentity}/requests?operationId=...`. Provider files are independent SQLite databases selected by `DURABLE_STATE_MACHINE_PROVIDER_DB_DIR`. A provider record may show success while workflow-side status remains `OutcomeUnknown`.
+
+`POST /api/instances/{id}/effects/{operationId}/resume` explicitly retries/reconciles one operation. Offer generation is idempotent by operation ID. Equipment reservations enforce unique assets and resolve a same-operation retry to the original reservation. Customer notifications are non-idempotent; an uncertain notification retry is refused with `409 Conflict` because it might send twice. No general retry worker is present.
+
+Fault injection endpoints are only registered when the API runs in Development and `DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS=true`. They are test/demo controls, not normal production routes. See [gate-6-design.md](./gate-6-design.md) for the boundary contract and [gate-6-crash-matrix.md](./gate-6-crash-matrix.md) for all seven tested failure windows and the distinction between injected faults and process termination.
 
 ## Attempts and accepted-transition history
 
@@ -219,7 +246,7 @@ Attempts have stable GUID identifiers. History entries link back to their origin
 
 ## Pending work
 
-`GET /api/instances/{id}/pending-work` explicitly returns `supported: false` and an empty item list. The current definition language/runtime does not implement timers or external effects, so there is no pending work to schedule or inspect.
+`GET /api/instances/{id}/pending-work` reports unresolved Gate 6 effect operations. Timers and scheduled background work remain unsupported; pending effects are not automatically dispatched or retried.
 
 ## Errors
 
@@ -228,9 +255,11 @@ Application errors use `{ "code": "...", "message": "...", "issues": [...] }` wh
 | HTTP status | Meaning |
 | --- | --- |
 | `400` | Malformed request, invalid scalar facts, missing required request values, unsupported evidence values, or fact-binding collision |
-| `404` | Unknown definition, instance, attempt or history entry |
-| `409` | Immutable definition identity conflict, duplicate instance ID, or concurrency conflict |
+| `403` | Missing trusted-ingestion credential for an observation or effect-control path |
+| `404` | Unknown definition, instance, attempt, history entry or effect operation |
+| `409` | Immutable identity conflict, duplicate instance ID, concurrency conflict, or retry refused by a non-idempotent provider |
 | `422` | Invalid or unsupported machine definition |
+| `503` | A configured development-only Gate 6 interruption was injected at a named boundary |
 | `500` | Unexpected server error; details are logged server-side and not returned |
 
 Malformed JSON bodies are rejected by ASP.NET Core as `400 Bad Request`. Workflow-level rejections are not HTTP errors; inspect the response attempt status and reason.

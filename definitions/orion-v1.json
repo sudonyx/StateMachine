@@ -1,7 +1,7 @@
 {
   "languageVersion": "1.1",
   "id": "orion-equipment-lease",
-  "version": "2.0",
+  "version": "3.0",
   "initialState": "Draft",
   "states": [
     { "id": "Draft" },
@@ -9,6 +9,8 @@
     { "id": "AssessmentReady" },
     { "id": "ManualReview" },
     { "id": "AwaitingOfferAcceptance" },
+    { "id": "AssetReservationPending" },
+    { "id": "CustomerNotificationPending" },
     { "id": "Approved", "terminal": true },
     { "id": "Rejected", "terminal": true },
     { "id": "Cancelled", "terminal": true }
@@ -20,6 +22,8 @@
     "Approve",
     "IssueOffer",
     "AcceptOffer",
+    "EquipmentReserved",
+    "CustomerNotified",
     "Reject",
     "Cancel"
   ],
@@ -44,6 +48,16 @@
         "name": "OfferDocumentGenerated",
         "event": "IssueOffer",
         "requiredEvidence": ["documentId", "offerDigest"]
+      },
+      {
+        "name": "EquipmentReserved",
+        "event": "EquipmentReserved",
+        "requiredEvidence": ["reservationId", "assetId"]
+      },
+      {
+        "name": "CustomerNotified",
+        "event": "CustomerNotified",
+        "requiredEvidence": ["deliveryId", "messageDigest"]
       }
     ]
   },
@@ -153,7 +167,7 @@
       "id": "accept-valid-offer",
       "source": "AwaitingOfferAcceptance",
       "event": "AcceptOffer",
-      "target": "Approved",
+      "target": "AssetReservationPending",
       "description": "The offer is still valid at the explicitly supplied trusted evaluation time.",
       "guard": {
         "op": "and",
@@ -162,6 +176,20 @@
           { "op": "exists", "fact": "offerEvaluationTime" }
         ]
       }
+    },
+    {
+      "id": "asset-reservation-confirmed",
+      "source": "AssetReservationPending",
+      "event": "EquipmentReserved",
+      "target": "CustomerNotificationPending",
+      "description": "The synthetic provider confirms the requested equipment reservation."
+    },
+    {
+      "id": "customer-notified",
+      "source": "CustomerNotificationPending",
+      "event": "CustomerNotified",
+      "target": "Approved",
+      "description": "The synthetic provider confirms notification delivery."
     },
     {
       "id": "approve-manual-review",
@@ -223,6 +251,22 @@
       "event": "Cancel",
       "target": "Cancelled",
       "description": "An offer-awaiting application is cancelled when the supplied assessment permits it.",
+      "guard": { "op": "eq", "fact": "cancellationPermitted", "value": true }
+    },
+    {
+      "id": "cancel-reservation-pending",
+      "source": "AssetReservationPending",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "An application is cancelled while equipment reservation is outstanding.",
+      "guard": { "op": "eq", "fact": "cancellationPermitted", "value": true }
+    },
+    {
+      "id": "cancel-notification-pending",
+      "source": "CustomerNotificationPending",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "An application is cancelled while customer notification is outstanding.",
       "guard": { "op": "eq", "fact": "cancellationPermitted", "value": true }
     }
   ]

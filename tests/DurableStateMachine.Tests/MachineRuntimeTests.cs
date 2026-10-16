@@ -145,7 +145,7 @@ public sealed class MachineRuntimeTests
         Assert.Equal("AwaitingOfferAcceptance", runtime.Send("offer", "IssueOffer").Instance.CurrentState);
         Assert.Equal(EvaluationStatus.Rejected, runtime.Send("offer", "AcceptOffer",
             TestSupport.Facts(("offerValidAtEvaluation", FactValue.From(true)))).Evaluation.Status);
-        Assert.Equal("Approved", runtime.Send("offer", "AcceptOffer",
+        Assert.Equal("AssetReservationPending", runtime.Send("offer", "AcceptOffer",
             TestSupport.Facts(
                 ("offerValidAtEvaluation", FactValue.From(true)),
                 ("offerEvaluationTime", FactValue.From("2026-10-14T15:37:00Z"))),

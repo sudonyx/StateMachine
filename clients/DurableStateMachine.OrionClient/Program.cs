@@ -7,94 +7,101 @@ var definitionPath = args.ElementAtOrDefault(0) ?? Path.Combine("definitions", "
 if (string.IsNullOrWhiteSpace(trustedKey))
 {
     throw new InvalidOperationException(
-        "Set DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY for the controlled Orion observation demonstration.");
+        "Set DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY for the controlled Orion effect demonstration.");
 }
 
 var instanceId = $"orion-demo-{Guid.NewGuid():N}";
+var lateInstanceId = $"orion-late-demo-{Guid.NewGuid():N}";
 using var client = new HttpClient { BaseAddress = new Uri(apiUrl.TrimEnd('/') + "/") };
+client.DefaultRequestHeaders.TryAddWithoutValidation("X-State-Machine-Trusted-Ingestion-Key", trustedKey);
 using var definition = JsonDocument.Parse(await File.ReadAllTextAsync(definitionPath));
 var definitionVersion = definition.RootElement.GetProperty("version").GetString()
     ?? throw new InvalidOperationException("The Orion definition has no version.");
 await EnsureSuccess(await client.PostAsJsonAsync("api/definitions", definition.RootElement));
 
-await PrintResponse(await client.PostAsJsonAsync("api/instances", new
-{
-    id = instanceId,
-    definitionId = "orion-equipment-lease",
-    definitionVersion,
-    facts = new
-    {
-        documentsComplete = true,
-        riskScore = 75,
-        equipmentValue = 50000,
-        checksComplete = true,
-        eligibilityDecision = "Eligible",
-        cancellationPermitted = true
-    }
-}));
+await CreateInstance(instanceId);
+await SubmitCommand(instanceId, "SubmitApplication");
 
-await SubmitCommand("SubmitApplication");
-
-var operationId = $"offer-generation-{Guid.NewGuid():N}";
-var revision = await CurrentRevision();
-client.DefaultRequestHeaders.TryAddWithoutValidation("X-State-Machine-Trusted-Ingestion-Key", trustedKey);
-await PrintResponse(await client.PostAsJsonAsync(
-    $"api/instances/{Uri.EscapeDataString(instanceId)}/expected-operations", new
-    {
-        operationId,
-        observationType = "OfferDocumentGenerated",
-        sourceIdentity = "synthetic-offer-provider",
-        expectedRevision = revision
-    }));
-
+var revision = await CurrentRevision(instanceId);
 client.DefaultRequestHeaders.Remove("X-State-Machine-Trusted-Ingestion-Key");
 await SubmitObservation(
+    instanceId,
     $"forged-{Guid.NewGuid():N}",
     "not-expected",
     revision,
     "synthetic-offer-provider",
-    new { documentId = "forged-document", offerDigest = "forged-digest" });
+    new { documentId = "forged-document", offerDigest = "sha256:forged" });
 client.DefaultRequestHeaders.TryAddWithoutValidation("X-State-Machine-Trusted-Ingestion-Key", trustedKey);
 
-await SubmitObservation(
-    $"offer-result-{Guid.NewGuid():N}",
-    operationId,
-    revision,
-    "synthetic-offer-provider",
-    new { documentId = "synthetic-offer-1", offerDigest = "sha256:synthetic-offer" });
-
-var lateOperationId = $"late-offer-generation-{Guid.NewGuid():N}";
-revision = await CurrentRevision();
-await PrintResponse(await client.PostAsJsonAsync(
-    $"api/instances/{Uri.EscapeDataString(instanceId)}/expected-operations", new
-    {
-        operationId = lateOperationId,
-        observationType = "OfferDocumentGenerated",
-        sourceIdentity = "synthetic-offer-provider",
-        expectedRevision = revision
-    }));
-
-await SubmitCommand("CancelApplication");
-await SubmitObservation(
-    $"late-result-{Guid.NewGuid():N}",
-    lateOperationId,
-    revision,
-    "synthetic-offer-provider",
-    new { documentId = "late-document", offerDigest = "sha256:late-offer" });
-await SubmitCommand("AcceptOffer", new
+await StartEffect(instanceId, "offer-document", $"offer-{Guid.NewGuid():N}", new
+{
+    customerReference = "synthetic-customer-1",
+    offerReference = "synthetic-offer-1"
+});
+await SubmitCommand(instanceId, "AcceptOffer", new
 {
     offerValidAtEvaluation = true,
     offerEvaluationTime = DateTimeOffset.UtcNow.ToString("O")
 });
+await StartEffect(instanceId, "equipment-reservation", $"reservation-{Guid.NewGuid():N}", new
+{
+    assetId = "fictional-asset-1"
+});
+await StartEffect(instanceId, "customer-notification", $"notification-{Guid.NewGuid():N}", new
+{
+    customerReference = "synthetic-customer-1",
+    messageTemplate = "Synthetic offer status update"
+});
 
 await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(instanceId)}"));
-await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(instanceId)}/inbound-messages"));
+await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(instanceId)}/effects"));
 await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(instanceId)}/history"));
-await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(instanceId)}/attempts"));
 
-async Task SubmitCommand(string commandType, object? facts = null)
+await CreateInstance(lateInstanceId);
+await SubmitCommand(lateInstanceId, "SubmitApplication");
+var lateOperationId = $"late-offer-{Guid.NewGuid():N}";
+var lateRevision = await CurrentRevision(lateInstanceId);
+await PrintResponse(await client.PostAsJsonAsync(
+    $"api/instances/{Uri.EscapeDataString(lateInstanceId)}/expected-operations", new
+    {
+        operationId = lateOperationId,
+        observationType = "OfferDocumentGenerated",
+        sourceIdentity = "synthetic-offer-provider",
+        expectedRevision = lateRevision
+    }));
+await SubmitCommand(lateInstanceId, "CancelApplication");
+await SubmitObservation(
+    lateInstanceId,
+    $"late-result-{Guid.NewGuid():N}",
+    lateOperationId,
+    lateRevision,
+    "synthetic-offer-provider",
+    new { documentId = "late-document", offerDigest = "sha256:late-offer" });
+await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(lateInstanceId)}"));
+await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(lateInstanceId)}/inbound-messages"));
+
+async Task CreateInstance(string id)
 {
-    var currentRevision = await CurrentRevision();
+    await PrintResponse(await client.PostAsJsonAsync("api/instances", new
+    {
+        id,
+        definitionId = "orion-equipment-lease",
+        definitionVersion,
+        facts = new
+        {
+            documentsComplete = true,
+            riskScore = 75,
+            equipmentValue = 50000,
+            checksComplete = true,
+            eligibilityDecision = "Eligible",
+            cancellationPermitted = true
+        }
+    }));
+}
+
+async Task SubmitCommand(string id, string commandType, object? facts = null)
+{
+    var currentRevision = await CurrentRevision(id);
     Console.WriteLine($"Submitting command {commandType} at revision {currentRevision}");
     var request = new Dictionary<string, object?>
     {
@@ -116,10 +123,22 @@ async Task SubmitCommand(string commandType, object? facts = null)
         };
     }
     await PrintResponse(await client.PostAsJsonAsync(
-        $"api/instances/{Uri.EscapeDataString(instanceId)}/commands", request));
+        $"api/instances/{Uri.EscapeDataString(id)}/commands", request));
+}
+
+async Task StartEffect(string id, string capability, string operationId, object request)
+{
+    Console.WriteLine($"Starting synthetic {capability} operation {operationId}");
+    var body = JsonSerializer.SerializeToElement(request);
+    var values = body.EnumerateObject().ToDictionary(property => property.Name, property => property.Value.Clone());
+    values["operationId"] = JsonSerializer.SerializeToElement(operationId);
+    values["capability"] = JsonSerializer.SerializeToElement(capability);
+    await PrintResponse(await client.PostAsJsonAsync(
+        $"api/instances/{Uri.EscapeDataString(id)}/effects", values));
 }
 
 async Task SubmitObservation(
+    string id,
     string messageId,
     string correlationId,
     long expectedRevision,
@@ -128,7 +147,7 @@ async Task SubmitObservation(
 {
     Console.WriteLine($"Submitting observation {correlationId} at revision {expectedRevision}");
     await PrintResponse(await client.PostAsJsonAsync(
-        $"api/instances/{Uri.EscapeDataString(instanceId)}/observations", new
+        $"api/instances/{Uri.EscapeDataString(id)}/observations", new
         {
             messageId,
             type = "OfferDocumentGenerated",
@@ -140,9 +159,9 @@ async Task SubmitObservation(
         }));
 }
 
-async Task<long> CurrentRevision()
+async Task<long> CurrentRevision(string id)
 {
-    var instance = await client.GetFromJsonAsync<JsonElement>($"api/instances/{Uri.EscapeDataString(instanceId)}");
+    var instance = await client.GetFromJsonAsync<JsonElement>($"api/instances/{Uri.EscapeDataString(id)}");
     return instance.GetProperty("revision").GetInt64();
 }
 

@@ -141,6 +141,157 @@ public sealed class MachineStore(MachineDbContext db)
         return MachineDefinitionLoader.Load(definition.DefinitionJson).InputPolicy is not null;
     }
 
+    public async Task<EffectIntentResult> CreateEffectIntentAsync(
+        string instanceId,
+        string operationId,
+        string capability,
+        string providerIdentity,
+        string observationType,
+        string requestJson,
+        string requestDigest,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(operationId) || string.IsNullOrWhiteSpace(capability) ||
+            string.IsNullOrWhiteSpace(providerIdentity) || string.IsNullOrWhiteSpace(observationType))
+        {
+            throw new ArgumentException("Operation, capability, provider and observation identities are required.");
+        }
+
+        InstanceGate gate;
+        lock (InstanceLocksSync)
+        {
+            if (!InstanceLocks.TryGetValue(instanceId, out gate!))
+            {
+                gate = new InstanceGate();
+                InstanceLocks.Add(instanceId, gate);
+            }
+            gate.Users++;
+        }
+        var entered = false;
+        try
+        {
+            await gate.Semaphore.WaitAsync(cancellationToken);
+            entered = true;
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var existingEffect = await db.EffectOperations.AsNoTracking().SingleOrDefaultAsync(
+                record => record.InstanceId == instanceId && record.OperationId == operationId, cancellationToken);
+            if (existingEffect is not null)
+            {
+                if (existingEffect.Capability != capability ||
+                    !string.Equals(existingEffect.RequestDigest, requestDigest, StringComparison.Ordinal))
+                {
+                    throw new DefinitionConflictException(
+                        $"Operation '{operationId}' was already requested with different effect data.");
+                }
+                return new EffectIntentResult(existingEffect, AlreadyRequested: true);
+            }
+
+            var instance = await db.Instances.SingleOrDefaultAsync(record => record.Id == instanceId, cancellationToken)
+                ?? throw new ResourceNotFoundException($"Instance '{instanceId}' does not exist.");
+            var definitionRecord = await db.Definitions.AsNoTracking().SingleAsync(
+                record => record.Id == instance.DefinitionId && record.Version == instance.DefinitionVersion,
+                cancellationToken);
+            var definition = MachineDefinitionLoader.Load(definitionRecord.DefinitionJson);
+            if (definition.States[instance.CurrentState].IsTerminal)
+            {
+                throw new ArgumentException("An external effect cannot be requested for a terminal instance.");
+            }
+            if (definition.InputPolicy is null ||
+                !definition.InputPolicy.Observations.TryGetValue(observationType, out var mapping))
+            {
+                throw new ArgumentException(
+                    $"Observation '{observationType}' is not declared by definition '{instance.DefinitionId}@{instance.DefinitionVersion}'.");
+            }
+            if (await db.ExpectedOperations.AsNoTracking().AnyAsync(
+                    record => record.InstanceId == instanceId && record.OperationId == operationId, cancellationToken))
+            {
+                throw new DefinitionConflictException(
+                    $"An expected operation with ID '{operationId}' already exists for instance '{instanceId}'.");
+            }
+
+            var requiredEvidenceJson = JsonSerializer.Serialize(
+                mapping.RequiredEvidence.Order(StringComparer.Ordinal).ToArray(), StoredJsonOptions);
+            var expected = new ExpectedOperationRecord
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                InstanceId = instanceId,
+                OperationId = operationId,
+                ObservationType = observationType,
+                SourceIdentity = providerIdentity,
+                ExpectedAt = now,
+                ExpectedRevision = instance.Revision,
+                RequiredEvidenceJson = requiredEvidenceJson,
+                Status = "Expected"
+            };
+            var effect = new EffectOperationRecord
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                InstanceId = instanceId,
+                OperationId = operationId,
+                DefinitionId = instance.DefinitionId,
+                DefinitionVersion = instance.DefinitionVersion,
+                ExecutionRevision = instance.Revision,
+                Capability = capability,
+                ProviderIdentity = providerIdentity,
+                ObservationType = observationType,
+                RequestJson = requestJson,
+                RequestDigest = requestDigest,
+                Status = "Pending",
+                RequestedAt = now,
+                UpdatedAt = now
+            };
+            db.ExpectedOperations.Add(expected);
+            db.EffectOperations.Add(effect);
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new EffectIntentResult(effect, AlreadyRequested: false);
+        }
+        finally
+        {
+            if (entered)
+            {
+                gate.Semaphore.Release();
+            }
+            lock (InstanceLocksSync)
+            {
+                gate.Users--;
+                if (gate.Users == 0)
+                {
+                    InstanceLocks.Remove(instanceId);
+                }
+            }
+        }
+    }
+
+    public async Task<IReadOnlyList<EffectOperationRecord>> ListEffectOperationsAsync(
+        string instanceId,
+        CancellationToken cancellationToken)
+    {
+        await EnsureInstanceExistsAsync(instanceId, cancellationToken);
+        return await db.EffectOperations.AsNoTracking()
+            .Where(record => record.InstanceId == instanceId)
+            .OrderBy(record => record.RequestedAt)
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task<EffectOperationRecord> GetEffectOperationAsync(
+        string instanceId,
+        string operationId,
+        CancellationToken cancellationToken) =>
+        await db.EffectOperations.AsNoTracking().SingleOrDefaultAsync(
+            record => record.InstanceId == instanceId && record.OperationId == operationId, cancellationToken)
+        ?? throw new ResourceNotFoundException(
+            $"Effect operation '{operationId}' does not exist for instance '{instanceId}'.");
+
+    public async Task<IReadOnlyList<EffectAttemptRecord>> ListEffectAttemptsAsync(
+        string effectOperationId,
+        CancellationToken cancellationToken) =>
+        await db.EffectAttempts.AsNoTracking()
+            .Where(record => record.EffectOperationId == effectOperationId)
+            .OrderBy(record => record.AttemptNumber)
+            .ToListAsync(cancellationToken);
+
     public async Task<ExpectedOperationRecord> RegisterExpectedOperationAsync(
         string instanceId,
         string operationId,
@@ -1025,6 +1176,7 @@ public sealed record MachineInstanceDetails(string Id, string DefinitionId, stri
 public sealed record SubmissionResult(InputAttemptRecord Attempt, MachineInstanceDetails Instance,
     TransitionHistoryRecord? Transition, bool ConcurrencyConflict);
 public sealed record InboundProcessingResult(InboundMessageRecord Message, SubmissionResult? Submission);
+public sealed record EffectIntentResult(EffectOperationRecord Operation, bool AlreadyRequested);
 
 public sealed class DefinitionConflictException(string message) : Exception(message);
 public sealed class ResourceNotFoundException(string message) : Exception(message);
