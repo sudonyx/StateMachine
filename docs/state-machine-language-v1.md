@@ -1,6 +1,6 @@
-# State-machine language 1.0 and 1.1
+# State-machine language 1.0, 1.1 and 1.2
 
-The runtime accepts deliberately small JSON definition formats. Definitions are parsed and semantically validated before registration; unsupported or unknown properties are errors rather than ignored input. Language 1.0 retains its original event-submission semantics. Language 1.1 adds opt-in input mappings; it does not reinterpret definitions already registered as language 1.0.
+The runtime accepts deliberately small JSON definition formats. Definitions are parsed and semantically validated before registration; unsupported or unknown properties are errors rather than ignored input. Language 1.0 retains its original event-submission semantics. Language 1.1 adds opt-in input mappings. Language 1.2 adds declarative durable timers while preserving the interpretation of existing 1.0 and 1.1 definitions.
 
 ## Structure
 
@@ -30,7 +30,7 @@ The runtime accepts deliberately small JSON definition formats. Definitions are 
 
 All top-level properties shown are required. `description` is optional; all other transition properties are required. A state is nonterminal unless `"terminal": true`. IDs are non-empty, case-sensitive strings. Each `(id, version)` identifies one immutable registered definition.
 
-Language 1.1 may additionally declare an input policy:
+Language 1.1 and 1.2 may additionally declare an input policy:
 
 ```json
 {
@@ -52,7 +52,56 @@ Language 1.1 may additionally declare an input policy:
 }
 ```
 
-Both `commands` and `observations` arrays are required when `inputPolicy` is present. Each mapping name is unique within its kind and maps to a declared workflow event. Observation mappings list required evidence keys. Language 1.0 definitions must not contain `inputPolicy`; register a new immutable definition version using language 1.1 to opt in.
+Both `commands` and `observations` arrays are required when `inputPolicy` is present. Each mapping name is unique within its kind and maps to a declared workflow event. Observation mappings list required evidence keys. Language 1.0 definitions must not contain `inputPolicy`; register a new immutable definition version using language 1.1 or 1.2 to opt in.
+
+## Language 1.2 timers
+
+Language 1.2 may additionally declare timers. A timer is scheduled only when its named transition is accepted:
+
+```json
+{
+  "languageVersion": "1.2",
+  "id": "timed-example",
+  "version": "2",
+  "initialState": "Open",
+  "states": [{ "id": "Open" }, { "id": "Expired", "terminal": true }],
+  "events": ["Start", "DeadlineReached"],
+  "inputPolicy": {
+    "commands": [{ "name": "Start", "event": "Start" }],
+    "observations": []
+  },
+  "transitions": [
+    { "id": "start", "source": "Open", "event": "Start", "target": "Open" },
+    { "id": "expire", "source": "Open", "event": "DeadlineReached", "target": "Expired" }
+  ],
+  "timers": [{
+    "id": "deadline",
+    "onTransition": "start",
+    "duration": "P7D",
+    "event": "DeadlineReached",
+    "whileState": "Open",
+    "cancelOnTransitions": [],
+    "blockedEvents": [],
+    "invalidatedByDueTimers": []
+  }]
+}
+```
+
+Timer properties:
+
+- `id` is unique within the definition.
+- `onTransition` identifies the accepted transition that starts this scheduling occurrence.
+- `duration` is a positive ISO-8601 duration (`P10D`, `PT12H`, etc.). It is added once to the accepted transition's server-side UTC time.
+- `event` is a declared event evaluated through the ordinary deterministic transition evaluator when due.
+- `whileState` is the state in which the timer remains eligible. Leaving it cancels pending timers, even if a later transition re-enters the same state.
+- `cancelOnTransitions` optionally lists accepted transition IDs that cancel it even if the destination state is unchanged.
+- `blockedEvents` optionally lists business events refused at or after the persisted due instant. This closes the race where a due but unprocessed deadline could otherwise be defeated by a late business event.
+- `invalidatedByDueTimers` optionally lists timer declaration IDs whose persisted deadline suppresses this timer once that other timer is due, even if it has not yet been processed.
+- `effectIntent` is optional. When the timer event is accepted, the configured capability's durable Gate 7 effect intent and expected observation are created in the same SQLite transaction. It does not invoke a provider.
+
+`timers` is permitted only in language 1.2. A definition with timers must declare `inputPolicy`; timer-generated events cannot be mapped to caller-submittable commands or observations. Direct `/events` submissions are restricted for timed definitions. Ordinary clients cannot make a timer authoritative by submitting its ID or its event.
+
+The persistence layer records the accepted trigger and history identity, originating revision, definition ID/version, trigger time, deadline calculation time and exact UTC `dueAt`. Restart processing reads that persisted value; it does not recalculate from the current definition. The due processor validates the bound definition and current `whileState`, records its processing outcome, and passes eligible events through the same evaluator as other workflow inputs.
 
 ## Definition semantics and validation
 
@@ -62,8 +111,8 @@ Both `commands` and `observations` arrays are required when `inputPolicy` is pre
 - Every source and target must name a declared state; every transition event must be declared.
 - Terminal states cannot have outgoing transitions.
 - Two unguarded transitions cannot share a source and event. Guarded overlaps are checked when facts are evaluated; runtime ambiguity is refused.
-- Language versions `1.0` and `1.1` are accepted. Unknown JSON properties and unsupported guard operators are errors. Language 1.1 adds only the optional input policy described above; the flat-state and guard semantics are unchanged.
-- States are flat. Hierarchy, parallel regions, entry/exit actions, timers, arbitrary code, side effects and definition migration are unsupported.
+- Language versions `1.0`, `1.1` and `1.2` are accepted. Unknown JSON properties and unsupported guard operators are errors. Language 1.1 adds input policies; language 1.2 adds the optional timer declarations described above. The flat-state and guard semantics remain unchanged.
+- States are flat. Hierarchy, parallel regions, entry/exit actions, arbitrary code and definition migration are unsupported. Timer declarations do not execute code or call providers.
 
 Validation exceptions expose a list of `ValidationIssue` values (`Code`, JSON `Path`, and `Message`). Invalid JSON is reported as `invalid-json`.
 
@@ -106,4 +155,4 @@ The evaluator first refuses unknown current states, terminal states and undeclar
 
 Definition order never breaks ties. Results include the prior state, event, selected transition and target when accepted, guard findings, a reason code, and an explanation. Rejected, ambiguous and unresolved results do not change an instance.
 
-The transition and guard semantics are shared by both language versions. Language 1.1 adds declared command/observation-to-event mappings; it does not change transition selection or the Gate 4 immutable evaluation context.
+The transition and guard semantics are shared by all language versions. Language 1.1 adds declared command/observation-to-event mappings; language 1.2 adds persisted timer inputs outside the evaluator. Neither changes transition selection or the Gate 4 immutable evaluation context.

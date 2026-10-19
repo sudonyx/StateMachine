@@ -3,7 +3,7 @@ using System.Text.Json;
 
 var apiUrl = Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_API_URL") ?? "http://localhost:5000";
 var trustedKey = Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY");
-var definitionPath = args.ElementAtOrDefault(0) ?? Path.Combine("definitions", "orion-v1.json");
+var definitionPath = args.ElementAtOrDefault(0) ?? Path.Combine("definitions", "orion-v4.json");
 if (string.IsNullOrWhiteSpace(trustedKey))
 {
     throw new InvalidOperationException(
@@ -38,11 +38,13 @@ await StartEffect(instanceId, "offer-document", $"offer-{Guid.NewGuid():N}", new
     customerReference = "synthetic-customer-1",
     offerReference = "synthetic-offer-1"
 });
+await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(instanceId)}/timers"));
 await SubmitCommand(instanceId, "AcceptOffer", new
 {
     offerValidAtEvaluation = true,
     offerEvaluationTime = DateTimeOffset.UtcNow.ToString("O")
 });
+await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(instanceId)}/timers"));
 await StartEffect(instanceId, "equipment-reservation", $"reservation-{Guid.NewGuid():N}", new
 {
     assetId = "fictional-asset-1"

@@ -1,6 +1,6 @@
 # Durable State Machine
 
-A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 7 routes three synthetic Orion effects through the independently running Generic Harness and retains durable correlation between harness execution evidence and Gate 5 workflow transitions. Gate 6's direct provider path remains available only for development/test comparison. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
+A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 7 routes synthetic Orion effects through the independently running Generic Harness and retains durable correlation between harness execution evidence and Gate 5 workflow transitions. Gate 8 adds versioned declarative timers, persisted UTC deadlines, atomic timer lifecycle updates, explicit due processing and restart recovery. Gate 6's direct provider path remains available only for development/test comparison. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
 
 ## Requirements, build and tests
 
@@ -14,8 +14,8 @@ dotnet test DurableStateMachine.slnx
 ## Solution structure
 
 - `src/DurableStateMachine.Core/` — definition loading, validation, typed facts and pure deterministic evaluation.
-- `src/DurableStateMachine.Persistence/` — EF Core SQLite records and transactional runtime/input/effect-intent operations.
-- `src/DurableStateMachine.Api/` — HTTP endpoints, Gate 7 harness adapter, development-only Gate 6 direct coordinator, synthetic provider stores, DTOs, error mapping and generated OpenAPI document.
+- `src/DurableStateMachine.Persistence/` — EF Core SQLite records and transactional runtime/input/effect-intent/timer operations.
+- `src/DurableStateMachine.Api/` — HTTP endpoints, Gate 7 harness adapter, Gate 8 timer processor, development-only Gate 6 direct coordinator, synthetic provider stores, DTOs, error mapping and generated OpenAPI document.
 - `src/DurableStateMachine.ProviderHost/` — independently runnable HTTP host for each synthetic provider capability and its generated OpenAPI description.
 - `clients/DurableStateMachine.Cli/` — generic command-line HTTP client.
 - `clients/DurableStateMachine.OrionClient/` — Orion scenario using the HTTP contract only.
@@ -63,16 +63,16 @@ The REST routes and request/response examples are in [gate-3-api.md](./docs/gate
 
 ## Orion client demonstration
 
-The Orion definition is version 3.0 using language 1.1. Configure the same local-only demonstration key on the API and client process. Gate 7 requires the Generic Harness and all three provider hosts to be running, and exact provider/API-description/operation bindings must be configured on the API. Follow [gate-7-integration.md](./docs/gate-7-integration.md) to start and register those providers before running the client. The key is a controlled test boundary, not production authentication:
+The Orion client defaults to definition version 4.0 using language 1.2; version 3.0/language 1.1 remains available as the unchanged Gate 7 baseline. Configure the same local-only demonstration key on the API and client process. Gate 7 requires the Generic Harness and all three provider hosts to be running, and exact provider/API-description/operation bindings must be configured on the API. Follow [gate-7-integration.md](./docs/gate-7-integration.md) to start and register those providers before running the client. The key is a controlled test boundary, not production authentication:
 
 ```powershell
 $env:DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY = "<set-a-local-random-value>"
-dotnet run --project clients\DurableStateMachine.OrionClient -- definitions\orion-v1.json
+dotnet run --project clients\DurableStateMachine.OrionClient
 ```
 
-The client registers or reuses the exact Orion definition, creates a synthetic instance, demonstrates that an untrusted forged observation cannot progress it, then runs offer-document generation, asset reservation and customer notification through the Generic Harness. A successful provider result advances Orion only through a Gate 5 accepted observation. A second instance demonstrates cancellation and a late stale observation. The client does not use the direct provider route.
+The client registers or reuses the exact Orion definition, creates a synthetic instance, demonstrates that an untrusted forged observation cannot progress it, then runs offer-document generation, asset reservation and customer notification through the Generic Harness. A successful provider result advances Orion only through a Gate 5 accepted observation. It inspects the persisted offer reminder/expiry deadlines before acceptance and their cancellation afterward. A second instance demonstrates cancellation and a late stale observation. The client does not use the direct provider route.
 
-Language 1.1 definitions declare allowed command and observation mappings. Their direct `/events` endpoint is restricted; use `/commands` for requests and `/observations` for external claims. Observation authority requires an expected operation and the configured `X-State-Machine-Trusted-Ingestion-Key`; a claimed source label or `trusted` field is not authority. Configure the key for the API separately and set it in the client environment before running the Orion demo.
+Language 1.1 and 1.2 definitions declare allowed command and observation mappings. Their direct `/events` endpoint is restricted; use `/commands` for requests and `/observations` for external claims. Timed definitions additionally restrict timer events to the durable timer processor. Observation authority requires an expected operation and the configured `X-State-Machine-Trusted-Ingestion-Key`; a claimed source label or `trusted` field is not authority. Configure the key for the API separately and set it in the client environment before running the Orion demo.
 
 See [gate-5-design.md](./docs/gate-5-design.md) for input identity, duplicate/stale semantics, expected-operation evidence and the explicit local-demo limitations.
 
@@ -81,6 +81,23 @@ See [gate-5-design.md](./docs/gate-5-design.md) for input identity, duplicate/st
 `POST /api/instances/{id}/effects` accepts the three declared synthetic capabilities and submits each through the Generic Harness. Configure exact bindings under `Harness:Capabilities:{capability}`; runtime code contains no harness/provider IDs. `GET /api/instances/{id}/effects/{operationId}/inspection` fetches harness execution, attempts, evidence and a non-invoking replay-safety evaluation. An unresolved `OutcomeUnknown` is not converted into failure, and resume never re-invokes a known harness execution. If the initial harness response is lost before the execution ID is committed locally, the current harness API offers no idempotency-key lookup, so the adapter preserves the unresolved correlation gap instead of re-submitting.
 
 See [gate-7-design.md](./docs/gate-7-design.md) for the trust, persistence and recovery boundaries and [gate-7-integration.md](./docs/gate-7-integration.md) for provider registration, environment configuration, the Orion scenario and fault demonstrations. The Gate 6 direct-provider path is retained at `/api/instances/{id}/direct-effects` only in Development with `DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS=true`; it is for regression comparison, not the primary runtime path. Gate 6's historical semantics and test boundaries are in [gate-6-design.md](./docs/gate-6-design.md) and [gate-6-crash-matrix.md](./docs/gate-6-crash-matrix.md).
+
+## Gate 8 durable timers
+
+Orion 4.0 schedules a 6-day offer reminder, a 7-day offer expiry, and a 10-day outstanding-document follow-up. The exact `dueAt` values and their definition version are stored in SQLite. Acceptance, decline, completion of the document request, or cancellation records timer cancellation in the same transaction as the workflow transition. At or after the stored expiry instant, acceptance and decline are refused even when expiry processing has not yet run.
+
+The evaluator remains pure and clock-free. The API uses an injectable `TimeProvider`; restart recovery queries persisted due timers. There is no required in-memory timer and no provider call from the timer processor. Reminder/follow-up processing writes Gate 7 effect intents and expected observations transactionally; provider dispatch remains explicit through the existing effects API.
+
+For deterministic development recovery, enable the controlled test/admin route:
+
+```powershell
+$env:ASPNETCORE_ENVIRONMENT = "Development"
+$env:DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS = "true"
+$env:DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY = "<set-a-local-random-value>"
+dotnet run --project src\DurableStateMachine.Api
+```
+
+Then call `POST /api/test-controls/timers/process-due?limit=100` with the trusted ingestion header. The route processes all currently due rows in persisted due-time order; it does not accept caller-supplied timer IDs or events. See [gate-8-design.md](./docs/gate-8-design.md), [gate-8-test-matrix.md](./docs/gate-8-test-matrix.md), and [orion-definition-v4.md](./docs/orion-definition-v4.md) for the policy, limitations and coverage.
 
 ## Gate 4 fact-binding and Meridian demonstration
 

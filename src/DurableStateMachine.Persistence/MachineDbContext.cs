@@ -12,6 +12,7 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
     public DbSet<ExpectedOperationRecord> ExpectedOperations => Set<ExpectedOperationRecord>();
     public DbSet<EffectOperationRecord> EffectOperations => Set<EffectOperationRecord>();
     public DbSet<EffectAttemptRecord> EffectAttempts => Set<EffectAttemptRecord>();
+    public DbSet<TimerRecord> Timers => Set<TimerRecord>();
 
     public async Task EnsureGate4SchemaAsync(CancellationToken cancellationToken = default)
     {
@@ -308,6 +309,38 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
         }
     }
 
+    public Task EnsureGate8SchemaAsync(CancellationToken cancellationToken = default) =>
+        Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS Timers (
+                Id TEXT NOT NULL CONSTRAINT PK_Timers PRIMARY KEY,
+                InstanceId TEXT NOT NULL,
+                DefinitionId TEXT NOT NULL,
+                DefinitionVersion TEXT NOT NULL,
+                TimerDeclarationId TEXT NOT NULL,
+                OriginTransitionId TEXT NOT NULL,
+                OriginTransitionHistoryId TEXT NOT NULL,
+                OriginEvent TEXT NOT NULL,
+                OriginRevision INTEGER NOT NULL,
+                TriggeredAt INTEGER NOT NULL,
+                CalculatedAt INTEGER NOT NULL,
+                DueAt INTEGER NOT NULL,
+                Status TEXT NOT NULL,
+                ResultReason TEXT NULL,
+                ProcessedAt INTEGER NULL,
+                AttemptId TEXT NULL,
+                ResultTransitionId TEXT NULL,
+                ActionOperationId TEXT NULL,
+                EvidenceJson TEXT NOT NULL DEFAULT '{{}}',
+                ProcessingEvidenceJson TEXT NOT NULL DEFAULT '{{}}'
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS IX_Timers_InstanceId_Declaration_OriginTransition
+                ON Timers (InstanceId, TimerDeclarationId, OriginTransitionHistoryId);
+            CREATE INDEX IF NOT EXISTS IX_Timers_Status_DueAt_Id
+                ON Timers (Status, DueAt, Id);
+            CREATE INDEX IF NOT EXISTS IX_Timers_InstanceId_DueAt_Id
+                ON Timers (InstanceId, DueAt, Id);
+            """, cancellationToken);
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<DefinitionRecord>().HasKey(record => new { record.Id, record.Version });
@@ -326,6 +359,12 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
         modelBuilder.Entity<EffectOperationRecord>().HasIndex(record => new { record.InstanceId, record.OperationId }).IsUnique();
         modelBuilder.Entity<EffectAttemptRecord>().HasKey(record => record.Id);
         modelBuilder.Entity<EffectAttemptRecord>().HasIndex(record => new { record.EffectOperationId, record.AttemptNumber }).IsUnique();
+        modelBuilder.Entity<TimerRecord>().HasKey(record => record.Id);
+        modelBuilder.Entity<TimerRecord>()
+            .HasIndex(record => new { record.InstanceId, record.TimerDeclarationId, record.OriginTransitionHistoryId })
+            .IsUnique();
+        modelBuilder.Entity<TimerRecord>().HasIndex(record => new { record.Status, record.DueAt, record.Id });
+        modelBuilder.Entity<TimerRecord>().HasIndex(record => new { record.InstanceId, record.DueAt, record.Id });
         modelBuilder.Entity<DefinitionRecord>().Property(record => record.RegisteredAt)
             .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
         modelBuilder.Entity<InstanceRecord>().Property(record => record.CreatedAt)
@@ -356,6 +395,15 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
             .HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null,
                 value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
         modelBuilder.Entity<EffectAttemptRecord>().Property(record => record.ProviderOccurredAt)
+            .HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null,
+                value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+        modelBuilder.Entity<TimerRecord>().Property(record => record.TriggeredAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        modelBuilder.Entity<TimerRecord>().Property(record => record.CalculatedAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        modelBuilder.Entity<TimerRecord>().Property(record => record.DueAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        modelBuilder.Entity<TimerRecord>().Property(record => record.ProcessedAt)
             .HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null,
                 value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
     }
@@ -521,4 +569,28 @@ public sealed class EffectAttemptRecord
     public string? WorkflowStateBefore { get; set; }
     public string? WorkflowStateAfter { get; set; }
     public long? WorkflowRevisionAfter { get; set; }
+}
+
+public sealed class TimerRecord
+{
+    public required string Id { get; set; }
+    public required string InstanceId { get; set; }
+    public required string DefinitionId { get; set; }
+    public required string DefinitionVersion { get; set; }
+    public required string TimerDeclarationId { get; set; }
+    public required string OriginTransitionId { get; set; }
+    public required string OriginTransitionHistoryId { get; set; }
+    public required string OriginEvent { get; set; }
+    public long OriginRevision { get; set; }
+    public DateTimeOffset TriggeredAt { get; set; }
+    public DateTimeOffset CalculatedAt { get; set; }
+    public DateTimeOffset DueAt { get; set; }
+    public required string Status { get; set; }
+    public string? ResultReason { get; set; }
+    public DateTimeOffset? ProcessedAt { get; set; }
+    public string? AttemptId { get; set; }
+    public string? ResultTransitionId { get; set; }
+    public string? ActionOperationId { get; set; }
+    public required string EvidenceJson { get; set; }
+    public required string ProcessingEvidenceJson { get; set; }
 }

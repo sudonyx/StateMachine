@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Collections.Frozen;
 using System.Text.Json;
+using System.Xml;
 
 namespace DurableStateMachine.Core;
 
@@ -25,6 +26,17 @@ public sealed record ObservationInputMapping(string Name, string Event, IReadOnl
 public sealed record MachineInputPolicy(
     IReadOnlyDictionary<string, CommandInputMapping> Commands,
     IReadOnlyDictionary<string, ObservationInputMapping> Observations);
+public sealed record TimerEffectIntent(string Capability, string ObservationType, JsonElement Request);
+public sealed record TimerDeclaration(
+    string Id,
+    string OnTransition,
+    TimeSpan Duration,
+    string Event,
+    string WhileState,
+    IReadOnlyList<string> CancelOnTransitions,
+    IReadOnlyList<string> BlockedEvents,
+    IReadOnlyList<string> InvalidatedByDueTimers,
+    TimerEffectIntent? EffectIntent);
 
 public sealed class MachineDefinition
 {
@@ -36,7 +48,8 @@ public sealed class MachineDefinition
         IReadOnlyDictionary<string, MachineState> states,
         IReadOnlySet<string> events,
         IReadOnlyList<MachineTransition> transitions,
-        MachineInputPolicy? inputPolicy)
+        MachineInputPolicy? inputPolicy,
+        IReadOnlyList<TimerDeclaration> timers)
     {
         Id = id;
         Version = version;
@@ -46,6 +59,7 @@ public sealed class MachineDefinition
         Events = events;
         Transitions = transitions;
         InputPolicy = inputPolicy;
+        Timers = timers;
     }
 
     public string Id { get; }
@@ -56,6 +70,7 @@ public sealed class MachineDefinition
     public IReadOnlySet<string> Events { get; }
     public IReadOnlyList<MachineTransition> Transitions { get; }
     public MachineInputPolicy? InputPolicy { get; }
+    public IReadOnlyList<TimerDeclaration> Timers { get; }
 }
 
 public enum FactKind
@@ -95,7 +110,7 @@ public abstract record GuardExpression
 public static class MachineDefinitionLoader
 {
     private static readonly string[] RootProperties =
-        ["languageVersion", "id", "version", "initialState", "states", "events", "transitions", "inputPolicy"];
+        ["languageVersion", "id", "version", "initialState", "states", "events", "transitions", "inputPolicy", "timers"];
 
     public static MachineDefinition Load(string json)
     {
@@ -125,13 +140,17 @@ public static class MachineDefinitionLoader
             {
                 issues.Add(new("missing-property", "$.languageVersion", "Required property 'languageVersion' is missing."));
             }
-            else if (languageVersion is not null && languageVersion is not ("1.0" or "1.1"))
+            else if (languageVersion is not null && languageVersion is not ("1.0" or "1.1" or "1.2"))
             {
-                issues.Add(new("unsupported-language-version", "$.languageVersion", $"Language version '{languageVersion}' is not supported; expected '1.0' or '1.1'."));
+                issues.Add(new("unsupported-language-version", "$.languageVersion", $"Language version '{languageVersion}' is not supported; expected '1.0', '1.1' or '1.2'."));
             }
             if (languageVersion == "1.0" && root.TryGetProperty("inputPolicy", out _))
             {
                 issues.Add(new("input-policy-version", "$.inputPolicy", "Input policies require language version '1.1'."));
+            }
+            if (languageVersion is not "1.2" && root.TryGetProperty("timers", out _))
+            {
+                issues.Add(new("timer-version", "$.timers", "Timer declarations require language version '1.2'."));
             }
 
             var id = ReadRequiredString(root, "id", "$.id", issues);
@@ -142,6 +161,7 @@ public static class MachineDefinitionLoader
             var events = ReadEvents(root, issues);
             var transitions = ReadTransitions(root, issues);
             var inputPolicy = ReadInputPolicy(root, languageVersion, events, issues);
+            var timers = ReadTimers(root, languageVersion, states, events, transitions, inputPolicy, issues);
 
             if (states.Values.All(state => !state.IsTerminal))
             {
@@ -154,6 +174,12 @@ public static class MachineDefinitionLoader
             }
 
             ValidateTransitions(states, events, transitions, issues);
+            ValidateTimers(timers, states, events, transitions, inputPolicy, issues);
+            if (timers.Count > 0 && inputPolicy is null)
+            {
+                issues.Add(new("timer-input-policy-required", "$.inputPolicy",
+                    "Definitions with timers must declare an input policy so timer events cannot be submitted by ordinary clients."));
+            }
             if (issues.Count != 0)
             {
                 throw new MachineDefinitionException(issues);
@@ -167,7 +193,230 @@ public static class MachineDefinitionLoader
                 new ReadOnlyDictionary<string, MachineState>(states),
                 events.ToFrozenSet(StringComparer.Ordinal),
                 transitions.AsReadOnly(),
-                inputPolicy);
+                inputPolicy,
+                timers.AsReadOnly());
+        }
+    }
+
+    private static List<TimerDeclaration> ReadTimers(
+        JsonElement root,
+        string? languageVersion,
+        IReadOnlyDictionary<string, MachineState> states,
+        IReadOnlySet<string> events,
+        IReadOnlyList<MachineTransition> transitions,
+        MachineInputPolicy? inputPolicy,
+        List<ValidationIssue> issues)
+    {
+        var timers = new List<TimerDeclaration>();
+        if (!root.TryGetProperty("timers", out var values))
+        {
+            return timers;
+        }
+        if (languageVersion != "1.2")
+        {
+            return timers;
+        }
+        if (values.ValueKind != JsonValueKind.Array)
+        {
+            issues.Add(new("invalid-timers", "$.timers", "Timers must be an array."));
+            return timers;
+        }
+
+        var identifiers = new HashSet<string>(StringComparer.Ordinal);
+        var index = 0;
+        foreach (var value in values.EnumerateArray())
+        {
+            var path = $"$.timers[{index++}]";
+            if (value.ValueKind != JsonValueKind.Object)
+            {
+                issues.Add(new("invalid-timer", path, "Each timer must be an object."));
+                continue;
+            }
+
+            CheckProperties(value, ["id", "onTransition", "duration", "event", "whileState",
+                "cancelOnTransitions", "blockedEvents", "invalidatedByDueTimers", "effectIntent"], path, issues);
+            var id = ReadRequiredString(value, "id", path + ".id", issues);
+            var onTransition = ReadRequiredString(value, "onTransition", path + ".onTransition", issues);
+            var durationText = ReadRequiredString(value, "duration", path + ".duration", issues);
+            var eventName = ReadRequiredString(value, "event", path + ".event", issues);
+            var whileState = ReadRequiredString(value, "whileState", path + ".whileState", issues);
+            TimeSpan duration = default;
+            if (durationText is not null)
+            {
+                try
+                {
+                    duration = XmlConvert.ToTimeSpan(durationText);
+                    if (duration <= TimeSpan.Zero)
+                    {
+                        issues.Add(new("invalid-timer-duration", path + ".duration", "Timer duration must be positive."));
+                    }
+                }
+                catch (Exception exception) when (exception is FormatException or OverflowException)
+                {
+                    issues.Add(new("invalid-timer-duration", path + ".duration", "Timer duration must be a positive ISO-8601 duration."));
+                }
+            }
+
+            var cancelOnTransitions = ReadStringArray(value, "cancelOnTransitions", path, issues);
+            var blockedEvents = ReadStringArray(value, "blockedEvents", path, issues);
+            var invalidatedByDueTimers = ReadStringArray(value, "invalidatedByDueTimers", path, issues);
+            TimerEffectIntent? effectIntent = null;
+            if (value.TryGetProperty("effectIntent", out var effectElement))
+            {
+                effectIntent = ReadTimerEffectIntent(effectElement, path + ".effectIntent", inputPolicy, issues);
+            }
+
+            if (id is not null && !identifiers.Add(id))
+            {
+                issues.Add(new("duplicate-timer-id", path + ".id", $"Timer '{id}' is declared more than once."));
+            }
+            if (onTransition is not null && !transitions.Any(transition => transition.Id == onTransition))
+            {
+                issues.Add(new("unknown-timer-trigger", path + ".onTransition", $"Transition '{onTransition}' is not declared."));
+            }
+            if (eventName is not null && !events.Contains(eventName))
+            {
+                issues.Add(new("undeclared-timer-event", path + ".event", $"Event '{eventName}' is not declared."));
+            }
+            if (whileState is not null && !states.ContainsKey(whileState))
+            {
+                issues.Add(new("unknown-timer-state", path + ".whileState", $"State '{whileState}' is not declared."));
+            }
+
+            if (id is not null && onTransition is not null && duration > TimeSpan.Zero &&
+                eventName is not null && whileState is not null)
+            {
+                timers.Add(new TimerDeclaration(id, onTransition, duration, eventName, whileState,
+                    cancelOnTransitions, blockedEvents, invalidatedByDueTimers, effectIntent));
+            }
+        }
+        return timers;
+    }
+
+    private static TimerEffectIntent? ReadTimerEffectIntent(
+        JsonElement element,
+        string path,
+        MachineInputPolicy? inputPolicy,
+        List<ValidationIssue> issues)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            issues.Add(new("invalid-timer-effect-intent", path, "Effect intent must be an object."));
+            return null;
+        }
+        CheckProperties(element, ["capability", "observationType", "request"], path, issues);
+        var capability = ReadRequiredString(element, "capability", path + ".capability", issues);
+        var observationType = ReadRequiredString(element, "observationType", path + ".observationType", issues);
+        if (!element.TryGetProperty("request", out var request) || request.ValueKind != JsonValueKind.Object)
+        {
+            issues.Add(new("invalid-timer-effect-request", path + ".request", "Effect request must be a JSON object."));
+        }
+        if (observationType is not null &&
+            (inputPolicy is null || !inputPolicy.Observations.ContainsKey(observationType)))
+        {
+            issues.Add(new("undeclared-timer-observation", path + ".observationType",
+                $"Observation '{observationType}' is not declared by the input policy."));
+        }
+        return capability is null || observationType is null || request.ValueKind != JsonValueKind.Object
+            ? null
+            : new TimerEffectIntent(capability, observationType, request.Clone());
+    }
+
+    private static IReadOnlyList<string> ReadStringArray(
+        JsonElement value,
+        string property,
+        string parentPath,
+        List<ValidationIssue> issues)
+    {
+        var path = parentPath + "." + property;
+        if (!value.TryGetProperty(property, out var items))
+        {
+            return [];
+        }
+        if (items.ValueKind != JsonValueKind.Array)
+        {
+            issues.Add(new("invalid-timer-list", path, $"'{property}' must be an array of strings."));
+            return [];
+        }
+        var result = new List<string>();
+        foreach (var item in items.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(item.GetString()))
+            {
+                issues.Add(new("invalid-timer-list-item", path, $"'{property}' entries must be non-empty strings."));
+                continue;
+            }
+            var text = item.GetString()!;
+            if (result.Contains(text, StringComparer.Ordinal))
+            {
+                issues.Add(new("duplicate-timer-list-item", path, $"'{text}' is declared more than once."));
+            }
+            else
+            {
+                result.Add(text);
+            }
+        }
+        return result.AsReadOnly();
+    }
+
+    private static void ValidateTimers(
+        IReadOnlyList<TimerDeclaration> timers,
+        IReadOnlyDictionary<string, MachineState> states,
+        IReadOnlySet<string> events,
+        IReadOnlyList<MachineTransition> transitions,
+        MachineInputPolicy? inputPolicy,
+        List<ValidationIssue> issues)
+    {
+        foreach (var timer in timers)
+        {
+            var path = $"$.timers[{timer.Id}]";
+            var trigger = transitions.SingleOrDefault(transition => transition.Id == timer.OnTransition);
+            if (trigger is not null && trigger.Target != timer.WhileState)
+            {
+                issues.Add(new("timer-trigger-state-mismatch", path + ".whileState",
+                    $"Trigger transition '{trigger.Id}' targets '{trigger.Target}', not '{timer.WhileState}'."));
+            }
+            if (states.TryGetValue(timer.WhileState, out var state) && state.IsTerminal)
+            {
+                issues.Add(new("timer-terminal-state", path + ".whileState",
+                    "A timer cannot remain active in a terminal state."));
+            }
+            if (inputPolicy is not null &&
+                (inputPolicy.Commands.Values.Any(mapping => mapping.Event == timer.Event) ||
+                 inputPolicy.Observations.Values.Any(mapping => mapping.Event == timer.Event)))
+            {
+                issues.Add(new("timer-event-input-mapping", path + ".event",
+                    $"Timer event '{timer.Event}' cannot be mapped to a client command or observation."));
+            }
+            foreach (var transition in timer.CancelOnTransitions)
+            {
+                if (!transitions.Any(candidate => candidate.Id == transition))
+                {
+                    issues.Add(new("unknown-timer-cancellation-transition", path + ".cancelOnTransitions",
+                        $"Transition '{transition}' is not declared."));
+                }
+            }
+            foreach (var eventName in timer.BlockedEvents)
+            {
+                if (!events.Contains(eventName))
+                {
+                    issues.Add(new("unknown-timer-blocked-event", path + ".blockedEvents",
+                        $"Event '{eventName}' is not declared."));
+                }
+            }
+            foreach (var invalidatingTimer in timer.InvalidatedByDueTimers)
+            {
+                if (!timers.Any(candidate => candidate.Id == invalidatingTimer))
+                {
+                    issues.Add(new("unknown-timer-invalidation", path + ".invalidatedByDueTimers",
+                        $"Timer '{invalidatingTimer}' is not declared."));
+                }
+                if (invalidatingTimer == timer.Id)
+                {
+                    issues.Add(new("self-invalidating-timer", path + ".invalidatedByDueTimers",
+                        "A timer cannot invalidate itself."));
+                }
+            }
         }
     }
 
@@ -190,7 +439,7 @@ public static class MachineDefinitionLoader
         CheckProperties(policy, ["commands", "observations"], "$.inputPolicy", issues);
         var commands = ReadCommandMappings(policy, events, issues);
         var observations = ReadObservationMappings(policy, events, issues);
-        if (languageVersion != "1.1")
+        if (languageVersion is not ("1.1" or "1.2"))
         {
             return null;
         }

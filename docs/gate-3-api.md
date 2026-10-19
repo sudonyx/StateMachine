@@ -10,7 +10,7 @@ Routes are rooted at `/api`. JSON property names are camel case and evaluation/s
 
 ### Register an immutable version
 
-`POST /api/definitions` accepts a complete language-version 1.0 or 1.1 definition as the request body. Language 1.1 may opt into declared command and observation mappings; see [state-machine-language-v1.md](./state-machine-language-v1.md).
+`POST /api/definitions` accepts a complete language-version 1.0, 1.1 or 1.2 definition as the request body. Language 1.1 and 1.2 may opt into declared command and observation mappings; language 1.2 may also declare durable timers. See [state-machine-language-v1.md](./state-machine-language-v1.md).
 
 ```json
 {
@@ -58,6 +58,21 @@ Fact values must be scalar strings, numbers, booleans or `null`. The response is
 ### Inspect
 
 `GET /api/instances/{id}` returns the durable instance record. Unknown IDs return `404 Not Found`.
+
+## Durable timers
+
+Timed definitions schedule timers atomically with an accepted triggering transition. Timer due times are persisted UTC instants; they are not recalculated when the API restarts or when a newer definition version is registered.
+
+- `GET /api/instances/{id}/timers` lists pending and historical timer records in due-time order.
+- `GET /api/instances/{id}/timers/{timerId}` returns one timer's bound definition, triggering transition/history, origin revision, trigger/calculation/due times, status, processing evidence, and resulting attempt/transition/action operation IDs.
+- `GET /api/instances/{id}/pending-work` also includes pending timer records.
+- `POST /api/test-controls/timers/process-due?limit=100` processes currently due timers in deterministic due-time/ID order. This route is mapped only when the API runs in `Development` and `DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS=true`; it also requires the configured `X-State-Machine-Trusted-Ingestion-Key`. The caller cannot choose a timer ID or submit an authoritative timer event. The bounded processor uses the API's injected `TimeProvider` and queries durable pending rows, so overdue work remains discoverable after restart.
+
+There is no in-memory sleep and no production hosted polling worker in this gate. The persistence processing method and development-only administrative route provide deterministic due discovery and explicit recovery. A due timer is evaluated through the normal transition pipeline; its due status alone cannot set workflow state.
+
+For Orion's offer deadline, an `AcceptOffer` or `DeclineOffer` received at or after the persisted expiry instant is refused, including at exact equality, even if the expiry timer has not yet been processed. The timestamp used is the API server's injected UTC receipt clock, not caller-supplied `occurredAt`. A trusted business record of an action that occurred before the deadline but arrived later is not accepted by this Gate 8 policy.
+
+Timer statuses include `Pending`, `Fired`, `Cancelled`, `Stale`, `Refused` and `Unresolved`. Historical records are retained; repeated processing does not fire completed records again. A reminder timer may create a durable harness-backed effect intent and expected observation in the same transaction as its accepted timer input. It does not call the Generic Harness or provider. Dispatch/resume remains a separate Gate 7 operation.
 
 ## Event submission
 
@@ -249,7 +264,7 @@ Attempts have stable GUID identifiers. History entries link back to their origin
 
 ## Pending work
 
-`GET /api/instances/{id}/pending-work` reports unresolved effect operations. Timers and scheduled background work remain unsupported; pending work is not automatically dispatched or retried.
+`GET /api/instances/{id}/pending-work` reports unresolved effect operations and pending durable timers. Neither is automatically dispatched: timer due processing is explicit, and effect execution remains on the Gate 7 boundary.
 
 ## Errors
 
@@ -271,6 +286,6 @@ Malformed JSON bodies are rejected by ASP.NET Core as `400 Bad Request`. Workflo
 
 Both sample clients use only HTTP and have no Core or Persistence project references.
 
-Set `DURABLE_STATE_MACHINE_API_URL` to configure the service URL (default `http://localhost:5000`). The CLI also accepts `--url <base-url>` and allows `create` facts inline or from `@facts.json`. The Orion demonstration accepts an optional path to a definition JSON file; by default it reads `definitions/orion-v1.json` from its working directory.
+Set `DURABLE_STATE_MACHINE_API_URL` to configure the service URL (default `http://localhost:5000`). The CLI also accepts `--url <base-url>` and allows `create` facts inline or from `@facts.json`. The Orion demonstration accepts an optional path to a definition JSON file; by default it reads `definitions/orion-v4.json` from its working directory.
 
 See the repository [README](../README.md) for run examples.

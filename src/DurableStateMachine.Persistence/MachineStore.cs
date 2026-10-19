@@ -130,6 +130,204 @@ public sealed class MachineStore(MachineDbContext db)
         return ToDetails(record);
     }
 
+    public async Task<IReadOnlyList<TimerRecord>> ListTimersAsync(string instanceId, CancellationToken cancellationToken)
+    {
+        await EnsureInstanceExistsAsync(instanceId, cancellationToken);
+        return await db.Timers.AsNoTracking().Where(timer => timer.InstanceId == instanceId)
+            .OrderBy(timer => timer.DueAt).ThenBy(timer => timer.Id).ToListAsync(cancellationToken);
+    }
+
+    public async Task<TimerRecord> GetTimerAsync(
+        string instanceId,
+        string timerId,
+        CancellationToken cancellationToken) =>
+        await db.Timers.AsNoTracking().SingleOrDefaultAsync(
+            timer => timer.InstanceId == instanceId && timer.Id == timerId, cancellationToken)
+        ?? throw new ResourceNotFoundException($"Timer '{timerId}' does not exist for instance '{instanceId}'.");
+
+    public async Task<IReadOnlyList<TimerProcessingResult>> ProcessDueTimersAsync(
+        DateTimeOffset now,
+        int limit,
+        Func<string, string, string, EffectHarnessBinding>? resolveEffectBinding,
+        CancellationToken cancellationToken)
+    {
+        if (limit is < 1 or > 500)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit), "Timer processing limit must be between 1 and 500.");
+        }
+        now = now.ToUniversalTime();
+        var timerIds = await db.Timers.AsNoTracking()
+            .Where(timer => timer.Status == "Pending" && timer.DueAt <= now)
+            .OrderBy(timer => timer.DueAt).ThenBy(timer => timer.Id)
+            .Select(timer => new { timer.Id, timer.InstanceId })
+            .Take(limit)
+            .ToListAsync(cancellationToken);
+        var results = new List<TimerProcessingResult>(timerIds.Count);
+        foreach (var candidate in timerIds)
+        {
+            results.Add(await ProcessTimerAsync(candidate.InstanceId, candidate.Id, now,
+                resolveEffectBinding, cancellationToken));
+        }
+        return results;
+    }
+
+    private async Task<TimerProcessingResult> ProcessTimerAsync(
+        string instanceId,
+        string timerId,
+        DateTimeOffset now,
+        Func<string, string, string, EffectHarnessBinding>? resolveEffectBinding,
+        CancellationToken cancellationToken)
+    {
+        InstanceGate gate;
+        lock (InstanceLocksSync)
+        {
+            if (!InstanceLocks.TryGetValue(instanceId, out gate!))
+            {
+                gate = new InstanceGate();
+                InstanceLocks.Add(instanceId, gate);
+            }
+            gate.Users++;
+        }
+        var entered = false;
+        try
+        {
+            await gate.Semaphore.WaitAsync(cancellationToken);
+            entered = true;
+            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            var timer = await db.Timers.SingleOrDefaultAsync(
+                record => record.Id == timerId && record.InstanceId == instanceId, cancellationToken)
+                ?? throw new ResourceNotFoundException($"Timer '{timerId}' does not exist for instance '{instanceId}'.");
+            if (timer.Status != "Pending")
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return new TimerProcessingResult(timer, null, AlreadyProcessed: true);
+            }
+            if (timer.DueAt > now)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                return new TimerProcessingResult(timer, null, AlreadyProcessed: false);
+            }
+
+            var instance = await db.Instances.SingleOrDefaultAsync(
+                record => record.Id == instanceId, cancellationToken)
+                ?? throw new ResourceNotFoundException($"Instance '{instanceId}' does not exist.");
+            var definitionRecord = await db.Definitions.AsNoTracking().SingleOrDefaultAsync(
+                record => record.Id == timer.DefinitionId && record.Version == timer.DefinitionVersion,
+                cancellationToken)
+                ?? throw new InvalidOperationException(
+                    $"The registered definition for timer '{timerId}' is missing.");
+            var definition = MachineDefinitionLoader.Load(definitionRecord.DefinitionJson);
+            var declaration = definition.Timers.SingleOrDefault(item => item.Id == timer.TimerDeclarationId);
+            var processingEvidence = new
+            {
+                timerId = timer.Id,
+                currentTime = now,
+                dueAt = timer.DueAt,
+                currentRevision = instance.Revision,
+                currentState = instance.CurrentState,
+                definitionId = instance.DefinitionId,
+                definitionVersion = instance.DefinitionVersion
+            };
+
+            if (instance.DefinitionId != timer.DefinitionId ||
+                instance.DefinitionVersion != timer.DefinitionVersion ||
+                declaration is null)
+            {
+                CompleteTimer(timer, "Stale", "definition-binding-changed", now, processingEvidence);
+                await db.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return new TimerProcessingResult(timer, null, AlreadyProcessed: false);
+            }
+
+            var supersedingTimer = declaration.InvalidatedByDueTimers.Count == 0
+                ? null
+                : await db.Timers.AsNoTracking()
+                    .Where(candidate =>
+                        candidate.InstanceId == instanceId &&
+                        candidate.Status == "Pending" &&
+                        candidate.DueAt <= now &&
+                        declaration.InvalidatedByDueTimers.Contains(candidate.TimerDeclarationId))
+                    .OrderBy(candidate => candidate.DueAt).ThenBy(candidate => candidate.Id)
+                    .FirstOrDefaultAsync(cancellationToken);
+            if (supersedingTimer is not null)
+            {
+                CompleteTimer(timer, "Stale",
+                    $"superseded-by-due-timer:{supersedingTimer.TimerDeclarationId}",
+                    now, processingEvidence);
+                await db.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return new TimerProcessingResult(timer, null, AlreadyProcessed: false);
+            }
+
+            if (instance.CurrentState != declaration.WhileState)
+            {
+                CompleteTimer(timer, "Stale", "originating-state-exited", now, processingEvidence);
+                await db.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                return new TimerProcessingResult(timer, null, AlreadyProcessed: false);
+            }
+
+            var submission = await EvaluateEventWithinTransactionAsync(
+                instance, declaration.Event, now, cancellationToken,
+                attemptFacts: null, decisionEvidence: null, attemptFactProvenance: null);
+            timer.AttemptId = submission.Attempt.Id;
+            timer.ResultTransitionId = submission.Transition?.Id;
+            timer.ProcessedAt = now;
+            timer.ResultReason = submission.Attempt.ReasonCode;
+            timer.ProcessingEvidenceJson = JsonSerializer.Serialize(new
+            {
+                processingEvidence,
+                outcome = submission.Attempt.Status,
+                reason = submission.Attempt.ReasonCode,
+                attemptId = submission.Attempt.Id,
+                transitionHistoryId = submission.Transition?.Id,
+                resultingRevision = submission.Attempt.RevisionAfter
+            }, StoredJsonOptions);
+            if (submission.Attempt.Status == EvaluationStatus.Accepted.ToString())
+            {
+                timer.Status = "Fired";
+                if (declaration.EffectIntent is not null)
+                {
+                    if (resolveEffectBinding is null)
+                    {
+                        throw new InvalidOperationException(
+                            $"Timer '{timerId}' requires a configured harness binding for capability '{declaration.EffectIntent.Capability}'.");
+                    }
+                    var operationId = "timer-" + timer.Id;
+                    var binding = resolveEffectBinding(instanceId, operationId, declaration.EffectIntent.Capability);
+                    timer.ActionOperationId = CreateTimerEffectIntent(
+                        instance, definition, submission.Attempt.RevisionAfter, declaration, operationId, binding, now);
+                }
+            }
+            else
+            {
+                timer.Status = submission.Attempt.Status == EvaluationStatus.Rejected.ToString()
+                    ? "Refused"
+                    : "Unresolved";
+            }
+            await db.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+            return new TimerProcessingResult(timer,
+                submission with { Instance = await ReadInstanceAsync(instanceId, cancellationToken) },
+                AlreadyProcessed: false);
+        }
+        finally
+        {
+            if (entered)
+            {
+                gate.Semaphore.Release();
+            }
+            lock (InstanceLocksSync)
+            {
+                gate.Users--;
+                if (gate.Users == 0)
+                {
+                    InstanceLocks.Remove(instanceId);
+                }
+            }
+        }
+    }
+
     public async Task<bool> IsInputProtectedInstanceAsync(string instanceId, CancellationToken cancellationToken)
     {
         var instance = await db.Instances.AsNoTracking().SingleOrDefaultAsync(
@@ -138,7 +336,8 @@ public sealed class MachineStore(MachineDbContext db)
         var definition = await db.Definitions.AsNoTracking().SingleOrDefaultAsync(
             record => record.Id == instance.DefinitionId && record.Version == instance.DefinitionVersion, cancellationToken)
             ?? throw new InvalidOperationException($"The registered definition for instance '{instanceId}' is missing.");
-        return MachineDefinitionLoader.Load(definition.DefinitionJson).InputPolicy is not null;
+        var parsed = MachineDefinitionLoader.Load(definition.DefinitionJson);
+        return parsed.InputPolicy is not null || parsed.Timers.Count != 0;
     }
 
     public async Task<EffectIntentResult> CreateEffectIntentAsync(
@@ -639,14 +838,19 @@ public sealed class MachineStore(MachineDbContext db)
                     SubmissionResult? submission = null;
                     try
                     {
-                        submission = await EvaluateEventWithinTransactionAsync(
-                            instance, eventName, now, cancellationToken, facts, decisionEvidence, factsProvenance);
+                        _ = TransitionEvaluationContext.Create(
+                            DeserializeFacts(instance.FactsJson), facts, decisionEvidence, factsProvenance);
                     }
                     catch (ArgumentException exception)
                     {
                         message.Status = "Malformed";
                         message.ReasonCode = "invalid-evaluation-input";
                         message.Explanation = exception.Message;
+                    }
+                    if (message.ReasonCode == "input-not-processed")
+                    {
+                        submission = await EvaluateEventWithinTransactionAsync(
+                            instance, eventName, now, cancellationToken, facts, decisionEvidence, factsProvenance);
                     }
                     if (submission is not null)
                     {
@@ -871,7 +1075,18 @@ public sealed class MachineStore(MachineDbContext db)
         var definition = MachineDefinitionLoader.Load(definitionRecord.DefinitionJson);
         var facts = DeserializeFacts(instance.FactsJson);
         var context = TransitionEvaluationContext.Create(facts, attemptFacts, decisionEvidence, attemptFactProvenance);
-        var evaluation = TransitionEvaluator.Evaluate(definition, instance.CurrentState, eventName, context);
+        var blockingTimer = await FindBlockingTimerAsync(instance.Id, definition, eventName, now, cancellationToken);
+        var evaluation = blockingTimer is null
+            ? TransitionEvaluator.Evaluate(definition, instance.CurrentState, eventName, context)
+            : new TransitionEvaluation(
+                EvaluationStatus.Rejected,
+                instance.CurrentState,
+                eventName,
+                null,
+                null,
+                [],
+                "deadline-expired",
+                $"Event '{eventName}' was received at or after timer '{blockingTimer.TimerDeclarationId}' became due at {blockingTimer.DueAt:O}.");
         var attemptId = Guid.NewGuid().ToString("N");
         var revisionBefore = instance.Revision;
         var revisionAfter = evaluation.Status == EvaluationStatus.Accepted ? checked(revisionBefore + 1) : revisionBefore;
@@ -934,8 +1149,217 @@ public sealed class MachineStore(MachineDbContext db)
                 OccurredAt = now
             };
             db.TransitionHistory.Add(history);
+            await ApplyTimerTransitionChangesAsync(
+                instance, definition, history, revisionAfter, now, cancellationToken);
         }
         return new SubmissionResult(attempt, await ReadInstanceAsync(instance.Id, cancellationToken), history, false);
+    }
+
+    private async Task<TimerRecord?> FindBlockingTimerAsync(
+        string instanceId,
+        MachineDefinition definition,
+        string eventName,
+        DateTimeOffset receivedAt,
+        CancellationToken cancellationToken)
+    {
+        var declarations = definition.Timers
+            .Where(timer => timer.BlockedEvents.Contains(eventName, StringComparer.Ordinal))
+            .ToDictionary(timer => timer.Id, StringComparer.Ordinal);
+        if (declarations.Count == 0)
+        {
+            return null;
+        }
+        var pending = await db.Timers.Where(timer =>
+                timer.InstanceId == instanceId &&
+                (timer.Status == "Pending" || timer.Status == "Refused" || timer.Status == "Unresolved") &&
+                timer.DueAt <= receivedAt)
+            .OrderBy(timer => timer.DueAt).ThenBy(timer => timer.Id)
+            .ToListAsync(cancellationToken);
+        return pending.FirstOrDefault(timer => declarations.ContainsKey(timer.TimerDeclarationId));
+    }
+
+    private async Task ApplyTimerTransitionChangesAsync(
+        InstanceRecord instance,
+        MachineDefinition definition,
+        TransitionHistoryRecord history,
+        long resultingRevision,
+        DateTimeOffset transitionTime,
+        CancellationToken cancellationToken)
+    {
+        var declarations = definition.Timers.ToDictionary(timer => timer.Id, StringComparer.Ordinal);
+        var pending = await db.Timers.Where(timer =>
+                timer.InstanceId == instance.Id &&
+                timer.Status == "Pending")
+            .ToListAsync(cancellationToken);
+        foreach (var timer in pending)
+        {
+            if (!declarations.TryGetValue(timer.TimerDeclarationId, out var declaration))
+            {
+                timer.Status = "Stale";
+                timer.ResultReason = "timer-declaration-not-in-bound-definition";
+                timer.ProcessedAt = transitionTime;
+                continue;
+            }
+            if (declaration.CancelOnTransitions.Contains(history.TransitionId, StringComparer.Ordinal) ||
+                declaration.WhileState != history.NewState)
+            {
+                timer.Status = "Cancelled";
+                timer.ResultReason = declaration.CancelOnTransitions.Contains(history.TransitionId, StringComparer.Ordinal)
+                    ? $"cancelled-by-transition:{history.TransitionId}"
+                    : $"state-exited:{history.PreviousState}->{history.NewState}";
+                timer.ProcessedAt = transitionTime;
+                timer.ResultTransitionId = history.Id;
+                timer.ProcessingEvidenceJson = JsonSerializer.Serialize(new
+                {
+                    cancelledAt = transitionTime,
+                    transitionHistoryId = history.Id,
+                    transitionId = history.TransitionId,
+                    previousState = history.PreviousState,
+                    newState = history.NewState
+                }, StoredJsonOptions);
+            }
+        }
+
+        foreach (var declaration in definition.Timers.Where(timer => timer.OnTransition == history.TransitionId))
+        {
+            var dueAt = transitionTime.Add(declaration.Duration);
+            var timerId = CreateStableTimerId(instance.Id, declaration.Id, history.Id);
+            if (await db.Timers.AnyAsync(timer => timer.Id == timerId, cancellationToken))
+            {
+                continue;
+            }
+            var scheduleEvidence = JsonSerializer.Serialize(new
+            {
+                timerDeclarationId = declaration.Id,
+                duration = declaration.Duration.ToString("c"),
+                anchor = "accepted-transition-time",
+                triggerTransitionId = history.TransitionId,
+                triggerTransitionHistoryId = history.Id,
+                triggerEvent = history.Event,
+                triggerRevision = resultingRevision,
+                triggeredAt = history.OccurredAt,
+                calculatedAt = transitionTime,
+                dueAt
+            }, StoredJsonOptions);
+            db.Timers.Add(new TimerRecord
+            {
+                Id = timerId,
+                InstanceId = instance.Id,
+                DefinitionId = instance.DefinitionId,
+                DefinitionVersion = instance.DefinitionVersion,
+                TimerDeclarationId = declaration.Id,
+                OriginTransitionId = history.TransitionId,
+                OriginTransitionHistoryId = history.Id,
+                OriginEvent = history.Event,
+                OriginRevision = resultingRevision,
+                TriggeredAt = history.OccurredAt,
+                CalculatedAt = transitionTime,
+                DueAt = dueAt,
+                Status = "Pending",
+                EvidenceJson = scheduleEvidence,
+                ProcessingEvidenceJson = "{}"
+            });
+        }
+    }
+
+    private string? CreateTimerEffectIntent(
+        InstanceRecord instance,
+        MachineDefinition definition,
+        long executionRevision,
+        TimerDeclaration declaration,
+        string operationId,
+        EffectHarnessBinding binding,
+        DateTimeOffset now)
+    {
+        var intent = declaration.EffectIntent
+            ?? throw new InvalidOperationException("The timer declaration has no effect intent.");
+        if (definition.InputPolicy is null ||
+            !definition.InputPolicy.Observations.TryGetValue(intent.ObservationType, out var observation))
+        {
+            throw new InvalidOperationException(
+                $"Timer effect observation '{intent.ObservationType}' is not declared by the bound definition.");
+        }
+
+        using var requestDocument = JsonDocument.Parse(intent.Request.GetRawText());
+        var requestValues = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        foreach (var property in requestDocument.RootElement.EnumerateObject())
+        {
+            requestValues.Add(property.Name, property.Value.Clone());
+        }
+        requestValues["operationId"] = JsonSerializer.SerializeToElement(operationId, StoredJsonOptions);
+        requestValues["capability"] = JsonSerializer.SerializeToElement(intent.Capability, StoredJsonOptions);
+        var requestJson = JsonSerializer.Serialize(requestValues, StoredJsonOptions);
+        var requestDigest = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(requestJson)));
+        var providerIdentity = binding.ProviderIdentity
+            ?? throw new InvalidOperationException("The timer action's harness provider identity was not configured.");
+        var idempotencyKey = "dsm-" + Convert.ToHexString(SHA256.HashData(
+            Encoding.UTF8.GetBytes($"{instance.Id}\0{operationId}"))).ToLowerInvariant();
+
+        if (db.EffectOperations.Local.Any(operation =>
+                operation.InstanceId == instance.Id && operation.OperationId == operationId) ||
+            db.ExpectedOperations.Local.Any(operation =>
+                operation.InstanceId == instance.Id && operation.OperationId == operationId))
+        {
+            throw new DefinitionConflictException(
+                $"Timer action operation '{operationId}' is already present for instance '{instance.Id}'.");
+        }
+        var expected = new ExpectedOperationRecord
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            InstanceId = instance.Id,
+            OperationId = operationId,
+            ObservationType = intent.ObservationType,
+            SourceIdentity = providerIdentity,
+            ExpectedAt = now,
+            ExpectedRevision = executionRevision,
+            RequiredEvidenceJson = JsonSerializer.Serialize(
+                observation.RequiredEvidence.Order(StringComparer.Ordinal).ToArray(), StoredJsonOptions),
+            Status = "Expected"
+        };
+        var effect = new EffectOperationRecord
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            InstanceId = instance.Id,
+            OperationId = operationId,
+            DefinitionId = instance.DefinitionId,
+            DefinitionVersion = instance.DefinitionVersion,
+            ExecutionRevision = executionRevision,
+            Capability = intent.Capability,
+            ProviderIdentity = providerIdentity,
+            ObservationType = intent.ObservationType,
+            RequestJson = requestJson,
+            RequestDigest = requestDigest,
+            Status = "Pending",
+            HarnessProviderId = binding.ProviderId,
+            CredentialBindingId = binding.CredentialBindingId,
+            ApiDescriptionVersionId = binding.ApiDescriptionVersionId,
+            HarnessOperationKey = binding.OperationKey,
+            HarnessIdempotencyKey = idempotencyKey,
+            RequestedAt = now,
+            UpdatedAt = now
+        };
+        db.ExpectedOperations.Add(expected);
+        db.EffectOperations.Add(effect);
+        return operationId;
+    }
+
+    private static void CompleteTimer(
+        TimerRecord timer,
+        string status,
+        string reason,
+        DateTimeOffset processedAt,
+        object evidence)
+    {
+        timer.Status = status;
+        timer.ResultReason = reason;
+        timer.ProcessedAt = processedAt;
+        timer.ProcessingEvidenceJson = JsonSerializer.Serialize(evidence, StoredJsonOptions);
+    }
+
+    private static string CreateStableTimerId(string instanceId, string declarationId, string historyId)
+    {
+        var identity = Encoding.UTF8.GetBytes($"{instanceId}\0{declarationId}\0{historyId}");
+        return Convert.ToHexString(SHA256.HashData(identity)).ToLowerInvariant();
     }
 
     public async Task<IReadOnlyList<InputAttemptRecord>> ListAttemptsAsync(string instanceId, CancellationToken cancellationToken)
@@ -1184,6 +1608,7 @@ public sealed record SubmissionResult(InputAttemptRecord Attempt, MachineInstanc
     TransitionHistoryRecord? Transition, bool ConcurrencyConflict);
 public sealed record InboundProcessingResult(InboundMessageRecord Message, SubmissionResult? Submission);
 public sealed record EffectIntentResult(EffectOperationRecord Operation, bool AlreadyRequested);
+public sealed record TimerProcessingResult(TimerRecord Timer, SubmissionResult? Submission, bool AlreadyProcessed);
 
 public sealed record EffectHarnessBinding(
     string ProviderId,
@@ -1191,7 +1616,8 @@ public sealed record EffectHarnessBinding(
     string OperationKey,
     string IdempotencyKey,
     int? OperationReplaySafety,
-    string? CredentialBindingId = null);
+    string? CredentialBindingId = null,
+    string? ProviderIdentity = null);
 
 public sealed class DefinitionConflictException(string message) : Exception(message);
 public sealed class ResourceNotFoundException(string message) : Exception(message);

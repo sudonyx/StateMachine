@@ -22,6 +22,8 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 builder.Services.AddOpenApi();
 builder.Services.AddScoped<MachineStore>();
+builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+builder.Services.AddScoped<TimerProcessingService>();
 builder.Services.AddSingleton<EffectFaultPlan>();
 builder.Services.AddSingleton<SyntheticProviderStore>();
 builder.Services.AddScoped<EffectCoordinator>();
@@ -38,6 +40,7 @@ await using (var scope = app.Services.CreateAsyncScope())
     await database.EnsureGate5SchemaAsync();
     await database.EnsureGate6SchemaAsync();
     await database.EnsureGate7SchemaAsync();
+    await database.EnsureGate8SchemaAsync();
 }
 
 app.Use(async (context, next) =>
@@ -77,13 +80,13 @@ app.Use(async (context, next) =>
 app.MapOpenApi();
 
 var definitions = app.MapGroup("/api/definitions").WithTags("Definitions");
-definitions.MapPost("/", async (JsonElement definition, MachineStore store, CancellationToken cancellationToken) =>
+definitions.MapPost("/", async (JsonElement definition, MachineStore store, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
     if (definition.ValueKind != JsonValueKind.Object)
     {
         return Results.BadRequest(new ApiError("invalid-definition", "Definition body must be a JSON object."));
     }
-    var registration = await store.RegisterDefinitionAsync(definition.GetRawText(), DateTimeOffset.UtcNow, cancellationToken);
+    var registration = await store.RegisterDefinitionAsync(definition.GetRawText(), timeProvider.GetUtcNow(), cancellationToken);
     return Results.Ok(new { definition = registration.Definition, alreadyRegistered = registration.AlreadyRegistered });
 }).WithName("RegisterDefinition").WithSummary("Validate and register an immutable definition version.");
 definitions.MapGet("/", async (MachineStore store, CancellationToken cancellationToken) =>
@@ -94,7 +97,7 @@ definitions.MapGet("/{id}/{version}", async (string id, string version, MachineS
     .WithName("GetDefinition").WithSummary("Inspect a registered definition version.");
 
 var instances = app.MapGroup("/api/instances").WithTags("Instances");
-instances.MapPost("/", async (CreateInstanceRequest request, MachineStore store, CancellationToken cancellationToken) =>
+instances.MapPost("/", async (CreateInstanceRequest request, MachineStore store, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(request.Id) || string.IsNullOrWhiteSpace(request.DefinitionId) ||
         string.IsNullOrWhiteSpace(request.DefinitionVersion))
@@ -111,18 +114,18 @@ instances.MapPost("/", async (CreateInstanceRequest request, MachineStore store,
         facts.Add(name, ParseFact(value));
     }
     var instance = await store.CreateInstanceAsync(request.Id, request.DefinitionId, request.DefinitionVersion,
-        facts, DateTimeOffset.UtcNow, cancellationToken);
+        facts, timeProvider.GetUtcNow(), cancellationToken);
     return Results.Created($"/api/instances/{Uri.EscapeDataString(instance.Id)}", instance.ToResponse());
 }).WithName("CreateInstance").WithSummary("Create an instance at its definition's initial state.");
 instances.MapGet("/{id}", async (string id, MachineStore store, CancellationToken cancellationToken) =>
     Results.Ok((await store.GetInstanceAsync(id, cancellationToken)).ToResponse()))
     .WithName("GetInstance").WithSummary("Inspect current durable instance state and facts.");
-instances.MapPost("/{id}/events", async (string id, SubmitEventRequest request, MachineStore store, CancellationToken cancellationToken) =>
+instances.MapPost("/{id}/events", async (string id, SubmitEventRequest request, MachineStore store, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
     if (await store.IsInputProtectedInstanceAsync(id, cancellationToken))
     {
         var rejected = await store.RecordLegacyEventRejectionAsync(id, request.Event ?? string.Empty,
-            JsonSerializer.Serialize(request, JsonDefaults.Options), DateTimeOffset.UtcNow, cancellationToken);
+            JsonSerializer.Serialize(request, JsonDefaults.Options), timeProvider.GetUtcNow(), cancellationToken);
         return Results.Json(new ApiError("legacy-event-endpoint-restricted",
             $"Direct event submission is disabled for this input-protected definition. Inspect inbound receipt '{rejected.Id}'."),
             statusCode: StatusCodes.Status403Forbidden);
@@ -134,20 +137,21 @@ instances.MapPost("/{id}/events", async (string id, SubmitEventRequest request, 
     var facts = ParseFacts(request.Facts);
 
     var decisionEvidence = request.DecisionEvidence?.ToCoreEvidence();
-    var result = await store.SubmitEventAsync(id, request.Event, DateTimeOffset.UtcNow, cancellationToken,
+    var result = await store.SubmitEventAsync(id, request.Event, timeProvider.GetUtcNow(), cancellationToken,
         facts, decisionEvidence, request.FactsProvenance);
     var response = new EventSubmissionResponse(result.Attempt.ToResponse(), result.Instance.ToResponse(),
         result.Transition?.ToResponse());
     return result.ConcurrencyConflict ? Results.Conflict(response) : Results.Ok(response);
 }).WithName("SubmitEvent").WithSummary("Evaluate and record an event; workflow-level refusals return an inspectable result.");
 instances.MapPost("/{id}/commands", async (
-    string id, SubmitInputRequest request, MachineStore store, CancellationToken cancellationToken) =>
+    string id, SubmitInputRequest request, MachineStore store, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(request.MessageId) || string.IsNullOrWhiteSpace(request.Type) ||
         request.MessageId.Length > 128 || request.ExpectedRevision is null || request.ExpectedRevision < 0)
     {
         return await RecordMalformedInput(store, id, "Command", request, trustedSource: false,
             "Message ID (1-128 characters), command type, and non-negative expected revision are required.",
+            timeProvider,
             cancellationToken);
     }
     IReadOnlyDictionary<string, FactValue> facts;
@@ -160,17 +164,18 @@ instances.MapPost("/{id}/commands", async (
     catch (Exception exception) when (exception is ArgumentException or JsonException)
     {
         return await RecordMalformedInput(store, id, "Command", request, trustedSource: false,
-            exception.Message, cancellationToken);
+            exception.Message, timeProvider, cancellationToken);
     }
     var result = await store.SubmitInputAsync(id, "Command", request.MessageId, request.Type,
         request.ExpectedRevision.Value, request.CorrelationId, request.Source, request.OccurredAt,
         request.Payload, facts, request.Evidence, decisionEvidence,
-        request.FactsProvenance, trustedSource: false, DateTimeOffset.UtcNow, cancellationToken);
+        request.FactsProvenance, trustedSource: false, timeProvider.GetUtcNow(), cancellationToken);
     var response = ToInputResponse(result, await store.GetInstanceAsync(id, cancellationToken));
     return result.Submission?.ConcurrencyConflict == true ? Results.Conflict(response) : Results.Ok(response);
 }).WithName("SubmitCommand").WithSummary("Submit a declared command; receipt alone does not accept a workflow event.");
 instances.MapPost("/{id}/observations", async (
-    string id, SubmitInputRequest request, HttpRequest httpRequest, MachineStore store, CancellationToken cancellationToken) =>
+    string id, SubmitInputRequest request, HttpRequest httpRequest, MachineStore store, TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(request.MessageId) || string.IsNullOrWhiteSpace(request.Type) ||
         request.MessageId.Length > 128 || string.IsNullOrWhiteSpace(request.CorrelationId) ||
@@ -178,6 +183,7 @@ instances.MapPost("/{id}/observations", async (
     {
         return await RecordMalformedInput(store, id, "Observation", request, IsTrustedIngestion(httpRequest),
             "Message ID (1-128 characters), observation type, operation correlation ID, and non-negative expected revision are required.",
+            timeProvider,
             cancellationToken);
     }
     var trustedSource = IsTrustedIngestion(httpRequest);
@@ -191,18 +197,18 @@ instances.MapPost("/{id}/observations", async (
     catch (Exception exception) when (exception is ArgumentException or JsonException)
     {
         return await RecordMalformedInput(store, id, "Observation", request, trustedSource,
-            exception.Message, cancellationToken);
+            exception.Message, timeProvider, cancellationToken);
     }
     var result = await store.SubmitInputAsync(id, "Observation", request.MessageId, request.Type,
         request.ExpectedRevision.Value, request.CorrelationId, request.Source, request.OccurredAt,
         request.Payload, facts, request.Evidence, decisionEvidence,
-        request.FactsProvenance, trustedSource, DateTimeOffset.UtcNow, cancellationToken);
+        request.FactsProvenance, trustedSource, timeProvider.GetUtcNow(), cancellationToken);
     var response = ToInputResponse(result, await store.GetInstanceAsync(id, cancellationToken));
     return result.Submission?.ConcurrencyConflict == true ? Results.Conflict(response) : Results.Ok(response);
 }).WithName("SubmitObservation").WithSummary("Submit an external claim; only the configured trusted ingestion boundary can authorize it.");
 instances.MapPost("/{id}/expected-operations", async (
     string id, RegisterExpectedOperationRequest request, HttpRequest httpRequest, MachineStore store,
-    CancellationToken cancellationToken) =>
+    TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
     if (!IsTrustedIngestion(httpRequest))
     {
@@ -216,7 +222,7 @@ instances.MapPost("/{id}/expected-operations", async (
         return Results.BadRequest(new ApiError("invalid-request", "Operation ID, observation type, and source identity are required."));
     }
     var operation = await store.RegisterExpectedOperationAsync(id, request.OperationId, request.ObservationType,
-        request.SourceIdentity, request.ExpectedRevision, request.RequiredEvidence, DateTimeOffset.UtcNow, cancellationToken);
+        request.SourceIdentity, request.ExpectedRevision, request.RequiredEvidence, timeProvider.GetUtcNow(), cancellationToken);
     return Results.Created($"/api/instances/{Uri.EscapeDataString(id)}/expected-operations/{Uri.EscapeDataString(operation.OperationId)}",
         operation.ToResponse());
 }).WithName("RegisterExpectedOperation").WithSummary("Register an expected result through the controlled trusted demonstration boundary.");
@@ -242,6 +248,13 @@ instances.MapGet("/{id}/history", async (string id, MachineStore store, Cancella
 instances.MapGet("/{id}/history/{historyId}", async (string id, string historyId, MachineStore store, CancellationToken cancellationToken) =>
     Results.Ok((await store.GetHistoryEntryAsync(id, historyId, cancellationToken)).ToResponse()))
     .WithName("GetTransitionHistory").WithSummary("Inspect one accepted transition.");
+instances.MapGet("/{id}/timers", async (string id, MachineStore store, CancellationToken cancellationToken) =>
+    Results.Ok((await store.ListTimersAsync(id, cancellationToken)).Select(timer => timer.ToResponse())))
+    .WithName("ListTimers").WithSummary("Inspect durable timers and their scheduling, cancellation, and processing evidence.");
+instances.MapGet("/{id}/timers/{timerId}", async (
+    string id, string timerId, MachineStore store, CancellationToken cancellationToken) =>
+    Results.Ok((await store.GetTimerAsync(id, timerId, cancellationToken)).ToResponse()))
+    .WithName("GetTimer").WithSummary("Inspect one durable timer and its outcome evidence.");
 instances.MapGet("/{id}/pending-work", async (
     string id, MachineStore store, HarnessEffectCoordinator coordinator, CancellationToken cancellationToken) =>
 {
@@ -256,9 +269,13 @@ instances.MapGet("/{id}/pending-work", async (
             pending.Add(response);
         }
     }
-    return Results.Ok(new { instanceId = id, supported = true, items = pending });
+    var timers = (await store.ListTimersAsync(id, cancellationToken))
+        .Where(timer => timer.Status == "Pending")
+        .Select(timer => timer.ToResponse())
+        .ToArray();
+    return Results.Ok(new { instanceId = id, supported = true, items = pending, timers });
 })
-    .WithName("ListPendingWork").WithSummary("Inspect unresolved harness-backed or development-only direct effects; timers and scheduled work remain unsupported.");
+    .WithName("ListPendingWork").WithSummary("Inspect unresolved external-effect intents and pending durable timers.");
 
 if (app.Environment.IsDevelopment() &&
     string.Equals(Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS"), "true",
@@ -266,7 +283,7 @@ if (app.Environment.IsDevelopment() &&
 {
 instances.MapPost("/{id}/direct-effects", async (
     string id, StartEffectRequest request, HttpRequest httpRequest, EffectCoordinator coordinator,
-    CancellationToken cancellationToken) =>
+    TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
     if (!IsTrustedIngestion(httpRequest))
     {
@@ -274,13 +291,13 @@ instances.MapPost("/{id}/direct-effects", async (
             "Synthetic effects can only be initiated through the configured controlled demonstration boundary."),
             statusCode: StatusCodes.Status403Forbidden);
     }
-    var operation = await coordinator.RequestAsync(id, request, DateTimeOffset.UtcNow, cancellationToken);
+    var operation = await coordinator.RequestAsync(id, request, timeProvider.GetUtcNow(), cancellationToken);
     return Results.Ok(operation);
 }).WithName("StartSyntheticEffect").WithSummary("Persist an effect intent, invoke a separate synthetic provider, and submit its result through Gate 5.");
 
 instances.MapPost("/{id}/direct-effects/{operationId}/resume", async (
     string id, string operationId, HttpRequest httpRequest, EffectCoordinator coordinator,
-    CancellationToken cancellationToken) =>
+    TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
     if (!IsTrustedIngestion(httpRequest))
     {
@@ -288,13 +305,13 @@ instances.MapPost("/{id}/direct-effects/{operationId}/resume", async (
             "Direct Gate 6 provider recovery is restricted to the development-only comparison route."),
             statusCode: StatusCodes.Status403Forbidden);
     }
-    return Results.Ok(await coordinator.ResumeAsync(id, operationId, DateTimeOffset.UtcNow, cancellationToken));
+    return Results.Ok(await coordinator.ResumeAsync(id, operationId, timeProvider.GetUtcNow(), cancellationToken));
 }).WithName("ResumeDirectSyntheticEffect").WithSummary("Development-only historical Gate 6 direct provider recovery route.");
 }
 
 instances.MapPost("/{id}/effects", async (
     string id, StartEffectRequest request, HttpRequest httpRequest, HarnessEffectCoordinator coordinator,
-    CancellationToken cancellationToken) =>
+    TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
     if (!IsTrustedIngestion(httpRequest))
     {
@@ -302,7 +319,7 @@ instances.MapPost("/{id}/effects", async (
             "Harness-backed effects can only be initiated through the configured controlled demonstration boundary."),
             statusCode: StatusCodes.Status403Forbidden);
     }
-    return Results.Ok(await coordinator.RequestAsync(id, request, DateTimeOffset.UtcNow, cancellationToken));
+    return Results.Ok(await coordinator.RequestAsync(id, request, timeProvider.GetUtcNow(), cancellationToken));
 }).WithName("StartHarnessEffect").WithSummary("Commit workflow intent, invoke the configured Generic Harness operation, and submit only verified observations through Gate 5.");
 
 instances.MapPost("/{id}/effects/{operationId}/resume", async (
@@ -351,6 +368,23 @@ if (app.Environment.IsDevelopment() &&
         plan.Arm(operationId, point);
         return Results.Ok(new { operationId, point, armed = true });
     }).WithName("ArmSyntheticEffectFault").WithSummary("Development-only one-shot fault injection for deterministic Gate 6 demonstrations.");
+
+    app.MapPost("/api/test-controls/timers/process-due", async (
+        int? limit,
+        HttpRequest httpRequest,
+        TimerProcessingService processor,
+        CancellationToken cancellationToken) =>
+    {
+        if (!IsTrustedIngestion(httpRequest))
+        {
+            return Results.Json(new ApiError("trusted-ingestion-required",
+                "Timer processing requires the configured controlled-administration boundary."),
+                statusCode: StatusCodes.Status403Forbidden);
+        }
+        var processed = await processor.ProcessDueAsync(limit ?? 100, cancellationToken);
+        return Results.Ok(processed.Select(result => result.ToResponse()));
+    }).WithName("ProcessDueTimers")
+      .WithSummary("Development-only: process currently due durable timers; callers cannot declare a timer authoritative.");
 }
 app.MapGet("/health", () => Results.Ok(new { status = "ok" })).WithTags("Operations");
 
@@ -395,13 +429,14 @@ static async Task<IResult> RecordMalformedInput(
     SubmitInputRequest request,
     bool trustedSource,
     string explanation,
+    TimeProvider timeProvider,
     CancellationToken cancellationToken)
 {
     var receipt = await store.RecordMalformedInputAsync(
         instanceId, inputKind, request.MessageId, request.Type, request.ExpectedRevision,
         request.CorrelationId, request.Source, request.OccurredAt,
         JsonSerializer.Serialize(request, JsonDefaults.Options), trustedSource, explanation,
-        DateTimeOffset.UtcNow, cancellationToken);
+        timeProvider.GetUtcNow(), cancellationToken);
     return Results.BadRequest(new ApiError("malformed-input",
         $"{explanation} Inspect inbound receipt '{receipt.Id}'."));
 }

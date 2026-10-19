@@ -8,11 +8,17 @@ public sealed class DefinitionLoaderTests
     public void Loads_both_workflow_definitions()
     {
         var orion = TestSupport.LoadWorkflow("orion-v1.json");
+        var timedOrion = TestSupport.LoadWorkflow("orion-v4.json");
         var documents = TestSupport.LoadWorkflow("document-review-v1.json");
 
         Assert.Equal("orion-equipment-lease", orion.Id);
         Assert.Equal("1.1", orion.LanguageVersion);
         Assert.Equal("3.0", orion.Version);
+        Assert.Equal("1.2", timedOrion.LanguageVersion);
+        Assert.Equal("4.0", timedOrion.Version);
+        Assert.Equal(TimeSpan.FromDays(7), timedOrion.Timers.Single(timer => timer.Id == "offer-expiry").Duration);
+        Assert.Equal(TimeSpan.FromDays(6), timedOrion.Timers.Single(timer => timer.Id == "offer-reminder").Duration);
+        Assert.Equal(TimeSpan.FromDays(10), timedOrion.Timers.Single(timer => timer.Id == "document-request-follow-up").Duration);
         Assert.Contains("AcceptOffer", orion.InputPolicy!.Commands.Keys);
         Assert.Contains("OfferDocumentGenerated", orion.InputPolicy.Observations.Keys);
         Assert.Equal("internal-document-review", documents.Id);
@@ -35,6 +41,35 @@ public sealed class DefinitionLoaderTests
                 StringComparison.Ordinal);
         var mappedEventError = Assert.Throws<MachineDefinitionException>(() => MachineDefinitionLoader.Load(language11));
         Assert.Contains(mappedEventError.Issues, issue => issue.Code == "undeclared-input-event");
+    }
+
+    [Fact]
+    public void Timer_declarations_require_language_1_2_and_validate_trigger_and_due_event()
+    {
+        var language11 = """
+            {
+              "languageVersion":"1.1", "id":"legacy", "version":"1", "initialState":"A",
+              "states":[{"id":"A"},{"id":"B","terminal":true}],
+              "events":["Go"],
+              "transitions":[{"id":"go","source":"A","event":"Go","target":"B"}],
+              "timers":[]
+            }
+            """;
+        var versionError = Assert.Throws<MachineDefinitionException>(() => MachineDefinitionLoader.Load(language11));
+        Assert.Contains(versionError.Issues, issue => issue.Code == "timer-version");
+
+        var unknownEvent = """
+            {
+              "languageVersion":"1.2", "id":"timed", "version":"1", "initialState":"A",
+              "states":[{"id":"A"},{"id":"B","terminal":true}],
+              "events":["Go"],
+              "transitions":[{"id":"go","source":"A","event":"Go","target":"B"}],
+              "timers":[{"id":"timer","onTransition":"go","duration":"P1D","event":"Missing","whileState":"A"}]
+            }
+            """;
+        var eventError = Assert.Throws<MachineDefinitionException>(() => MachineDefinitionLoader.Load(unknownEvent));
+        Assert.Contains(eventError.Issues, issue => issue.Code == "undeclared-timer-event");
+        Assert.Contains(eventError.Issues, issue => issue.Code == "timer-trigger-state-mismatch");
     }
 
     [Fact]

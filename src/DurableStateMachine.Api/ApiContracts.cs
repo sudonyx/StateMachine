@@ -108,6 +108,32 @@ public sealed record TransitionResponse(string Id, string InstanceId, string Att
     string DefinitionId, string DefinitionVersion, string PreviousState, string NewState, string Event,
     long RevisionBefore, long RevisionAfter, DateTimeOffset OccurredAt);
 public sealed record EventSubmissionResponse(AttemptResponse Attempt, InstanceResponse Instance, TransitionResponse? Transition);
+public sealed record TimerResponse(
+    string Id,
+    string InstanceId,
+    string DefinitionId,
+    string DefinitionVersion,
+    string TimerDeclarationId,
+    string OriginTransitionId,
+    string OriginTransitionHistoryId,
+    string OriginEvent,
+    long OriginRevision,
+    DateTimeOffset TriggeredAt,
+    DateTimeOffset CalculatedAt,
+    DateTimeOffset DueAt,
+    string Status,
+    string? ResultReason,
+    DateTimeOffset? ProcessedAt,
+    string? AttemptId,
+    string? ResultTransitionId,
+    string? ActionOperationId,
+    JsonElement SchedulingEvidence,
+    JsonElement ProcessingEvidence);
+public sealed record TimerProcessingResponse(
+    TimerResponse Timer,
+    AttemptResponse? Attempt,
+    InstanceResponse? Instance,
+    TransitionResponse? Transition);
 public sealed record ApiError(string Code, string Message, IReadOnlyList<ValidationIssue>? Issues = null);
 
 public static class ApiContractMapping
@@ -155,6 +181,18 @@ public static class ApiContractMapping
         new(history.Id, history.InstanceId, history.AttemptId, history.TransitionId, history.DefinitionId,
             history.DefinitionVersion, history.PreviousState, history.NewState, history.Event,
             history.RevisionBefore, history.RevisionAfter, history.OccurredAt);
+
+    public static TimerResponse ToResponse(this TimerRecord timer) =>
+        new(timer.Id, timer.InstanceId, timer.DefinitionId, timer.DefinitionVersion,
+            timer.TimerDeclarationId, timer.OriginTransitionId, timer.OriginTransitionHistoryId,
+            timer.OriginEvent, timer.OriginRevision, timer.TriggeredAt, timer.CalculatedAt, timer.DueAt,
+            timer.Status, timer.ResultReason, timer.ProcessedAt, timer.AttemptId, timer.ResultTransitionId,
+            timer.ActionOperationId, JsonDocument.Parse(timer.EvidenceJson).RootElement.Clone(),
+            JsonDocument.Parse(timer.ProcessingEvidenceJson).RootElement.Clone());
+
+    public static TimerProcessingResponse ToResponse(this TimerProcessingResult result) =>
+        new(result.Timer.ToResponse(), result.Submission?.Attempt.ToResponse(),
+            result.Submission?.Instance.ToResponse(), result.Submission?.Transition?.ToResponse());
 
     private static object? ToObject(FactValue value) => value.Kind switch
     {
