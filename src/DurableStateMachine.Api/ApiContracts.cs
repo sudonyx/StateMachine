@@ -28,7 +28,10 @@ public sealed record SubmitInputRequest(
     Dictionary<string, JsonElement>? Facts = null,
     Dictionary<string, JsonElement>? Evidence = null,
     Dictionary<string, string>? FactsProvenance = null,
-    DecisionEvidenceRequest? DecisionEvidence = null);
+    DecisionEvidenceRequest? DecisionEvidence = null,
+    string? DeliveryId = null,
+    string? OperationId = null,
+    string? ObservationId = null);
 
 public sealed record RegisterExpectedOperationRequest(
     string OperationId,
@@ -40,7 +43,10 @@ public sealed record RegisterExpectedOperationRequest(
 public sealed record InboundMessageResponse(
     string Id,
     string InstanceId,
+    string? DeliveryId,
     string MessageId,
+    string? OperationId,
+    string? ObservationId,
     string InputKind,
     string InputType,
     string Authority,
@@ -139,7 +145,8 @@ public sealed record ApiError(string Code, string Message, IReadOnlyList<Validat
 public static class ApiContractMapping
 {
     public static InboundMessageResponse ToResponse(this InboundMessageRecord message) =>
-        new(message.Id, message.InstanceId, message.MessageId, message.InputKind, message.InputType,
+        new(message.Id, message.InstanceId, message.DeliveryId, message.MessageId, message.OperationId,
+            message.ObservationId, message.InputKind, message.InputType,
             message.Authority, message.CorrelationId, message.ClaimedSource, message.ExpectedRevision, message.DefinitionId,
             message.DefinitionVersion, message.RevisionAtReceipt,
             JsonDocument.Parse(message.InputEnvelopeJson).RootElement.Clone(),

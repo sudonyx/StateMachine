@@ -38,14 +38,16 @@ The trusted adapter currently validates that required evidence names are present
 
 ## Input identity, correlation and duplicates
 
-- `messageId` identifies one logical command or delivered message.
-- `correlationId` identifies the expected external operation for an observation; it is not a delivery ID.
+- `deliveryId` identifies a transport attempt and is stored separately from the logical message fingerprint.
+- `messageId` identifies the logical command/event input; the Gate 9 corpus `event_id` maps to this value.
+- Optional `operationId` and `observationId` are stored as distinct command/business-operation and external-result metadata; neither automatically deduplicates a new logical command.
+- `correlationId` identifies the expected external operation for an observation; it is not a delivery or observation ID.
 - The expected operation records its instance, observation type, accepted source identity, expected instance revision, required evidence and resolution state.
 - The instance revision identifies the current execution position. It is not the machine-definition version.
 
-Every received command/observation receipt is stored with its envelope, exact definition identity, observed revision, canonical payload digest, outcome and refusal explanation. Same `messageId` and same canonical payload is recorded as a duplicate and does not evaluate again. Reusing a message ID with different content is an identity conflict. A second delivery ID for a resolved operation is duplicate only when its canonical result digest agrees; a differing result is a conflict. A new command ID does not inherit the old command's idempotency: it is checked against the current revision and evaluator, which can reject an action no longer permitted.
+Every received command/observation receipt is stored with its delivery and logical identities, envelope, exact definition identity, observed revision, canonical payload digest, outcome and refusal explanation. Same `messageId` and same canonical content is recorded as a duplicate and does not evaluate again, even if it arrived under another delivery ID. Reusing a message ID with different content is an identity conflict. A second observation message for a resolved operation is duplicate only when its canonical result digest agrees; a differing result is a conflict. A new command message ID does not inherit the old command's idempotency: it is checked against the current revision and evaluator, which can reject an action no longer permitted.
 
-These are durable local SQLite checks under the API's per-instance, single-process serialization model. This gate does not claim cross-process exactly-once execution, distributed locking, or protection against adversarial multi-host contention.
+The Gate 5 implementation originally relied on process-local serialization for these checks. Gate 9 adds a host-scoped local gate plus a SQLite immediate write transaction that takes the database writer reservation before reading the instance. A later request from another API host reads the committed revision and records a stale or duplicate outcome instead of evaluating from a competing snapshot. This remains SQLite-specific and does not provide database-independent distributed locking or exactly-once external execution; see [gate-9-design.md](./gate-9-design.md).
 
 ## Stale and late messages
 

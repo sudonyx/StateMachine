@@ -77,7 +77,7 @@ Orion's expiry declaration lists `AcceptOffer` and `DeclineOffer` in `blockedEve
 - expiry committed first moves to terminal `OfferExpired`, after which a competing event cannot move it elsewhere;
 - reminder processing at/after the expiry deadline is suppressed by its declared `invalidatedByDueTimers` relation unless the reminder was already processed before expiry.
 
-No event handler directly assigns a target state outside the definition. The existing revision compare-and-update and the per-instance in-process semaphore remain the local coordination mechanisms. The implementation does not claim multi-process/distributed locking. A SQLite write conflict is an error/rollback, not a second accepted transition.
+No event handler directly assigns a target state outside the definition. Gate 8 originally used a process-local semaphore and revision compare-and-update. Gate 9 scopes the semaphore to one API host and adds a SQLite `BEGIN IMMEDIATE` transaction before state reads, plus a unique transition-history revision index. Independent API hosts sharing a SQLite file therefore serialize writes at the database boundary. This is not a database-independent distributed lock and does not claim support for SQLite over a network filesystem; see [gate-9-design.md](./gate-9-design.md).
 
 ## Reminder and document follow-up effects
 
@@ -95,6 +95,6 @@ There is no automatic production polling/worker in this gate. Operators or a fut
 
 ## Verification and limitations
 
-The automated SQLite/API tests cover language 1.2, immutable old/new definition deadlines, no early processing, backward and forward clock movement, host restart recovery, repeated processing, accepted-before-deadline cancellation, exact-boundary refusal, stale reminder suppression, follow-up cancellation, trusted processing authority, Gate 7 intent creation without provider invocation and a forced timer-insert rollback.
+The automated SQLite/API tests cover language 1.2, immutable old/new definition deadlines, no early processing, backward and forward clock movement, host restart recovery, repeated processing, accepted-before-deadline cancellation, exact-boundary refusal, stale reminder suppression, follow-up cancellation, trusted processing authority, Gate 7 intent creation without provider invocation and a forced timer-insert rollback. Gate 9 adds cross-host database arbitration and corpus coverage in its own tests.
 
-Restart tests dispose one `WebApplicationFactory` and create another against the same SQLite file. They are controlled in-process host restarts, not operating-system process-kill coverage. No genuine process-kill demonstration, multi-process lock, background scheduler, event-history reconstruction, trusted delayed-business-time exception or automatic external-effect dispatcher is implemented.
+Restart tests dispose one `WebApplicationFactory` and create another against the same SQLite file. They are controlled in-process host restarts, not operating-system process-kill coverage. Gate 9's multi-host test uses independent API-host service providers and their separate local lock registries, with SQLite transactions as the shared arbitration mechanism; it is not an OS-process-kill test. No background scheduler, event-history reconstruction, trusted delayed-business-time exception or automatic external-effect dispatcher is implemented.

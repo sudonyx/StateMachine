@@ -22,6 +22,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 });
 builder.Services.AddOpenApi();
 builder.Services.AddScoped<MachineStore>();
+builder.Services.AddSingleton<InstanceLockRegistry>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 builder.Services.AddScoped<TimerProcessingService>();
 builder.Services.AddSingleton<EffectFaultPlan>();
@@ -41,6 +42,7 @@ await using (var scope = app.Services.CreateAsyncScope())
     await database.EnsureGate6SchemaAsync();
     await database.EnsureGate7SchemaAsync();
     await database.EnsureGate8SchemaAsync();
+    await database.EnsureGate9SchemaAsync();
 }
 
 app.Use(async (context, next) =>
@@ -147,7 +149,9 @@ instances.MapPost("/{id}/commands", async (
     string id, SubmitInputRequest request, MachineStore store, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(request.MessageId) || string.IsNullOrWhiteSpace(request.Type) ||
-        request.MessageId.Length > 128 || request.ExpectedRevision is null || request.ExpectedRevision < 0)
+        request.MessageId.Length > 128 || request.DeliveryId?.Length > 128 ||
+        request.OperationId?.Length > 128 || request.ObservationId?.Length > 128 ||
+        request.ExpectedRevision is null || request.ExpectedRevision < 0)
     {
         return await RecordMalformedInput(store, id, "Command", request, trustedSource: false,
             "Message ID (1-128 characters), command type, and non-negative expected revision are required.",
@@ -166,7 +170,8 @@ instances.MapPost("/{id}/commands", async (
         return await RecordMalformedInput(store, id, "Command", request, trustedSource: false,
             exception.Message, timeProvider, cancellationToken);
     }
-    var result = await store.SubmitInputAsync(id, "Command", request.MessageId, request.Type,
+    var result = await store.SubmitInputAsync(id, "Command", request.MessageId,
+        request.DeliveryId, request.OperationId, request.ObservationId, request.Type,
         request.ExpectedRevision.Value, request.CorrelationId, request.Source, request.OccurredAt,
         request.Payload, facts, request.Evidence, decisionEvidence,
         request.FactsProvenance, trustedSource: false, timeProvider.GetUtcNow(), cancellationToken);
@@ -178,7 +183,9 @@ instances.MapPost("/{id}/observations", async (
     CancellationToken cancellationToken) =>
 {
     if (string.IsNullOrWhiteSpace(request.MessageId) || string.IsNullOrWhiteSpace(request.Type) ||
-        request.MessageId.Length > 128 || string.IsNullOrWhiteSpace(request.CorrelationId) ||
+        request.MessageId.Length > 128 || request.DeliveryId?.Length > 128 ||
+        request.OperationId?.Length > 128 || request.ObservationId?.Length > 128 ||
+        string.IsNullOrWhiteSpace(request.CorrelationId) ||
         request.ExpectedRevision is null || request.ExpectedRevision < 0)
     {
         return await RecordMalformedInput(store, id, "Observation", request, IsTrustedIngestion(httpRequest),
@@ -199,7 +206,8 @@ instances.MapPost("/{id}/observations", async (
         return await RecordMalformedInput(store, id, "Observation", request, trustedSource,
             exception.Message, timeProvider, cancellationToken);
     }
-    var result = await store.SubmitInputAsync(id, "Observation", request.MessageId, request.Type,
+    var result = await store.SubmitInputAsync(id, "Observation", request.MessageId,
+        request.DeliveryId, request.OperationId, request.ObservationId, request.Type,
         request.ExpectedRevision.Value, request.CorrelationId, request.Source, request.OccurredAt,
         request.Payload, facts, request.Evidence, decisionEvidence,
         request.FactsProvenance, trustedSource, timeProvider.GetUtcNow(), cancellationToken);
@@ -433,7 +441,8 @@ static async Task<IResult> RecordMalformedInput(
     CancellationToken cancellationToken)
 {
     var receipt = await store.RecordMalformedInputAsync(
-        instanceId, inputKind, request.MessageId, request.Type, request.ExpectedRevision,
+        instanceId, inputKind, request.MessageId, request.DeliveryId, request.OperationId,
+        request.ObservationId, request.Type, request.ExpectedRevision,
         request.CorrelationId, request.Source, request.OccurredAt,
         JsonSerializer.Serialize(request, JsonDefaults.Options), trustedSource, explanation,
         timeProvider.GetUtcNow(), cancellationToken);

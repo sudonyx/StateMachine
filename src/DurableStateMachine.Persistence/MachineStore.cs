@@ -2,15 +2,16 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using DurableStateMachine.Core;
+using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
 namespace DurableStateMachine.Persistence;
 
-public sealed class MachineStore(MachineDbContext db)
+public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry instanceLockRegistry)
 {
-    private static readonly object InstanceLocksSync = new();
-    private static readonly Dictionary<string, InstanceGate> InstanceLocks = new(StringComparer.Ordinal);
     private static readonly JsonSerializerOptions StoredJsonOptions = new(JsonSerializerDefaults.Web);
+    private object InstanceLocksSync => instanceLockRegistry.Sync;
+    private Dictionary<string, InstanceGate> InstanceLocks => instanceLockRegistry.Locks;
 
     public async Task<DefinitionRegistration> RegisterDefinitionAsync(string definitionJson, DateTimeOffset now, CancellationToken cancellationToken)
     {
@@ -193,7 +194,7 @@ public sealed class MachineStore(MachineDbContext db)
         {
             await gate.Semaphore.WaitAsync(cancellationToken);
             entered = true;
-            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            await using var transaction = await BeginImmediateTransactionAsync(cancellationToken);
             var timer = await db.Timers.SingleOrDefaultAsync(
                 record => record.Id == timerId && record.InstanceId == instanceId, cancellationToken)
                 ?? throw new ResourceNotFoundException($"Timer '{timerId}' does not exist for instance '{instanceId}'.");
@@ -373,7 +374,7 @@ public sealed class MachineStore(MachineDbContext db)
         {
             await gate.Semaphore.WaitAsync(cancellationToken);
             entered = true;
-            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            await using var transaction = await BeginImmediateTransactionAsync(cancellationToken);
             var existingEffect = await db.EffectOperations.AsNoTracking().SingleOrDefaultAsync(
                 record => record.InstanceId == instanceId && record.OperationId == operationId, cancellationToken);
             if (existingEffect is not null)
@@ -532,7 +533,7 @@ public sealed class MachineStore(MachineDbContext db)
         {
             await gate.Semaphore.WaitAsync(cancellationToken);
             entered = true;
-            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            await using var transaction = await BeginImmediateTransactionAsync(cancellationToken);
             var instance = await db.Instances.SingleOrDefaultAsync(record => record.Id == instanceId, cancellationToken)
                 ?? throw new ResourceNotFoundException($"Instance '{instanceId}' does not exist.");
             if (expectedRevision.HasValue && expectedRevision.Value != instance.Revision)
@@ -623,6 +624,9 @@ public sealed class MachineStore(MachineDbContext db)
         string instanceId,
         string inputKind,
         string messageId,
+        string? deliveryId,
+        string? operationId,
+        string? observationId,
         string inputType,
         long expectedRevision,
         string? correlationId,
@@ -642,6 +646,7 @@ public sealed class MachineStore(MachineDbContext db)
             throw new ArgumentException($"Unsupported input kind '{inputKind}'.");
         }
         if (string.IsNullOrWhiteSpace(messageId) || messageId.Length > 128 ||
+            deliveryId?.Length > 128 || operationId?.Length > 128 || observationId?.Length > 128 ||
             string.IsNullOrWhiteSpace(inputType) || expectedRevision < 0)
         {
             throw new ArgumentException("Message ID, input type, and a non-negative expected revision are required.");
@@ -666,7 +671,7 @@ public sealed class MachineStore(MachineDbContext db)
         {
             await gate.Semaphore.WaitAsync(cancellationToken);
             entered = true;
-            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            await using var transaction = await BeginImmediateTransactionAsync(cancellationToken);
             var instance = await db.Instances.SingleOrDefaultAsync(record => record.Id == instanceId, cancellationToken)
                 ?? throw new ResourceNotFoundException($"Instance '{instanceId}' does not exist.");
             var definitionRecord = await db.Definitions.AsNoTracking().SingleAsync(
@@ -681,6 +686,8 @@ public sealed class MachineStore(MachineDbContext db)
             {
                 inputKind,
                 messageId,
+                operationId,
+                observationId,
                 inputType,
                 correlationId,
                 claimedSource,
@@ -703,7 +710,10 @@ public sealed class MachineStore(MachineDbContext db)
             {
                 Id = Guid.NewGuid().ToString("N"),
                 InstanceId = instanceId,
+                DeliveryId = deliveryId,
                 MessageId = messageId,
+                OperationId = operationId,
+                ObservationId = observationId,
                 InputKind = inputKind,
                 InputType = inputType,
                 Authority = inputKind == "Command"
@@ -921,6 +931,9 @@ public sealed class MachineStore(MachineDbContext db)
         string instanceId,
         string inputKind,
         string? messageId,
+        string? deliveryId,
+        string? operationId,
+        string? observationId,
         string? inputType,
         long? expectedRevision,
         string? correlationId,
@@ -940,7 +953,10 @@ public sealed class MachineStore(MachineDbContext db)
         {
             Id = Guid.NewGuid().ToString("N"),
             InstanceId = instanceId,
+            DeliveryId = deliveryId,
             MessageId = string.IsNullOrWhiteSpace(messageId) ? $"invalid-{Guid.NewGuid():N}" : messageId,
+            OperationId = operationId,
+            ObservationId = observationId,
             InputKind = inputKind,
             InputType = string.IsNullOrWhiteSpace(inputType) ? "Unspecified" : inputType,
             Authority = inputKind == "Command"
@@ -1034,7 +1050,7 @@ public sealed class MachineStore(MachineDbContext db)
         {
             await gate.Semaphore.WaitAsync(cancellationToken);
             entered = true;
-            await using var transaction = await db.Database.BeginTransactionAsync(cancellationToken);
+            await using var transaction = await BeginImmediateTransactionAsync(cancellationToken);
             var instance = await db.Instances.SingleOrDefaultAsync(record => record.Id == instanceId, cancellationToken)
                 ?? throw new ResourceNotFoundException($"Instance '{instanceId}' does not exist.");
             var result = await EvaluateEventWithinTransactionAsync(instance, eventName, now, cancellationToken,
@@ -1488,6 +1504,29 @@ public sealed class MachineStore(MachineDbContext db)
         new(record.Id, record.DefinitionId, record.DefinitionVersion, record.CurrentState, record.Revision,
             DeserializeFacts(record.FactsJson), record.CreatedAt, record.UpdatedAt);
 
+    private async Task<ImmediateTransaction> BeginImmediateTransactionAsync(CancellationToken cancellationToken)
+    {
+        await db.Database.OpenConnectionAsync(cancellationToken);
+        var connection = (SqliteConnection)db.Database.GetDbConnection();
+        SqliteTransaction? sqliteTransaction = null;
+        try
+        {
+            sqliteTransaction = connection.BeginTransaction(deferred: false);
+            var efTransaction = await db.Database.UseTransactionAsync(sqliteTransaction, cancellationToken)
+                ?? throw new InvalidOperationException("EF Core did not enlist in the SQLite transaction.");
+            return new ImmediateTransaction(db, sqliteTransaction, efTransaction);
+        }
+        catch
+        {
+            if (sqliteTransaction is not null)
+            {
+                await sqliteTransaction.DisposeAsync();
+            }
+            await db.Database.CloseConnectionAsync();
+            throw;
+        }
+    }
+
     private static string SerializeFacts(IReadOnlyDictionary<string, FactValue> facts) =>
         JsonSerializer.Serialize(facts.ToDictionary(pair => pair.Key, pair => FactWire.From(pair.Value), StringComparer.Ordinal), StoredJsonOptions);
 
@@ -1590,11 +1629,33 @@ public sealed class MachineStore(MachineDbContext db)
         };
     }
 
-    private sealed class InstanceGate
+    internal sealed class InstanceGate
     {
         public SemaphoreSlim Semaphore { get; } = new(1, 1);
         public int Users { get; set; }
     }
+
+    private sealed class ImmediateTransaction(
+        MachineDbContext db,
+        SqliteTransaction sqliteTransaction,
+        Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction efTransaction) : IAsyncDisposable
+    {
+        public Task CommitAsync(CancellationToken cancellationToken) =>
+            efTransaction.CommitAsync(cancellationToken);
+
+        public async ValueTask DisposeAsync()
+        {
+            await efTransaction.DisposeAsync();
+            await sqliteTransaction.DisposeAsync();
+            await db.Database.CloseConnectionAsync();
+        }
+    }
+}
+
+public sealed class InstanceLockRegistry
+{
+    internal object Sync { get; } = new();
+    internal Dictionary<string, MachineStore.InstanceGate> Locks { get; } = new(StringComparer.Ordinal);
 }
 
 public sealed record DefinitionSummary(string Id, string Version, string LanguageVersion, string ContentDigest, DateTimeOffset RegisteredAt);

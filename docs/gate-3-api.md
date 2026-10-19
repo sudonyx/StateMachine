@@ -200,10 +200,13 @@ Command and observation bodies use an envelope such as:
 
 ```json
 {
-  "messageId": "command-or-delivery-identity",
+  "deliveryId": "transport-attempt-88",
+  "messageId": "logical-event-identity",
+  "operationId": "optional-command-operation",
+  "observationId": "optional-external-result-identity",
   "type": "AcceptOffer",
   "expectedRevision": 3,
-  "correlationId": "optional-command-correlation-or-required-operation-id",
+  "correlationId": "expected-operation-id-for-observations",
   "source": "caller-claimed-source",
   "occurredAt": "2026-10-15T12:00:00Z",
   "payload": { "offerId": "synthetic-offer-1" },
@@ -213,11 +216,13 @@ Command and observation bodies use an envelope such as:
 }
 ```
 
-For commands, `type` must match a declared command mapping and `expectedRevision` must match the current instance revision. For observations, `correlationId` is the expected operation ID; the definition mapping, expected-operation record, source identity, required evidence, and instance revision must all match. The revision, definition identity, payload/evidence digests, mapped event, evaluator attempt and outcome are recorded. Receipt itself does not accept an event or transition.
+`deliveryId` is optional transport-attempt metadata and is stored independently of the canonical message digest. `messageId` is the logical event/input identity used for exact deduplication. The optional command `operationId` and observation `observationId` remain separate metadata; neither is an alias for the expected-operation `correlationId`. For commands, `type` must match a declared command mapping and `expectedRevision` must match the current instance revision. For observations, `correlationId` is the expected operation ID; the definition mapping, expected-operation record, source identity, required evidence, and instance revision must all match. The revision, definition identity, payload/evidence digests, mapped event, evaluator attempt and outcome are recorded. Receipt itself does not accept an event or transition.
 
 Observations without a valid trusted-ingestion key are retained as `Untrusted` and cannot evaluate an event. The controlled training boundary uses `DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY`, supplied in the `X-State-Machine-Trusted-Ingestion-Key` header. The same configured boundary is required to register expected operations. This shared local demonstration credential is not production authentication or source attestation; do not expose it to ordinary clients. A claimed `source` value alone is never authority.
 
-The API returns `200 OK` with an inspectable message result for well-formed but ineligible inputs. Outcomes include `Accepted`, evaluator outcomes such as `Rejected` and `Unresolved`, `Duplicate`, `IdentityConflict`, `Unexpected`, `Untrusted`, `Malformed`, `Stale`, and `Conflicting`. Invalid typed fields are returned as `400 Bad Request` and, where the instance and envelope can be parsed, retained as a `Malformed` receipt. JSON that cannot be parsed or bound to the request contract is rejected before a receipt can be persisted. A command identity (`messageId`) reused with different content is a conflict; same content is a duplicate. A second delivery ID for an already resolved operation is duplicate only when its canonical result digest matches. Conflicting results are preserved and refused. An accepted message includes an `attempt`; other inputs do not create evaluator attempts. Only an accepted evaluator result creates an accepted workflow event and transition history.
+The API returns `200 OK` with an inspectable message result for well-formed but ineligible inputs. Outcomes include `Accepted`, evaluator outcomes such as `Rejected` and `Unresolved`, `Duplicate`, `IdentityConflict`, `Unexpected`, `Untrusted`, `Malformed`, `Stale`, and `Conflicting`. Invalid typed fields are returned as `400 Bad Request` and, where the instance and envelope can be parsed, retained as a `Malformed` receipt. JSON that cannot be parsed or bound to the request contract is rejected before a receipt can be persisted. A logical input identity (`messageId`) reused with different content is a conflict; same content is a duplicate even when `deliveryId` differs. A new command message identity is evaluated according to current revision and state, not treated as an exact duplicate. A second observation message for an already resolved operation is duplicate only when its canonical result digest matches. Conflicting results are preserved and refused. An accepted message includes an `attempt`; other inputs do not create evaluator attempts. Only an accepted evaluator result creates an accepted workflow event and transition history.
+
+Gate 9 uses a host-scoped local gate only as an optimization. SQLite state-changing transactions obtain a writer reservation before reading state and condition updates by persisted revision; a unique history index prevents two transitions from owning one revision. Independent API hosts sharing a correctly locked SQLite database therefore arbitrate updates durably. This is SQLite-specific and does not provide a general distributed lock. See [gate-9-design.md](./gate-9-design.md).
 
 Definitions with an input policy reject `POST /api/instances/{id}/events` with `403 Forbidden`; the rejected legacy call is retained as an inbound receipt. Definitions without an input policy, including existing language 1.0 definitions and the Meridian integration workflow, retain the legacy event endpoint semantics. This is the explicit compatibility boundary; migrating a workflow to language 1.1 requires clients to use the declared input paths.
 

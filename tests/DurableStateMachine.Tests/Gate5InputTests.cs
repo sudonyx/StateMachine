@@ -87,31 +87,49 @@ public sealed class Gate5InputTests
 
                 var command = new
                 {
+                    deliveryId = "transport-command-1",
                     messageId = "command-1",
+                    operationId = "business-command-1",
                     type = "StartWork",
                     expectedRevision = 0,
                     payload = new { comment = "start", state = "Done" }
                 };
+                var repeatedDelivery = new
+                {
+                    deliveryId = "transport-command-2",
+                    messageId = command.messageId,
+                    operationId = command.operationId,
+                    type = command.type,
+                    expectedRevision = command.expectedRevision,
+                    payload = command.payload
+                };
                 var duplicateDeliveries = await Task.WhenAll(
                     client.PostAsJsonAsync($"/api/instances/{instanceId}/commands", command),
-                    client.PostAsJsonAsync($"/api/instances/{instanceId}/commands", command));
+                    client.PostAsJsonAsync($"/api/instances/{instanceId}/commands", repeatedDelivery));
                 var results = await Task.WhenAll(duplicateDeliveries.Select(async response =>
                 {
                     Assert.Equal(HttpStatusCode.OK, response.StatusCode);
                     using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
                     return (body.RootElement.GetProperty("message").GetProperty("status").GetString(),
                         body.RootElement.GetProperty("instance").GetProperty("revision").GetInt64(),
-                        body.RootElement.GetProperty("instance").GetProperty("currentState").GetString());
+                        body.RootElement.GetProperty("instance").GetProperty("currentState").GetString(),
+                        body.RootElement.GetProperty("message").GetProperty("deliveryId").GetString(),
+                        body.RootElement.GetProperty("message").GetProperty("operationId").GetString());
                 }));
                 Assert.Single(results, result => result.Item1 == "Accepted");
                 Assert.Single(results, result => result.Item1 == "Duplicate");
                 Assert.All(results, result => Assert.Equal(1, result.Item2));
                 Assert.All(results, result => Assert.Equal("Active", result.Item3));
+                Assert.Contains(results, result => result.Item4 == "transport-command-1");
+                Assert.Contains(results, result => result.Item4 == "transport-command-2");
+                Assert.All(results, result => Assert.Equal("business-command-1", result.Item5));
 
                 using (var conflicting = JsonDocument.Parse(await (await client.PostAsJsonAsync(
                     $"/api/instances/{instanceId}/commands", new
                     {
+                        deliveryId = "transport-command-conflict",
                         messageId = "command-1",
+                        operationId = "business-command-1",
                         type = "StartWork",
                         expectedRevision = 0,
                         payload = new { comment = "changed" }
@@ -241,6 +259,9 @@ public sealed class Gate5InputTests
                     Assert.Equal("Accepted", body.RootElement.GetProperty("message").GetProperty("status").GetString());
                     Assert.Equal("Complete", body.RootElement.GetProperty("message").GetProperty("acceptedEvent").GetString());
                     Assert.Equal("trusted-ingestion-key", body.RootElement.GetProperty("message").GetProperty("authority").GetString());
+                    Assert.Equal("transport-delivery-1", body.RootElement.GetProperty("message").GetProperty("deliveryId").GetString());
+                    Assert.Equal("observation-delivery-1", body.RootElement.GetProperty("message").GetProperty("observationId").GetString());
+                    Assert.Equal(JsonValueKind.Null, body.RootElement.GetProperty("message").GetProperty("operationId").ValueKind);
                     Assert.Equal("Done", body.RootElement.GetProperty("instance").GetProperty("currentState").GetString());
                     Assert.Equal("sha256:abc", body.RootElement.GetProperty("message").GetProperty("requestEnvelope")
                         .GetProperty("evidence").GetProperty("resultDigest").GetString());
@@ -249,11 +270,16 @@ public sealed class Gate5InputTests
                 using (var duplicateResult = JsonDocument.Parse(await (await client.PostAsJsonAsync(
                     $"/api/instances/{instanceId}/observations", Observation(
                         "delivery-1", operationId, 1, "synthetic-worker",
-                        new { resultDigest = "sha256:abc" }, occurredAt))
+                        new { resultDigest = "sha256:abc" }, occurredAt,
+                        deliveryId: "transport-delivery-1-retry"))
                     ).Content.ReadAsStringAsync()))
                 {
                     Assert.Equal("Duplicate", duplicateResult.RootElement.GetProperty("message").GetProperty("status").GetString());
                     Assert.Equal("duplicate-message", duplicateResult.RootElement.GetProperty("message").GetProperty("reasonCode").GetString());
+                    Assert.Equal("transport-delivery-1-retry",
+                        duplicateResult.RootElement.GetProperty("message").GetProperty("deliveryId").GetString());
+                    Assert.Equal("observation-delivery-1",
+                        duplicateResult.RootElement.GetProperty("message").GetProperty("observationId").GetString());
                 }
                 using (var duplicateResult = JsonDocument.Parse(await (await client.PostAsJsonAsync(
                     $"/api/instances/{instanceId}/observations", Observation(
@@ -286,14 +312,18 @@ public sealed class Gate5InputTests
             using (var restartedClient = restartedFactory.CreateClient())
             {
                 restartedClient.DefaultRequestHeaders.TryAddWithoutValidation("X-State-Machine-Trusted-Ingestion-Key", TrustedKey);
-                using var duplicateAfterRestart = JsonDocument.Parse(await (await restartedClient.PostAsJsonAsync(
+                var duplicateAfterRestartResponse = await restartedClient.PostAsJsonAsync(
                     $"/api/instances/{instanceId}/commands", new
                     {
+                        deliveryId = "transport-command-after-restart",
                         messageId = "command-1",
+                        operationId = "business-command-1",
                         type = "StartWork",
                         expectedRevision = 0,
                         payload = new { comment = "start", state = "Done" }
-                    })).Content.ReadAsStringAsync());
+                    });
+                var duplicateAfterRestartJson = await duplicateAfterRestartResponse.Content.ReadAsStringAsync();
+                using var duplicateAfterRestart = JsonDocument.Parse(duplicateAfterRestartJson);
                 Assert.Equal("Duplicate", duplicateAfterRestart.RootElement.GetProperty("message").GetProperty("status").GetString());
                 Assert.Equal("Done", (await restartedClient.GetFromJsonAsync<JsonElement>($"/api/instances/{instanceId}"))
                     .GetProperty("currentState").GetString());
@@ -384,9 +414,12 @@ public sealed class Gate5InputTests
         string source,
         object evidence,
         DateTimeOffset? occurredAt,
-        object? facts = null) => new
+        object? facts = null,
+        string? deliveryId = null) => new
     {
+        deliveryId = deliveryId ?? $"transport-{messageId}",
         messageId,
+        observationId = $"observation-{messageId}",
         type = "WorkCompleted",
         expectedRevision = revision,
         correlationId = operationId,

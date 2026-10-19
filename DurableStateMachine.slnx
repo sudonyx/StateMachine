@@ -13,4 +13,7 @@
   <Folder Name="/tests/">
     <Project Path="tests/DurableStateMachine.Tests/DurableStateMachine.Tests.csproj" />
   </Folder>
+  <Folder Name="/tools/">
+    <Project Path="tools/OrionGate9Corpus/OrionGate9Corpus.csproj" />
+  </Folder>
 </Solution>

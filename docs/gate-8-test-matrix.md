@@ -25,7 +25,7 @@ All automated cases use SQLite and a manually controlled `TimeProvider`; no test
 ## Not claimed as verified
 
 - No operating-system process was killed. Restart coverage is a test-host restart against a shared SQLite database.
-- The deterministic tests serialize transitions through the existing per-instance local gate; they do not claim multi-process or distributed concurrency guarantees.
+- The Gate 8-only scenarios use the host-local per-instance gate and do not themselves establish cross-host concurrency. Gate 9's independent-host arbitration coverage and SQLite limitations are recorded in [gate-9-design.md](./gate-9-design.md) and [gate-9-test-results.md](./gate-9-test-results.md).
 - The exact-deadline case is deterministically ordered as an API business submission followed by due processing, and the rule blocks acceptance before any timer outcome is committed.
 - No live Generic Harness/provider is called by Gate 8 timer tests. They verify a persisted Gate 7-compatible intent and expected operation only.
 - No production background worker automatically polls timers; the explicit controlled processor discovers overdue rows.

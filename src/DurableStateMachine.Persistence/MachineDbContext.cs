@@ -64,7 +64,10 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
             CREATE TABLE IF NOT EXISTS InboundMessages (
                 Id TEXT NOT NULL CONSTRAINT PK_InboundMessages PRIMARY KEY,
                 InstanceId TEXT NOT NULL,
+                DeliveryId TEXT NULL,
                 MessageId TEXT NOT NULL,
+                OperationId TEXT NULL,
+                ObservationId TEXT NULL,
                 InputKind TEXT NOT NULL,
                 InputType TEXT NOT NULL,
                 Authority TEXT NOT NULL DEFAULT 'unknown',
@@ -136,6 +139,30 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
                 await using var addAuthority = connection.CreateCommand();
                 addAuthority.CommandText = "ALTER TABLE InboundMessages ADD COLUMN Authority TEXT NOT NULL DEFAULT 'unknown'";
                 await addAuthority.ExecuteNonQueryAsync(cancellationToken);
+            }
+            foreach (var (column, declaration) in new[]
+                     {
+                         (nameof(InboundMessageRecord.DeliveryId), "TEXT NULL"),
+                         (nameof(InboundMessageRecord.OperationId), "TEXT NULL"),
+                         (nameof(InboundMessageRecord.ObservationId), "TEXT NULL"),
+                     })
+            {
+                if (columns.Contains(column))
+                {
+                    continue;
+                }
+                await using var addIdentity = connection.CreateCommand();
+                addIdentity.CommandText = $"ALTER TABLE InboundMessages ADD COLUMN {column} {declaration}";
+                await addIdentity.ExecuteNonQueryAsync(cancellationToken);
+                columns.Add(column);
+            }
+            await using (var createDeliveryIndex = connection.CreateCommand())
+            {
+                createDeliveryIndex.CommandText = """
+                    CREATE INDEX IF NOT EXISTS IX_InboundMessages_InstanceId_DeliveryId
+                        ON InboundMessages (InstanceId, DeliveryId)
+                    """;
+                await createDeliveryIndex.ExecuteNonQueryAsync(cancellationToken);
             }
             var operationColumns = new HashSet<string>(StringComparer.Ordinal);
             await using (var inspect = connection.CreateCommand())
@@ -341,6 +368,12 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
                 ON Timers (InstanceId, DueAt, Id);
             """, cancellationToken);
 
+    public Task EnsureGate9SchemaAsync(CancellationToken cancellationToken = default) =>
+        Database.ExecuteSqlRawAsync("""
+                CREATE UNIQUE INDEX IF NOT EXISTS UX_TransitionHistory_InstanceId_RevisionAfter
+                    ON TransitionHistory (InstanceId, RevisionAfter);
+                """, cancellationToken);
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<DefinitionRecord>().HasKey(record => new { record.Id, record.Version });
@@ -348,11 +381,15 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
         modelBuilder.Entity<InputAttemptRecord>().HasKey(record => record.Id);
         modelBuilder.Entity<InputAttemptRecord>().HasIndex(record => new { record.InstanceId, record.ReceivedAt, record.Id });
         modelBuilder.Entity<TransitionHistoryRecord>().HasKey(record => record.Id);
-        modelBuilder.Entity<TransitionHistoryRecord>().HasIndex(record => new { record.InstanceId, record.RevisionAfter });
+        modelBuilder.Entity<TransitionHistoryRecord>()
+            .HasIndex(record => new { record.InstanceId, record.RevisionAfter })
+            .IsUnique().HasDatabaseName("UX_TransitionHistory_InstanceId_RevisionAfter");
         modelBuilder.Entity<TransitionHistoryRecord>().HasIndex(record => record.AttemptId).IsUnique();
         modelBuilder.Entity<InboundMessageRecord>().HasKey(record => record.Id);
         modelBuilder.Entity<InboundMessageRecord>().HasIndex(record => new { record.InstanceId, record.ReceivedAt, record.Id });
         modelBuilder.Entity<InboundMessageRecord>().HasIndex(record => new { record.InstanceId, record.InputKind, record.MessageId });
+        modelBuilder.Entity<InboundMessageRecord>().HasIndex(record => new { record.InstanceId, record.DeliveryId })
+            .HasDatabaseName("IX_InboundMessages_InstanceId_DeliveryId");
         modelBuilder.Entity<ExpectedOperationRecord>().HasKey(record => record.Id);
         modelBuilder.Entity<ExpectedOperationRecord>().HasIndex(record => new { record.InstanceId, record.OperationId }).IsUnique();
         modelBuilder.Entity<EffectOperationRecord>().HasKey(record => record.Id);
@@ -470,7 +507,10 @@ public sealed class InboundMessageRecord
 {
     public required string Id { get; set; }
     public required string InstanceId { get; set; }
+    public string? DeliveryId { get; set; }
     public required string MessageId { get; set; }
+    public string? OperationId { get; set; }
+    public string? ObservationId { get; set; }
     public required string InputKind { get; set; }
     public required string InputType { get; set; }
     public required string Authority { get; set; }

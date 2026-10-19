@@ -1,6 +1,6 @@
 # Durable State Machine
 
-A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 7 routes synthetic Orion effects through the independently running Generic Harness and retains durable correlation between harness execution evidence and Gate 5 workflow transitions. Gate 8 adds versioned declarative timers, persisted UTC deadlines, atomic timer lifecycle updates, explicit due processing and restart recovery. Gate 6's direct provider path remains available only for development/test comparison. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
+A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 7 routes synthetic Orion effects through the independently running Generic Harness and retains durable correlation between harness execution evidence and Gate 5 workflow transitions. Gate 8 adds versioned declarative timers, persisted UTC deadlines, atomic timer lifecycle updates, explicit due processing and restart recovery. Gate 9 strengthens input identity and revision arbitration across independent API hosts sharing SQLite, and adds a reproducible adversarial corpus and runner. Gate 6's direct provider path remains available only for development/test comparison. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
 
 ## Requirements, build and tests
 
@@ -21,6 +21,8 @@ dotnet test DurableStateMachine.slnx
 - `clients/DurableStateMachine.OrionClient/` — Orion scenario using the HTTP contract only.
 - `clients/DurableStateMachine.MeridianClient/` — independent live HTTP demonstration of a Meridian decision bound to a generic workflow event.
 - `tests/DurableStateMachine.Tests/` — Gate 2 regression tests and SQLite-backed HTTP integration tests.
+- `tools/OrionGate9Corpus/` — deterministic Gate 9 corpus generation, validation and API runner.
+- `test-data/` — fixed 5,000-delivery Orion adversarial corpus.
 - `definitions/` — Orion and document-review examples.
 - `docs/` — supported language, API and design documentation.
 - `references/` — qualification brief and fictional Orion requirements source.
@@ -99,6 +101,23 @@ dotnet run --project src\DurableStateMachine.Api
 
 Then call `POST /api/test-controls/timers/process-due?limit=100` with the trusted ingestion header. The route processes all currently due rows in persisted due-time order; it does not accept caller-supplied timer IDs or events. See [gate-8-design.md](./docs/gate-8-design.md), [gate-8-test-matrix.md](./docs/gate-8-test-matrix.md), and [orion-definition-v4.md](./docs/orion-definition-v4.md) for the policy, limitations and coverage.
 
+## Gate 9 duplicate and concurrency handling
+
+The API records transport `deliveryId` separately from logical `messageId`/event identity, optional command `operationId`, optional `observationId`, expected-operation `correlationId`, instance revision, durable timer ID and Generic Harness execution ID. Exact logical retries return the original outcome; changed content under the same message ID is an identity conflict. A new command identity is evaluated normally and is not automatically called a transport duplicate.
+
+Per-host instance gates are an optimization only. State-changing persistence transactions acquire SQLite's immediate writer reservation before reading the instance; a unique `(instanceId, revisionAfter)` transition-history index and conditional revision update provide the durable checks. This supports independent API hosts that share a SQLite file with working file locking. SQLite remains a single-writer database; network filesystems and database-independent distributed guarantees are not claimed.
+
+Generate/validate the fixed corpus and run it against an API configured with a dedicated database and trusted-ingestion key:
+
+```powershell
+dotnet run --project tools\OrionGate9Corpus -- generate --seed 20261019
+dotnet run --project tools\OrionGate9Corpus -- validate --seed 20261019
+dotnet run --project tools\OrionGate9Corpus -- run --base-url http://localhost:5000 `
+  --trusted-key "<local-test-key>" --mode concurrent --concurrency 8 --run-id gate9-run-1
+```
+
+Use `--mode baseline` for serial application lanes. Use `--mode multi-host` with repeated `--host-url` values for hosts sharing one SQLite database. The runner saves structured reports under the system temporary directory by default. See [gate-9-design.md](./docs/gate-9-design.md) and [gate-9-corpus.md](./docs/gate-9-corpus.md).
+
 ## Gate 4 fact-binding and Meridian demonstration
 
 Event submissions may provide additional typed `facts` for that evaluation only. They are never merged into durable instance facts, and a per-attempt fact name that collides with an instance fact is rejected. Optional `factsProvenance` labels and generic `decisionEvidence` are preserved with the attempt; caller-supplied provenance is not proof of authenticity. The exact context, findings, decision evidence, result and a local evidence digest can be inspected at the attempt endpoints.
@@ -115,6 +134,6 @@ Start both services first. The client persists the keyed request before sending 
 
 ## Semantics and limitations
 
-Definitions are immutable by `(id, version)`; new versions coexist. Instances remain bound to the exact version used at creation, with their instance facts fixed for their lifetime. Explicit per-attempt facts are immutable evaluation-only inputs and never mutate those facts. Each event attempt (including rejected, ambiguous and unresolved evaluations) is stored separately from accepted transition history, together with a complete evaluation-evidence snapshot. Accepted state, revision, attempt, evidence and transition history commit in one SQLite transaction. The HTTP service serializes same-instance submissions within one process and checks the persisted revision during updates.
+Definitions are immutable by `(id, version)`; new versions coexist. Instances remain bound to the exact version used at creation, with their instance facts fixed for their lifetime. Explicit per-attempt facts are immutable evaluation-only inputs and never mutate those facts. Each event attempt (including rejected, ambiguous and unresolved evaluations) is stored separately from accepted transition history, together with a complete evaluation-evidence snapshot. Accepted state, revision, attempt, evidence and transition history commit in one SQLite transaction. Per-host instance gates reduce local contention; Gate 9 SQLite write transactions and revision constraints arbitrate independent hosts sharing a database.
 
-The Meridian client remains a demonstration adapter, not a durable external-activity subsystem. Meridian's idempotency key plus a saved local request envelope support deliberate same-key/same-request retries, but there is no atomic transaction spanning Meridian and local SQLite and the key does not deduplicate state-machine events. Gate 7 supports only the three independently hosted synthetic providers and the documented Generic Harness API; production provider credentials/secret management, background scheduling, automatic workflow retry orchestration, timers, full replay, migrations, production authentication, distributed locking and hierarchical/parallel statecharts remain unsupported. The trusted-ingestion credential is a controlled single-host training boundary; it does not prove provider identity or evidence authenticity. See [gate-3-design.md](./docs/gate-3-design.md), [gate-4-design.md](./docs/gate-4-design.md), [gate-5-design.md](./docs/gate-5-design.md), and [gate-7-design.md](./docs/gate-7-design.md) for transaction, evidence and authority limits.
+The Meridian client remains a demonstration adapter, not a durable external-activity subsystem. Meridian's idempotency key plus a saved local request envelope support deliberate same-key/same-request retries, but there is no atomic transaction spanning Meridian and local SQLite and the key does not deduplicate state-machine events. Gate 7 supports only the three independently hosted synthetic providers and the documented Generic Harness API; production provider credentials/secret management, background scheduling, automatic workflow retry orchestration, full replay, production authentication, a general distributed lock service and hierarchical/parallel statecharts remain unsupported. SQLite concurrency is limited to hosts sharing a database file with valid locking; no network-filesystem or database-independent distributed guarantee is claimed. The trusted-ingestion credential is a controlled training boundary; it does not prove provider identity or evidence authenticity. See [gate-3-design.md](./docs/gate-3-design.md), [gate-4-design.md](./docs/gate-4-design.md), [gate-5-design.md](./docs/gate-5-design.md), [gate-7-design.md](./docs/gate-7-design.md) and [gate-9-design.md](./docs/gate-9-design.md) for transaction, evidence and authority limits.
