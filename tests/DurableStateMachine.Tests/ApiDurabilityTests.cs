@@ -86,7 +86,12 @@ public sealed class ApiDurabilityTests
                 }
 
                 Assert.Equal(HttpStatusCode.NotFound, (await client.GetAsync("/api/instances/unknown")).StatusCode);
-                Assert.Equal(HttpStatusCode.OK, (await client.GetAsync("/openapi/v1.json")).StatusCode);
+                var openApiResponse = await client.GetAsync("/openapi/v1.json");
+                Assert.Equal(HttpStatusCode.OK, openApiResponse.StatusCode);
+                var openApi = await openApiResponse.Content.ReadAsStringAsync();
+                Assert.Contains("/api/instances/{id}/replay", openApi, StringComparison.Ordinal);
+                Assert.Contains("/api/instances/{id}/replay/decision-verification", openApi, StringComparison.Ordinal);
+                Assert.Contains("/api/instances/{id}/recovery", openApi, StringComparison.Ordinal);
             }
 
             using (var restartedFactory = new WebApplicationFactory<Program>())
@@ -406,6 +411,15 @@ public sealed class ApiDurabilityTests
                     .GetProperty("decisionEvidence").GetProperty("originalResponseJson").GetString());
                 Assert.Single(await restartedClient.GetFromJsonAsync<JsonElement[]>(
                     $"/api/instances/{acceptedInstanceId}/history") ?? []);
+                var historicalDecision = await restartedClient.GetFromJsonAsync<JsonElement>(
+                    $"/api/instances/{acceptedInstanceId}/replay/decision-verification");
+                Assert.Equal("Verified",
+                    historicalDecision.GetProperty("decisionVerificationOutcome").GetString());
+                Assert.Contains(historicalDecision.GetProperty("decisionVerificationFindings").EnumerateArray(),
+                    finding => finding.GetProperty("outcome").GetString() == "Verified");
+                var attemptsAfterReplay = await restartedClient.GetFromJsonAsync<JsonElement[]>(
+                    $"/api/instances/{acceptedInstanceId}/attempts");
+                Assert.Equal(acceptedAttemptId, attemptsAfterReplay?[0].GetProperty("id").GetString());
 
                 var unresolvedAttempts = await restartedClient.GetFromJsonAsync<JsonElement[]>(
                     $"/api/instances/{unresolvedInstanceId}/attempts");

@@ -100,6 +100,7 @@ public sealed record ProviderRequestResponse(
 public sealed class EffectFaultPlan
 {
     private readonly HashSet<(string OperationId, string Point)> _faults = [];
+    private readonly Dictionary<(string OperationId, string Point), EffectPauseBoundary> _pauses = [];
     private readonly object _sync = new();
 
     public static readonly string[] SupportedPoints =
@@ -134,6 +135,47 @@ public sealed class EffectFaultPlan
         {
             return _faults.Remove((operationId, point));
         }
+    }
+
+    public void ArmPause(string operationId, string point)
+    {
+        if (!SupportedPoints.Contains(point, StringComparer.Ordinal))
+        {
+            throw new ArgumentException($"Unsupported Gate 6 fault point '{point}'.", nameof(point));
+        }
+        lock (_sync)
+        {
+            _pauses[(operationId, point)] = new EffectPauseBoundary();
+        }
+    }
+
+    public async Task WaitIfPausedAsync(string operationId, string point, CancellationToken cancellationToken)
+    {
+        EffectPauseBoundary? boundary;
+        lock (_sync)
+        {
+            boundary = _pauses.TryGetValue((operationId, point), out var pause) ? pause : null;
+        }
+        if (boundary is not null)
+        {
+            boundary.Reached.TrySetResult();
+            await boundary.Release.Task.WaitAsync(cancellationToken);
+        }
+    }
+
+    public bool IsPauseReached(string operationId, string point)
+    {
+        lock (_sync)
+        {
+            return _pauses.TryGetValue((operationId, point), out var boundary) &&
+                boundary.Reached.Task.IsCompleted;
+        }
+    }
+
+    private sealed class EffectPauseBoundary
+    {
+        public TaskCompletionSource Reached { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }
 
@@ -466,6 +508,8 @@ public sealed class EffectCoordinator(
         }
 
         ThrowIfArmed(normalized.OperationId, "AfterLocalCommitBeforeProvider");
+        await faults.WaitIfPausedAsync(
+            normalized.OperationId, "AfterLocalCommitBeforeProvider", cancellationToken);
         await ExecuteAttemptAsync(intent.Operation, normalized, cancellationToken);
         return await GetResponseAsync(instanceId, normalized.OperationId, cancellationToken);
     }

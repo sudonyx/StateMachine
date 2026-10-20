@@ -59,6 +59,21 @@ Fact values must be scalar strings, numbers, booleans or `null`. The response is
 
 `GET /api/instances/{id}` returns the durable instance record. Unknown IDs return `404 Not Found`.
 
+## Gate 10 replay and recovery inspection
+
+Replay and recovery are read-only inspections over a consistent SQLite read transaction. They do not update the projection, rewrite history, process timers, submit observations, or invoke external providers or the Generic Harness.
+
+- `GET /api/instances/{id}/replay` reconstructs state from the exact bound definition's initial state and accepted transition history, then compares reconstructed state/revision with the current projection.
+- `GET /api/instances/{id}/replay/decision-verification` additionally re-runs the pure evaluator for accepted attempts where complete Gate 4 evaluation evidence is present. Old or incomplete evidence is reported as insufficient; live decision systems and current policy are not consulted.
+- `GET /api/instances/{id}/recovery` combines replay integrity with local inbound receipts/attempts, expected operations, effect intents/attempts, harness execution correlation and timers. Pending/overdue timers are reported, never processed.
+- `POST /api/instances/{id}/inbound-messages/{receiptId}/resume` explicitly continues one `Received` intake from its original stored envelope. The endpoint accepts no replacement payload. It re-checks the original expected revision, exact bound definition, input authority, operation/source/evidence and current lifecycle; an unsafe or stale input is refused rather than rewritten.
+
+Replay responses include the instance and immutable definition identity, inspection revision, derived initial state and its evidence source, reconstructed and recorded state/revision, counts, integrity findings and historical evidence references. Outcomes include `Consistent`, `Inconsistent`, `InsufficientEvidence` and `UnsupportedHistoricalFormat`. Recovery classifications distinguish no outstanding work, pending local work, pending external work, unknown external outcome, inconsistent history/projection and insufficient evidence for safe continuation.
+
+No replay repair, direct state-setting operation, automatic timer processing or automatic external retry is exposed. Input receipt is a two-transaction boundary: a canonical envelope and digest first commit to `InboundMessages` as `Received`, then eligibility/evaluation/final receipt and any local transition-related writes commit atomically. Inputs that fail before the intake commit are not recoverable. A committed but unresolved input is visible to recovery inspection and may be resumed only through its receipt-specific route. Trusted observation authority is represented by application-controlled ingress classification, not caller-supplied source labels; ingress credentials themselves are not stored.
+
+The generic CLI supports `receipts`, `expected-operations`, `timers`, `effects`, `replay`, `verify-decisions` and `recovery` commands for inspection. See [gate-10-design.md](./gate-10-design.md) and [gate-10-crash-matrix.md](./gate-10-crash-matrix.md) for evidence boundaries and limitations.
+
 ## Durable timers
 
 Timed definitions schedule timers atomically with an accepted triggering transition. Timer due times are persisted UTC instants; they are not recalculated when the API restarts or when a newer definition version is registered.

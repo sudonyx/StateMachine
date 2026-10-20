@@ -23,6 +23,7 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.AddOpenApi();
 builder.Services.AddScoped<MachineStore>();
 builder.Services.AddSingleton<InstanceLockRegistry>();
+builder.Services.AddSingleton<InputFaultPlan>();
 builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
 builder.Services.AddScoped<TimerProcessingService>();
 builder.Services.AddSingleton<EffectFaultPlan>();
@@ -60,6 +61,7 @@ app.Use(async (context, next) =>
             DefinitionConflictException conflict => (StatusCodes.Status409Conflict, "conflict", conflict.Message, (IReadOnlyList<ValidationIssue>?)null),
             ResourceNotFoundException missing => (StatusCodes.Status404NotFound, "not-found", missing.Message, (IReadOnlyList<ValidationIssue>?)null),
             EffectInterruptionException interrupted => (StatusCodes.Status503ServiceUnavailable, "effect-interrupted", interrupted.Message, (IReadOnlyList<ValidationIssue>?)null),
+            InputInterruptionException interrupted => (StatusCodes.Status503ServiceUnavailable, "input-interrupted", interrupted.Message, (IReadOnlyList<ValidationIssue>?)null),
             HarnessConfigurationException configuration => (StatusCodes.Status503ServiceUnavailable, "harness-not-configured", configuration.Message, (IReadOnlyList<ValidationIssue>?)null),
             HarnessHttpException harnessError => (StatusCodes.Status502BadGateway, "harness-http-error", harnessError.Message, (IReadOnlyList<ValidationIssue>?)null),
             HttpRequestException harnessUnavailable => (StatusCodes.Status502BadGateway, "harness-unavailable", harnessUnavailable.Message, (IReadOnlyList<ValidationIssue>?)null),
@@ -244,6 +246,14 @@ instances.MapGet("/{id}/inbound-messages/{receiptId}", async (
     string id, string receiptId, MachineStore store, CancellationToken cancellationToken) =>
     Results.Ok((await store.GetInboundMessageAsync(id, receiptId, cancellationToken)).ToResponse()))
     .WithName("GetInboundMessage").WithSummary("Inspect one inbound message receipt.");
+instances.MapPost("/{id}/inbound-messages/{receiptId}/resume", async (
+    string id, string receiptId, MachineStore store, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+{
+    var result = await store.ResumeInboundMessageAsync(id, receiptId, timeProvider.GetUtcNow(), cancellationToken);
+    var response = ToInputResponse(result, await store.GetInstanceAsync(id, cancellationToken));
+    return result.Submission?.ConcurrencyConflict == true ? Results.Conflict(response) : Results.Ok(response);
+}).WithName("ResumeInboundMessage")
+  .WithSummary("Resume one durable unresolved input from its original envelope and persisted authority context.");
 instances.MapGet("/{id}/attempts", async (string id, MachineStore store, CancellationToken cancellationToken) =>
     Results.Ok((await store.ListAttemptsAsync(id, cancellationToken)).Select(attempt => attempt.ToResponse())))
     .WithName("ListAttempts").WithSummary("List event attempts in received order.");
@@ -256,6 +266,20 @@ instances.MapGet("/{id}/history", async (string id, MachineStore store, Cancella
 instances.MapGet("/{id}/history/{historyId}", async (string id, string historyId, MachineStore store, CancellationToken cancellationToken) =>
     Results.Ok((await store.GetHistoryEntryAsync(id, historyId, cancellationToken)).ToResponse()))
     .WithName("GetTransitionHistory").WithSummary("Inspect one accepted transition.");
+instances.MapGet("/{id}/replay", async (string id, MachineStore store, CancellationToken cancellationToken) =>
+    Results.Ok(await store.GetHistoricalReplayAsync(id, verifyDecisions: false, cancellationToken)))
+    .WithName("ReconstructInstanceHistory")
+    .WithSummary("Reconstruct state from accepted history without evaluating inputs or performing side effects.");
+instances.MapGet("/{id}/replay/decision-verification", async (
+    string id, MachineStore store, CancellationToken cancellationToken) =>
+    Results.Ok(await store.GetHistoricalReplayAsync(id, verifyDecisions: true, cancellationToken)))
+    .WithName("VerifyHistoricalDecisions")
+    .WithSummary("Re-evaluate recorded decisions using only immutable historical evidence and the bound definition.");
+instances.MapGet("/{id}/recovery", async (
+    string id, MachineStore store, TimeProvider timeProvider, CancellationToken cancellationToken) =>
+    Results.Ok(await store.GetRecoveryAssessmentAsync(id, timeProvider.GetUtcNow(), cancellationToken)))
+    .WithName("AssessInstanceRecovery")
+    .WithSummary("Inspect history integrity and unresolved work without contacting providers or processing timers.");
 instances.MapGet("/{id}/timers", async (string id, MachineStore store, CancellationToken cancellationToken) =>
     Results.Ok((await store.ListTimersAsync(id, cancellationToken)).Select(timer => timer.ToResponse())))
     .WithName("ListTimers").WithSummary("Inspect durable timers and their scheduling, cancellation, and processing evidence.");
@@ -289,6 +313,27 @@ if (app.Environment.IsDevelopment() &&
     string.Equals(Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS"), "true",
         StringComparison.OrdinalIgnoreCase))
 {
+    app.MapPost("/api/test-controls/inputs/{instanceId}/{point}", (string instanceId, string point, InputFaultPlan plan) =>
+    {
+        plan.Arm(instanceId, point);
+        return Results.Ok(new { instanceId, point, armed = true });
+    }).WithName("ArmInputFault")
+      .WithSummary("Development-only one-shot interruption for durable input recovery tests.");
+
+    app.MapPost("/api/test-controls/inputs/{instanceId}/{point}/pause", (
+        string instanceId, string point, InputFaultPlan plan) =>
+    {
+        plan.ArmPause(instanceId, point);
+        return Results.Ok(new { instanceId, point, paused = true });
+    }).WithName("ArmInputPause")
+      .WithSummary("Development-only pause at an input boundary for process-termination tests.");
+
+    app.MapGet("/api/test-controls/inputs/{instanceId}/{point}/pause-status", (
+        string instanceId, string point, InputFaultPlan plan) =>
+        Results.Ok(new { instanceId, point, reached = plan.IsPauseReached(instanceId, point) }))
+      .WithName("GetInputPauseStatus")
+      .WithSummary("Development-only observation of a deterministic process-test pause.");
+
 instances.MapPost("/{id}/direct-effects", async (
     string id, StartEffectRequest request, HttpRequest httpRequest, EffectCoordinator coordinator,
     TimeProvider timeProvider, CancellationToken cancellationToken) =>
@@ -376,6 +421,20 @@ if (app.Environment.IsDevelopment() &&
         plan.Arm(operationId, point);
         return Results.Ok(new { operationId, point, armed = true });
     }).WithName("ArmSyntheticEffectFault").WithSummary("Development-only one-shot fault injection for deterministic Gate 6 demonstrations.");
+
+    app.MapPost("/api/test-controls/effects/{operationId}/{point}/pause", (
+        string operationId, string point, EffectFaultPlan plan) =>
+    {
+        plan.ArmPause(operationId, point);
+        return Results.Ok(new { operationId, point, paused = true });
+    }).WithName("ArmSyntheticEffectPause")
+      .WithSummary("Development-only pause for process-termination testing at a synthetic effect boundary.");
+
+    app.MapGet("/api/test-controls/effects/{operationId}/{point}/pause-status", (
+        string operationId, string point, EffectFaultPlan plan) =>
+        Results.Ok(new { operationId, point, reached = plan.IsPauseReached(operationId, point) }))
+      .WithName("GetSyntheticEffectPauseStatus")
+      .WithSummary("Development-only observation of a deterministic synthetic effect pause.");
 
     app.MapPost("/api/test-controls/timers/process-due", async (
         int? limit,

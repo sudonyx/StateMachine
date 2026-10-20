@@ -1,6 +1,6 @@
 # Durable State Machine
 
-A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 7 routes synthetic Orion effects through the independently running Generic Harness and retains durable correlation between harness execution evidence and Gate 5 workflow transitions. Gate 8 adds versioned declarative timers, persisted UTC deadlines, atomic timer lifecycle updates, explicit due processing and restart recovery. Gate 9 strengthens input identity and revision arbitration across independent API hosts sharing SQLite, and adds a reproducible adversarial corpus and runner. Gate 6's direct provider path remains available only for development/test comparison. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
+A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 7 routes synthetic Orion effects through the independently running Generic Harness and retains durable correlation between harness execution evidence and Gate 5 workflow transitions. Gate 8 adds versioned declarative timers, persisted UTC deadlines, atomic timer lifecycle updates, explicit due processing and restart recovery. Gate 9 strengthens input identity and revision arbitration across independent API hosts sharing SQLite, and adds a reproducible adversarial corpus and runner. Gate 10 adds read-only historical reconstruction, decision verification from stored evidence, projection-integrity reporting, recovery assessment, durable pre-evaluation intake and explicit receipt-specific continuation. It does not replay external effects or claim recovery of requests that failed before intake commit. Gate 6's direct provider path remains available only for development/test comparison. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
 
 ## Requirements, build and tests
 
@@ -59,9 +59,27 @@ dotnet run --project clients\DurableStateMachine.Cli -- attempts $id
 dotnet run --project clients\DurableStateMachine.Cli -- history $id
 ```
 
-The CLI supports `register`, `definitions`, `create`, `inspect`, `send`, `attempts` and `history`. `create` accepts optional inline scalar facts or `@path-to-json-file` (the latter avoids shell quoting problems). Configure the base URL with `DURABLE_STATE_MACHINE_API_URL` or pass `--url http://host:port` before the command. Workflow rejections are returned as readable `200 OK` result envelopes with reason codes; malformed requests and unknown resources use HTTP error statuses.
+The CLI supports `register`, `definitions`, `create`, `inspect`, `send`, `attempts`, `history`, `receipts`, `expected-operations`, `timers`, `effects`, `replay`, `verify-decisions` and `recovery`. `create` accepts optional inline scalar facts or `@path-to-json-file` (the latter avoids shell quoting problems). Configure the base URL with `DURABLE_STATE_MACHINE_API_URL` or pass `--url http://host:port` before the command. Workflow rejections are returned as readable `200 OK` result envelopes with reason codes; malformed requests and unknown resources use HTTP error statuses.
 
 The REST routes and request/response examples are in [gate-3-api.md](./docs/gate-3-api.md). The underlying machine format is documented in [state-machine-language-v1.md](./docs/state-machine-language-v1.md).
+
+## Gate 10 recovery inspection
+
+For an instance ID, use the CLI or API to compare current projection and accepted transition history, inspect retained inputs/effects/timers, and review recovery classification:
+
+```powershell
+dotnet run --project clients\DurableStateMachine.Cli -- replay <instance-id>
+dotnet run --project clients\DurableStateMachine.Cli -- verify-decisions <instance-id>
+dotnet run --project clients\DurableStateMachine.Cli -- receipts <instance-id>
+dotnet run --project clients\DurableStateMachine.Cli -- expected-operations <instance-id>
+dotnet run --project clients\DurableStateMachine.Cli -- timers <instance-id>
+dotnet run --project clients\DurableStateMachine.Cli -- effects <instance-id>
+dotnet run --project clients\DurableStateMachine.Cli -- recovery <instance-id>
+```
+
+Replay and recovery inspection are read-only. They do not execute due timers, resume effects or call external systems. See [gate-10-design.md](./docs/gate-10-design.md), [gate-10-crash-matrix.md](./docs/gate-10-crash-matrix.md) and [gate-10-test-results.md](./docs/gate-10-test-results.md) for the implemented guarantees and tested limitations.
+
+Commands and observations first commit their immutable request envelope as an inbound receipt with status `Received`. The evaluator, final receipt, attempt, accepted history, projection and local timer/effect/operation changes are committed in a second SQLite immediate transaction. If processing is interrupted between these commits, inspect `/api/instances/{id}/recovery` and explicitly resume the specific receipt with `POST /api/instances/{id}/inbound-messages/{receiptId}/resume` and an empty body. The continuation uses the persisted envelope and authority classification; it cannot accept a replacement payload. The original expected revision and observation operation/source checks are re-applied, so an input that has become stale remains refused. No schema migration rewrites legacy attempts or invents intake records.
 
 ## Orion client demonstration
 

@@ -7,7 +7,10 @@ using Microsoft.EntityFrameworkCore;
 
 namespace DurableStateMachine.Persistence;
 
-public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry instanceLockRegistry)
+public sealed class MachineStore(
+    MachineDbContext db,
+    InstanceLockRegistry instanceLockRegistry,
+    InputFaultPlan inputFaultPlan)
 {
     private static readonly JsonSerializerOptions StoredJsonOptions = new(JsonSerializerDefaults.Web);
     private object InstanceLocksSync => instanceLockRegistry.Sync;
@@ -129,6 +132,204 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
         var record = await db.Instances.AsNoTracking().SingleOrDefaultAsync(instance => instance.Id == id, cancellationToken)
             ?? throw new ResourceNotFoundException($"Instance '{id}' does not exist.");
         return ToDetails(record);
+    }
+
+    public async Task<HistoricalReplayReport> GetHistoricalReplayAsync(
+        string instanceId,
+        bool verifyDecisions,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = await BeginReadSnapshotAsync(cancellationToken);
+        var snapshot = await ReadReplaySnapshotAsync(instanceId, cancellationToken);
+        var report = HistoricalReplay.Reconstruct(snapshot.Instance, snapshot.Definition, snapshot.History,
+            snapshot.Attempts, snapshot.Receipts, snapshot.Timers, verifyDecisions);
+        await transaction.CommitAsync(cancellationToken);
+        return report;
+    }
+
+    public async Task<RecoveryAssessment> GetRecoveryAssessmentAsync(
+        string instanceId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        now = now.ToUniversalTime();
+        await using var transaction = await BeginReadSnapshotAsync(cancellationToken);
+        var snapshot = await ReadReplaySnapshotAsync(instanceId, cancellationToken);
+        var instance = snapshot.Instance;
+        var attempts = snapshot.Attempts;
+        var receipts = snapshot.Receipts;
+        var effects = await db.EffectOperations.AsNoTracking()
+            .Where(record => record.InstanceId == instanceId)
+            .OrderBy(record => record.RequestedAt).ThenBy(record => record.Id)
+            .ToListAsync(cancellationToken);
+        var effectAttempts = await (
+            from attempt in db.EffectAttempts.AsNoTracking()
+            join operation in db.EffectOperations.AsNoTracking()
+                on attempt.EffectOperationId equals operation.Id
+            where operation.InstanceId == instanceId
+            orderby attempt.EffectOperationId, attempt.AttemptNumber
+            select attempt).ToListAsync(cancellationToken);
+        var timers = snapshot.Timers;
+        var expectedOperations = await db.ExpectedOperations.AsNoTracking()
+            .Where(record => record.InstanceId == instanceId)
+            .OrderBy(record => record.ExpectedAt).ThenBy(record => record.Id)
+            .ToListAsync(cancellationToken);
+
+        var replay = HistoricalReplay.Reconstruct(instance, snapshot.Definition, snapshot.History,
+            attempts, receipts, timers, verifyDecisions: false);
+        var effectAttemptsByOperation = effectAttempts
+            .GroupBy(attempt => attempt.EffectOperationId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.OrderBy(item => item.AttemptNumber).Last(), StringComparer.Ordinal);
+        var outstandingEffects = new List<RecoveryEffect>();
+        foreach (var effect in effects)
+        {
+            if (effect.Status is "ObservationAccepted" or "ObservationRefused" or
+                "ProviderFailed" or "ProviderRefused" or "HarnessRejected")
+            {
+                continue;
+            }
+
+            effectAttemptsByOperation.TryGetValue(effect.Id, out var latestAttempt);
+            var unknown = effect.Status is "OutcomeUnknown" or "AttemptInitiated" or
+                "HarnessSucceededResponseMissing" or "HarnessResponseNotUsable" ||
+                latestAttempt?.ProviderOutcome == "Unknown";
+            var guidance = effect.Capability == "customer-notification"
+                ? "Do not automatically retry this notification; inspect the existing outcome and preserve its operation identity."
+                : effect.HarnessExecutionId is not null
+                    ? "Inspect the existing harness execution; do not submit a replacement during recovery assessment."
+                    : "Harness correlation is not durable; do not submit a replacement or infer failure.";
+            outstandingEffects.Add(new RecoveryEffect(
+                effect.OperationId,
+                effect.Capability,
+                unknown ? "OutcomeUnknown" : effect.Status,
+                effect.HarnessExecutionId,
+                latestAttempt?.ProviderOutcome,
+                latestAttempt?.ObservationStatus,
+                guidance));
+        }
+
+        var pendingInputs = receipts
+            .Where(receipt => receipt.Status is "Received" or "Pending" or "Processing")
+            .Select(receipt => new RecoveryInput(receipt.Id, receipt.Status, receipt.ReasonCode, receipt.AttemptId,
+                "Resume this durable input only through its receipt-specific continuation route; its original identity and envelope are retained."))
+            .Concat(attempts
+                .Where(attempt => attempt.Status is "Unresolved" or "Ambiguous")
+                .Select(attempt => new RecoveryInput(attempt.Id, attempt.Status, attempt.ReasonCode, attempt.Id,
+                    "Preserve the original attempt and evidence; do not automatically re-evaluate an unresolved or ambiguous input.")))
+            .ToArray();
+        var recoveryTimers = timers.Select(timer => new RecoveryTimer(
+            timer.Id,
+            timer.Status,
+            timer.DueAt,
+            timer.Status == "Pending" && timer.DueAt <= now,
+            timer.ResultReason)).ToArray();
+        var unresolvedExpected = expectedOperations
+            .Where(operation => operation.Status is "Pending" or "Expected")
+            .Select(operation => new RecoveryExpectedOperation(
+                operation.OperationId, operation.Status, operation.ExpectedRevision, operation.ObservationType))
+            .ToArray();
+        var reasons = new List<string>();
+        var hasPendingReceipt = pendingInputs.Any(input => input.Status is "Received" or "Pending" or "Processing");
+        var hasPendingLocal = recoveryTimers.Any(timer => timer.Status == "Pending");
+        var hasUnresolvedInput = pendingInputs.Any(input => input.Status is "Unresolved" or "Ambiguous");
+        var hasUnknownExternal = outstandingEffects.Any(effect => effect.Status == "OutcomeUnknown");
+        var hasPendingExternal = outstandingEffects.Count > 0 || unresolvedExpected.Length > 0;
+
+        string classification;
+        if (replay.Outcome == "Inconsistent")
+        {
+            classification = "InconsistentHistoryOrProjection";
+            reasons.Add("Historical transition evidence does not agree with the durable projection.");
+        }
+        else if (replay.Outcome is "InsufficientEvidence" or "UnsupportedHistoricalFormat")
+        {
+            classification = "InsufficientEvidenceForSafeContinuation";
+            reasons.Add("The historical record is not sufficient to establish a safe continuation boundary.");
+        }
+        else if (hasPendingReceipt || hasUnresolvedInput)
+        {
+            classification = "InsufficientEvidenceForSafeContinuation";
+            reasons.Add(hasPendingReceipt
+                ? "A durable intake has no completed processing link and requires explicit receipt-specific continuation."
+                : "An input evaluation is unresolved or ambiguous and must not be silently repeated.");
+        }
+        else if (hasUnknownExternal)
+        {
+            classification = "ConsistentExternalOutcomeUnknown";
+            reasons.Add("At least one external operation has an unknown outcome; its original identity must be preserved.");
+        }
+        else if (hasPendingExternal)
+        {
+            classification = "ConsistentPendingExternalWork";
+            reasons.Add("Expected external work remains unresolved; assessment did not contact or resubmit an external system.");
+        }
+        else if (hasPendingLocal)
+        {
+            classification = "ConsistentPendingLocalWork";
+            reasons.Add("A durable local input or timer remains pending; assessment did not evaluate inputs or process timers.");
+        }
+        else
+        {
+            classification = "ConsistentNoOutstandingWork";
+            reasons.Add("The projection agrees with accepted history and no pending local or external work was found.");
+        }
+
+        foreach (var timer in recoveryTimers.Where(item => item.Status == "Pending"))
+        {
+            reasons.Add(timer.Overdue
+                ? $"Timer '{timer.TimerId}' is overdue but was not processed."
+                : $"Timer '{timer.TimerId}' remains pending until {timer.DueAt:O}.");
+        }
+        foreach (var effect in outstandingEffects)
+        {
+            reasons.Add($"Effect '{effect.OperationId}' is {effect.Status}; {effect.RecoveryGuidance}");
+        }
+
+        var assessment = new RecoveryAssessment(
+            instance.Id,
+            classification,
+            instance.CurrentState,
+            instance.Revision,
+            now,
+            instance.Revision,
+            replay,
+            reasons,
+            pendingInputs,
+            outstandingEffects,
+            recoveryTimers,
+            expectedOperations.Select(operation => new RecoveryExpectedOperation(
+                operation.OperationId, operation.Status, operation.ExpectedRevision, operation.ObservationType)).ToArray());
+        await transaction.CommitAsync(cancellationToken);
+        return assessment;
+    }
+
+    private async Task<ReplaySnapshot> ReadReplaySnapshotAsync(
+        string instanceId,
+        CancellationToken cancellationToken)
+    {
+        var instance = await db.Instances.AsNoTracking().SingleOrDefaultAsync(
+            record => record.Id == instanceId, cancellationToken)
+            ?? throw new ResourceNotFoundException($"Instance '{instanceId}' does not exist.");
+        var definition = await db.Definitions.AsNoTracking().SingleOrDefaultAsync(
+            record => record.Id == instance.DefinitionId && record.Version == instance.DefinitionVersion,
+            cancellationToken);
+        var history = await db.TransitionHistory.AsNoTracking()
+            .Where(record => record.InstanceId == instanceId)
+            .OrderBy(record => record.RevisionAfter).ThenBy(record => record.Id)
+            .ToListAsync(cancellationToken);
+        var attempts = await db.InputAttempts.AsNoTracking()
+            .Where(record => record.InstanceId == instanceId)
+            .OrderBy(record => record.ReceivedAt).ThenBy(record => record.Id)
+            .ToListAsync(cancellationToken);
+        var receipts = await db.InboundMessages.AsNoTracking()
+            .Where(record => record.InstanceId == instanceId)
+            .OrderBy(record => record.ReceivedAt).ThenBy(record => record.Id)
+            .ToListAsync(cancellationToken);
+        var timers = await db.Timers.AsNoTracking()
+            .Where(record => record.InstanceId == instanceId)
+            .OrderBy(record => record.DueAt).ThenBy(record => record.Id)
+            .ToListAsync(cancellationToken);
+        return new ReplaySnapshot(instance, definition, history, attempts, receipts, timers);
     }
 
     public async Task<IReadOnlyList<TimerRecord>> ListTimersAsync(string instanceId, CancellationToken cancellationToken)
@@ -374,7 +575,7 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
         {
             await gate.Semaphore.WaitAsync(cancellationToken);
             entered = true;
-            await using var transaction = await BeginImmediateTransactionAsync(cancellationToken);
+            var transaction = await BeginImmediateTransactionAsync(cancellationToken);
             var existingEffect = await db.EffectOperations.AsNoTracking().SingleOrDefaultAsync(
                 record => record.InstanceId == instanceId && record.OperationId == operationId, cancellationToken);
             if (existingEffect is not null)
@@ -704,7 +905,7 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
 
             var priorMessage = await db.InboundMessages.AsNoTracking()
                 .Where(record => record.InstanceId == instanceId && record.InputKind == inputKind && record.MessageId == messageId)
-                .OrderBy(record => record.ReceivedAt)
+                .OrderBy(record => record.ReceivedAt).ThenBy(record => record.Id)
                 .FirstOrDefaultAsync(cancellationToken);
             var message = new InboundMessageRecord
             {
@@ -729,14 +930,22 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
                 PayloadJson = payloadJson,
                 EvidenceJson = evidenceJson,
                 PayloadDigest = digest,
-                Status = "Rejected",
-                ReasonCode = "input-not-processed",
-                Explanation = "The inbound message has not passed authority and relevance checks.",
+                Status = "Received",
+                ReasonCode = "durable-intake",
+                Explanation = "The immutable input envelope is durable and awaits eligibility evaluation.",
                 ReceivedAt = now,
                 OccurredAt = occurredAt
             };
 
-            if (priorMessage is not null)
+            var intakeCommitted = false;
+            if (priorMessage is not null &&
+                priorMessage.PayloadDigest == digest &&
+                priorMessage.Status == "Received")
+            {
+                message = await db.InboundMessages.SingleAsync(record => record.Id == priorMessage.Id, cancellationToken);
+                trustedSource = message.Authority == "trusted-ingestion-key";
+            }
+            else if (priorMessage is not null)
             {
                 message.Status = priorMessage.PayloadDigest == digest ? "Duplicate" : "IdentityConflict";
                 message.ReasonCode = priorMessage.PayloadDigest == digest ? "duplicate-message" : "message-identity-conflict";
@@ -744,8 +953,46 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
                     ? "This message identity and payload were already received; no second evaluation was performed."
                     : "This message identity was already used with a different payload.";
                 message.AttemptId = priorMessage.AttemptId;
+                db.InboundMessages.Add(message);
+                await db.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                intakeCommitted = true;
+                await transaction.DisposeAsync();
+                return new InboundProcessingResult(message, null);
             }
-            else if (definition.InputPolicy is null)
+            else
+            {
+                inputFaultPlan.ThrowIfArmed(instanceId, "BeforeIntakeCommit");
+                db.InboundMessages.Add(message);
+                await db.SaveChangesAsync(cancellationToken);
+                await transaction.CommitAsync(cancellationToken);
+                intakeCommitted = true;
+                await transaction.DisposeAsync();
+            }
+            if (!intakeCommitted)
+            {
+                await transaction.CommitAsync(cancellationToken);
+                await transaction.DisposeAsync();
+            }
+            inputFaultPlan.ThrowIfArmed(instanceId, "AfterIntakeCommitBeforeEvaluation");
+            await inputFaultPlan.WaitIfPausedAsync(
+                instanceId, "AfterIntakeCommitBeforeEvaluation", cancellationToken);
+            await using var evaluationTransaction = await BeginImmediateTransactionAsync(cancellationToken);
+            await db.Entry(message).ReloadAsync(cancellationToken);
+            if (message.Status != "Received")
+            {
+                await evaluationTransaction.CommitAsync(cancellationToken);
+                return new InboundProcessingResult(message, null);
+            }
+            await db.Entry(instance).ReloadAsync(cancellationToken);
+            definitionRecord = await db.Definitions.AsNoTracking().SingleAsync(
+                record => record.Id == message.DefinitionId && record.Version == message.DefinitionVersion, cancellationToken);
+            definition = MachineDefinitionLoader.Load(definitionRecord.DefinitionJson);
+            message.Status = "Evaluating";
+            message.ReasonCode = "input-not-processed";
+            message.Explanation = "The durable input is undergoing authority and transition eligibility checks.";
+
+            if (definition.InputPolicy is null)
             {
                 message.ReasonCode = "input-policy-not-declared";
                 message.Explanation = "This definition does not declare command or observation input mappings.";
@@ -859,6 +1106,7 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
                     }
                     if (message.ReasonCode == "input-not-processed")
                     {
+                        inputFaultPlan.ThrowIfArmed(instanceId, "DuringGuardEvaluation");
                         submission = await EvaluateEventWithinTransactionAsync(
                             instance, eventName, now, cancellationToken, facts, decisionEvidence, factsProvenance);
                     }
@@ -867,6 +1115,7 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
                         message.AttemptId = submission.Attempt.Id;
                         if (submission.Attempt.Status == EvaluationStatus.Accepted.ToString())
                         {
+                            inputFaultPlan.ThrowIfArmed(instanceId, "DuringProjectionUpdate");
                             message.Status = "Accepted";
                             message.ReasonCode = "input-accepted";
                             message.Explanation = "Input authority checks passed and the deterministic evaluator accepted the mapped event.";
@@ -886,9 +1135,11 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
                             message.Explanation = $"Input checks passed, but the deterministic evaluator refused the mapped event: {submission.Attempt.Explanation}";
                         }
                     }
-                    db.InboundMessages.Add(message);
+                    inputFaultPlan.ThrowIfArmed(instanceId, "BeforeFinalPersistence");
+                    await inputFaultPlan.WaitIfPausedAsync(
+                        instanceId, "BeforeFinalPersistence", cancellationToken);
                     await db.SaveChangesAsync(cancellationToken);
-                    await transaction.CommitAsync(cancellationToken);
+                    await evaluationTransaction.CommitAsync(cancellationToken);
                     var currentSubmission = submission is null
                         ? null
                         : submission with { Instance = await ReadInstanceAsync(instanceId, cancellationToken) };
@@ -896,9 +1147,11 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
                 }
             }
 
-            db.InboundMessages.Add(message);
+            inputFaultPlan.ThrowIfArmed(instanceId, "BeforeFinalPersistence");
+            await inputFaultPlan.WaitIfPausedAsync(
+                instanceId, "BeforeFinalPersistence", cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
-            await transaction.CommitAsync(cancellationToken);
+            await evaluationTransaction.CommitAsync(cancellationToken);
             return new InboundProcessingResult(message, null);
         }
         finally
@@ -925,6 +1178,56 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
         await EnsureInstanceExistsAsync(instanceId, cancellationToken);
         return await db.InboundMessages.AsNoTracking().Where(record => record.InstanceId == instanceId)
             .OrderBy(record => record.ReceivedAt).ThenBy(record => record.Id).ToListAsync(cancellationToken);
+    }
+
+    public async Task<InboundProcessingResult> ResumeInboundMessageAsync(
+        string instanceId,
+        string receiptId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var message = await db.InboundMessages.AsNoTracking().SingleOrDefaultAsync(
+            record => record.Id == receiptId && record.InstanceId == instanceId, cancellationToken)
+            ?? throw new ResourceNotFoundException($"Inbound message '{receiptId}' does not exist for instance '{instanceId}'.");
+        if (message.Status != "Received")
+        {
+            throw new DefinitionConflictException(
+                $"Inbound message '{receiptId}' is not unresolved durable intake (status '{message.Status}').");
+        }
+        if (message.Authority is not ("declared-command-endpoint" or "trusted-ingestion-key"))
+        {
+            throw new DefinitionConflictException(
+                "The original input did not cross an acceptable application-controlled authority boundary.");
+        }
+
+        var envelope = JsonSerializer.Deserialize<StoredInboundEnvelope>(message.InputEnvelopeJson, StoredJsonOptions)
+            ?? throw new InvalidDataException($"Inbound message '{receiptId}' has no readable immutable request envelope.");
+        if (ComputeDigest(message.InputEnvelopeJson) != message.PayloadDigest)
+        {
+            throw new InvalidDataException($"Inbound message '{receiptId}' failed its durable envelope digest check.");
+        }
+
+        var facts = envelope.Facts.ToDictionary(pair => pair.Key, pair => pair.Value.ToValue(), StringComparer.Ordinal);
+        return await SubmitInputAsync(
+            instanceId,
+            message.InputKind,
+            message.MessageId,
+            message.DeliveryId,
+            message.OperationId,
+            message.ObservationId,
+            message.InputType,
+            envelope.ExpectedRevision,
+            envelope.CorrelationId,
+            envelope.ClaimedSource,
+            envelope.OccurredAt,
+            envelope.Payload,
+            facts,
+            envelope.Evidence,
+            envelope.DecisionEvidence,
+            envelope.FactsProvenance,
+            message.Authority == "trusted-ingestion-key",
+            now,
+            cancellationToken);
     }
 
     public async Task<InboundMessageRecord> RecordMalformedInputAsync(
@@ -1504,7 +1807,7 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
         new(record.Id, record.DefinitionId, record.DefinitionVersion, record.CurrentState, record.Revision,
             DeserializeFacts(record.FactsJson), record.CreatedAt, record.UpdatedAt);
 
-    private async Task<ImmediateTransaction> BeginImmediateTransactionAsync(CancellationToken cancellationToken)
+    private async Task<StoreTransaction> BeginImmediateTransactionAsync(CancellationToken cancellationToken)
     {
         await db.Database.OpenConnectionAsync(cancellationToken);
         var connection = (SqliteConnection)db.Database.GetDbConnection();
@@ -1514,7 +1817,30 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
             sqliteTransaction = connection.BeginTransaction(deferred: false);
             var efTransaction = await db.Database.UseTransactionAsync(sqliteTransaction, cancellationToken)
                 ?? throw new InvalidOperationException("EF Core did not enlist in the SQLite transaction.");
-            return new ImmediateTransaction(db, sqliteTransaction, efTransaction);
+            return new StoreTransaction(db, sqliteTransaction, efTransaction);
+        }
+        catch
+        {
+            if (sqliteTransaction is not null)
+            {
+                await sqliteTransaction.DisposeAsync();
+            }
+            await db.Database.CloseConnectionAsync();
+            throw;
+        }
+    }
+
+    private async Task<StoreTransaction> BeginReadSnapshotAsync(CancellationToken cancellationToken)
+    {
+        await db.Database.OpenConnectionAsync(cancellationToken);
+        var connection = (SqliteConnection)db.Database.GetDbConnection();
+        SqliteTransaction? sqliteTransaction = null;
+        try
+        {
+            sqliteTransaction = connection.BeginTransaction(deferred: true);
+            var efTransaction = await db.Database.UseTransactionAsync(sqliteTransaction, cancellationToken)
+                ?? throw new InvalidOperationException("EF Core did not enlist in the SQLite read transaction.");
+            return new StoreTransaction(db, sqliteTransaction, efTransaction);
         }
         catch
         {
@@ -1629,13 +1955,37 @@ public sealed class MachineStore(MachineDbContext db, InstanceLockRegistry insta
         };
     }
 
+    private sealed record StoredInboundEnvelope(
+        string InputKind,
+        string MessageId,
+        string? OperationId,
+        string? ObservationId,
+        string InputType,
+        string? CorrelationId,
+        string? ClaimedSource,
+        long ExpectedRevision,
+        Dictionary<string, JsonElement> Payload,
+        Dictionary<string, FactWire> Facts,
+        Dictionary<string, JsonElement> Evidence,
+        ExternalDecisionEvidence? DecisionEvidence,
+        Dictionary<string, string>? FactsProvenance,
+        DateTimeOffset? OccurredAt);
+
     internal sealed class InstanceGate
     {
         public SemaphoreSlim Semaphore { get; } = new(1, 1);
         public int Users { get; set; }
     }
 
-    private sealed class ImmediateTransaction(
+    private sealed record ReplaySnapshot(
+        InstanceRecord Instance,
+        DefinitionRecord? Definition,
+        IReadOnlyList<TransitionHistoryRecord> History,
+        IReadOnlyList<InputAttemptRecord> Attempts,
+        IReadOnlyList<InboundMessageRecord> Receipts,
+        IReadOnlyList<TimerRecord> Timers);
+
+    private sealed class StoreTransaction(
         MachineDbContext db,
         SqliteTransaction sqliteTransaction,
         Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction efTransaction) : IAsyncDisposable

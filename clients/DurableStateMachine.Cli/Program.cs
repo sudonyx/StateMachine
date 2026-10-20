@@ -67,6 +67,29 @@ try
         case "history" when argsList.Count == 2:
             await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(argsList[1])}/history"));
             break;
+        case "receipts" when argsList.Count == 2:
+            await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(argsList[1])}/inbound-messages"));
+            break;
+        case "expected-operations" when argsList.Count == 2:
+            await PrintResponse(await client.GetAsync(
+                $"api/instances/{Uri.EscapeDataString(argsList[1])}/expected-operations"));
+            break;
+        case "timers" when argsList.Count == 2:
+            await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(argsList[1])}/timers"));
+            break;
+        case "effects" when argsList.Count == 2:
+            await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(argsList[1])}/effects"));
+            break;
+        case "replay" when argsList.Count == 2:
+            await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(argsList[1])}/replay"));
+            break;
+        case "verify-decisions" when argsList.Count == 2:
+            await PrintResponse(await client.GetAsync(
+                $"api/instances/{Uri.EscapeDataString(argsList[1])}/replay/decision-verification"));
+            break;
+        case "recovery" when argsList.Count == 2:
+            await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(argsList[1])}/recovery"));
+            break;
         default:
             PrintUsage();
             return 2;
@@ -130,5 +153,12 @@ static void PrintUsage() =>
           send <instance-id> <event>
           attempts <instance-id>
           history <instance-id>
+          receipts <instance-id>
+          expected-operations <instance-id>
+          timers <instance-id>
+          effects <instance-id>
+          replay <instance-id>
+          verify-decisions <instance-id>
+          recovery <instance-id>
         Set DURABLE_STATE_MACHINE_API_URL to configure the API URL.
         """);
