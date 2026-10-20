@@ -674,55 +674,34 @@ public sealed class HarnessEffectCoordinator(
         DateTimeOffset receivedAt,
         CancellationToken cancellationToken)
     {
-        var evidenceValues = evidence.EnumerateObject()
-            .ToDictionary(property => property.Name, property => property.Value.Clone(), StringComparer.Ordinal);
-        var result = await machineStore.SubmitInputAsync(
+        var harnessExecutionId = operation.HarnessExecutionId
+            ?? throw new InvalidDataException(
+                $"A verified result for workflow operation '{operation.OperationId}' has no harness execution ID.");
+        var evidenceReferences = ParseIdentifiers(attempt.HarnessAttemptIdsJson)
+            .Select(id => $"harness-attempt:{id}")
+            .Concat(ParseIdentifiers(attempt.HarnessEvidenceIdsJson).Select(id => $"harness-evidence:{id}"))
+            .ToArray();
+        var staged = await machineStore.StageVerifiedExternalResultAsync(
             operation.InstanceId,
-            "Observation",
-            $"harness-effect-result-{operation.OperationId}",
-            null,
-            null,
-            $"observation-harness-{operation.OperationId}",
-            operation.ObservationType,
-            operation.ExecutionRevision,
             operation.OperationId,
+            harnessExecutionId,
             operation.ProviderIdentity,
+            operation.Capability,
+            operation.ObservationType,
+            attempt.ProviderEffectId,
             occurredAt,
-            payload: new Dictionary<string, JsonElement>
-            {
-                ["effectId"] = JsonSerializer.SerializeToElement(attempt.ProviderEffectId, JsonOptions),
-                ["harnessExecutionId"] = JsonSerializer.SerializeToElement(operation.HarnessExecutionId, JsonOptions)
-            },
-            facts: null,
-            evidence: evidenceValues,
-            decisionEvidence: null,
-            factsProvenance: null,
-            trustedSource: true,
-            now: receivedAt,
-            cancellationToken: cancellationToken);
+            evidence,
+            evidenceReferences,
+            receivedAt,
+            cancellationToken);
 
-        var accepted = result.Message.Status == "Accepted";
-        InputAttemptRecord? acceptedAttempt = result.Submission?.Attempt;
-        if (result.Message.Status == "Duplicate" && result.Message.AttemptId is not null)
+        if (faults.Consume(operation.OperationId, "BeforeObservationAcceptance"))
         {
-            acceptedAttempt = await machineStore.GetAttemptAsync(
-                operation.InstanceId, result.Message.AttemptId, cancellationToken);
-            accepted = acceptedAttempt.Status == "Accepted";
+            throw new EffectInterruptionException(
+                $"Controlled Gate 7 interruption before observation acceptance for operation '{operation.OperationId}'.");
         }
-
-        var persistedAttempt = await db.EffectAttempts.SingleAsync(
-            item => item.Id == attempt.Id, cancellationToken);
-        var persistedOperation = await db.EffectOperations.SingleAsync(
-            item => item.Id == operation.Id, cancellationToken);
-        persistedAttempt.ObservationStatus = result.Message.Status;
-        persistedAttempt.ObservationReceiptId = result.Message.Id;
-        persistedAttempt.WorkflowTransitionId = acceptedAttempt?.TransitionId;
-        persistedAttempt.WorkflowStateBefore = acceptedAttempt?.PreviousState;
-        persistedAttempt.WorkflowStateAfter = acceptedAttempt?.TargetState;
-        persistedAttempt.WorkflowRevisionAfter = acceptedAttempt?.RevisionAfter;
-        persistedOperation.Status = accepted ? "ObservationAccepted" : "ObservationRefused";
-        persistedOperation.UpdatedAt = DateTimeOffset.UtcNow;
-        await db.SaveChangesAsync(cancellationToken);
+        _ = await machineStore.ContinueStagedObservationAsync(
+            operation.InstanceId, staged.Id, receivedAt, cancellationToken);
     }
 
     private static HarnessExecutionRequest BuildRequest(
@@ -877,6 +856,15 @@ public sealed class HarnessEffectCoordinator(
 
     private static string SerializeIdentifiers(IReadOnlyList<JsonElement> values) =>
         JsonSerializer.Serialize(values.Select(value => ReadString(value, "id")).Where(id => id is not null), JsonOptions);
+
+    private static IReadOnlyList<string> ParseIdentifiers(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return [];
+        }
+        return JsonSerializer.Deserialize<string[]>(json, JsonOptions) ?? [];
+    }
 
     private static EffectAttemptResponse ToResponse(EffectAttemptRecord attempt)
     {

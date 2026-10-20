@@ -4,28 +4,25 @@
 
 Validated on .NET SDK `10.0.100`:
 
-- Baseline before this completion work: solution build passed and 77 tests passed.
-- Updated `dotnet build DurableStateMachine.slnx --no-restore`: passed, 0 warnings and 0 errors.
-- Updated `dotnet test tests\DurableStateMachine.Tests\DurableStateMachine.Tests.csproj`: passed, 83 tests, 0 failures, 0 skipped.
-- Focused `RecoveryReplayTests`: passed, 12 tests.
-- Workspace diagnostics for changed C# files: no errors.
+- Baseline before this completion work: 83 tests passed.
+- Final `dotnet build DurableStateMachine.slnx --no-restore`: passed, 0 warnings and 0 errors.
+- Final `dotnet test tests\DurableStateMachine.Tests\DurableStateMachine.Tests.csproj --no-build`: passed, 92 tests, 0 failures, 0 skipped.
+- Focused tests cover staged-result identity/restart, stale results after cancellation, staged-result fault boundaries, actual child-process termination after staging commit, and two-host recovery races.
 - `git diff --check`: passed.
 
-The new SQLite-backed intake test demonstrates that a failure before intake commit leaves no receipt, while a failure after intake commit leaves a `Received` record visible to recovery assessment. It recreates the API host over the same database, resumes the record using its receipt ID and original envelope, and verifies one accepted attempt/history row. The same test injects interruptions during guard evaluation, before final persistence, and immediately before projection persistence; each finalization rollback leaves the intake resumable. Re-resuming a completed receipt returns conflict rather than creating a second transition. Separate tests construct two independent API hosts sharing SQLite and race continuation of the same intake, and confirm that stale commands preserve their original revision and trusted observations reuse only their persisted application-established authority.
+SQLite-backed intake tests show that failures before intake commit leave no receipt, while failures after commit leave a `Received` record available for recovery. Restarted hosts continue from the stored envelope and preserve its original revision and trusted authority. Staged-result tests verify stable identity for equivalent duplicates, refusal of conflicting identity reuse, exact payload/evidence retention, no extra Harness execution during continuation, idempotent repeated resume, and refusal to apply a result made stale by cancellation. Fault injection covers before/during staging persistence, before evaluation, during finalization and after the staged-result commit.
 
-Process-level tests start the API as child operating-system processes and terminate only those owned process IDs at three coordinated points: after intake commit/before evaluation, after effect-intent commit/before provider dispatch, and immediately before final local persistence. Restarting against the same disposable SQLite file verifies receipt resumption, preservation of a pending external effect without provider invocation, and rollback to the previously committed projection/history at the finalization boundary.
+Process-level tests terminate only their owned API child processes at coordinated boundaries, including after a verified Harness result has been durably staged. Restarting against the same disposable SQLite file resumes the staged result through Gate 5 without another Harness execution and produces exactly one accepted transition. Other child-process tests verify intake resumption, preservation of pending external work without provider invocation, and rollback to the previously committed projection/history at finalization. The Harness/provider behavior in these tests is simulated by a controlled local HTTP server; they do not demonstrate recovery from a live external provider.
 
-The existing replay integration test now injects a counting HTTP handler for the Generic Harness and asserts zero calls across historical reconstruction, decision verification and recovery assessment. It compares instance, attempt, receipt, expected-operation, timer, effect and transition-history data before and after those read-only operations.
-
-Existing tests continue to cover projection corruption detection, decision evidence, expected-operation and timer assessment, Gate 5 authority, Gate 6/7 effect boundaries, Gate 8 timers, Gate 9 arbitration and API test-host restart. No historical data is synthesized or rewritten.
+Two independent API hosts sharing SQLite race staged-result continuation against a competing normal command, cancellation and due timer processing, checking both relevant commit orders. Read-only replay and recovery tests assert no calls to the Generic Harness and compare local records before and after inspection. Existing tests continue to cover projection corruption detection, decision evidence, expected-operation and timer assessment, Gate 5 authority, Gate 6/7 effect boundaries, Gate 8 timers, Gate 9 arbitration and API host restart. No historical data is synthesized or rewritten.
 
 ## Gate 9 adversarial corpus regression
 
-The checked-in seed `20261019` corpus validated reproducibly with 5,000 deliveries, 300 instances, 150 additional exact duplicates, 100 additional semantic duplicates, 450 late deliveries, 75 race pairs and 50 malformed observations.
+The fixed corpus validated reproducibly with seed `20261019`, 5,000 deliveries and 300 applications, including 150 additional exact duplicates, 100 semantic duplicates, 450 late deliveries, 75 race pairs and 50 malformed observations.
 
-The updated runtime completed all 5,000 deliveries against a temporary persistent SQLite database using one responsive API host, `concurrent` mode and concurrency 8. Final run results: 961 accepted transitions, 150 duplicates, 50 malformed inputs, 3,008 rejected inputs, 831 stale inputs, zero failed invariants and zero transport failures; exit code 0.
+A final run used two responsive API hosts on distinct ports sharing one temporary SQLite database, `multi-host` mode and concurrency 8. The runner reported 5,000 deliveries: 933 accepted transitions, 150 duplicates, 50 malformed inputs, 2,713 rejected inputs and 1,154 stale inputs. It reported **zero failed invariants and zero transport failures**, with exit code 0; duration was 34,254 ms. The report identified two hosts and corpus fingerprint `2C1A29D7B149E00B0E03C2AF6CB226D0470D8A37D99A98D67DE61CC7CA14C1F8`.
 
-The prior recorded run had 974 accepted, 3,149 rejected and 677 stale inputs. The new two-transaction intake/evaluation boundary changes scheduling around concurrent deliveries, so the outcome mix changed (13 fewer accepted; more inputs observed as stale instead of rejected). Repeated concurrent runs also showed a small scheduler-dependent shift between `Rejected` and `Stale` (7 records) while the accepted, duplicate and malformed counts remained unchanged. The corpus runner reported no invariant failures, duplicate accepted-history revisions, timer uniqueness failures or effect-operation uniqueness failures. This was a one-host run, not a new multi-host corpus run.
+The corpus runner was corrected to avoid submitting the second member of an already concurrently submitted race pair a second time in `multi-host` mode. This run therefore accounts for exactly the 5,000 generated deliveries. Outcome mix remains scheduling-dependent for competing deliveries, particularly the `Rejected` versus `Stale` split; integrity and transport failures, rather than identical per-category counts across schedules, are the multi-host correctness criteria.
 
 ## Crash matrix status
 
@@ -35,16 +32,15 @@ The prior recorded run had 974 accepted, 3,149 rejected and 677 stale inputs. Th
 | After intake, before evaluation | Deterministic fault-injection and operating-system process-kill verified; explicit resume accepts once in a fresh process. |
 | During guard evaluation | Deterministic fault-injection verified; transaction rollback preserves intake; resume uses stored envelope. No new Meridian fetch. |
 | External work pending | Operating-system process-kill verified after durable intent commit and before provider dispatch; recovery reports it pending and does not dispatch. |
-| External result before local acceptance | Partially covered by existing Gate 6/7 exception-injected tests. No response-body staging is added; a response retained only in process memory remains unavailable. |
+| Verified external result before local acceptance | Durable staging and Gate 5 continuation are implemented; process-kill after the staging commit and deterministic staging/finalization faults are verified. A response lost before the staging commit is unavailable. |
 | During final transition/projection persistence | Operating-system process-kill verified immediately before final persistence; deterministic pre-save interruption and existing SQLite-trigger rollback are also verified. No OS kill during an individual SQL statement. |
 
 ## Remaining limitations
 
-- Process-kill coverage does not include the boundary after an external result is observed but before acceptance, or termination during an individual finalization SQL statement.
-- The new tests do not independently race recovery against a normal competing command, cancellation, or timer expiry. Existing SQLite immediate transactions, conditional revision updates, unique accepted-history revision constraints, and Gate 9 concurrency tests remain in effect.
-- External response bodies are not staged between provider completion and workflow observation acceptance. Lost in-memory results remain unresolved and are not reconstructed from harness status.
-- No Gate 10 multi-host corpus rerun was performed; only the full concurrent one-host corpus run was repeated.
+- Process-kill coverage after an external result is verified only after the local staging commit. It does not cover a crash between remote provider completion and that commit, or termination during an individual SQL statement.
+- Two-host tests cover staged recovery versus a competing command, cancellation and timer expiry. They do not claim guarantees for multiple independent database servers or network-filesystem SQLite.
+- An external response is recoverable only after the trusted adapter commits it locally. Lost in-memory responses before staging remain unresolved; no status lookup or automatic provider retry is inferred.
 - Legacy attempts without intact Gate 4 evidence remain state-reconstructable but not decision-verifiable. No intake row is invented for legacy input.
 - Automatic processing of all unresolved inputs, timer polling, provider retries, historical side-effect replay, projection repair and Gate 11 definition migration are not implemented.
 
-Accordingly, durable pre-evaluation intake, explicit safe continuation, representative process-kill verification, deterministic transaction-failure coverage and executable read-only non-invocation assertions are implemented. The strict Gate 10 pass condition is **not fully met**: process-kill after an external result, provider-result staging, recovery races against competing commands/cancellation/timer expiry, and a multi-host corpus run remain outstanding.
+Accordingly, durable pre-evaluation intake, verified-result staging, explicit safe continuation, actual process-termination verification, two-host recovery arbitration, deterministic transaction-failure coverage, side-effect-free inspection assertions and the multi-host corpus regression are implemented. The response-loss interval before Stage A's durable commit, kill during an individual SQL statement, automatic provider retries and multi-server/non-SQLite coordination remain outside the verified guarantees.

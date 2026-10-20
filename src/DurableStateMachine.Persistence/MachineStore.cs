@@ -162,6 +162,10 @@ public sealed class MachineStore(
             .Where(record => record.InstanceId == instanceId)
             .OrderBy(record => record.RequestedAt).ThenBy(record => record.Id)
             .ToListAsync(cancellationToken);
+        var stagedObservations = await db.StagedObservations.AsNoTracking()
+            .Where(record => record.InstanceId == instanceId)
+            .OrderBy(record => record.ReceivedAt).ThenBy(record => record.Id)
+            .ToListAsync(cancellationToken);
         var effectAttempts = await (
             from attempt in db.EffectAttempts.AsNoTracking()
             join operation in db.EffectOperations.AsNoTracking()
@@ -217,6 +221,17 @@ public sealed class MachineStore(
                 .Select(attempt => new RecoveryInput(attempt.Id, attempt.Status, attempt.ReasonCode, attempt.Id,
                     "Preserve the original attempt and evidence; do not automatically re-evaluate an unresolved or ambiguous input.")))
             .ToArray();
+        var unresolvedStagedObservations = stagedObservations
+            .Where(result => result.Status == "Received")
+            .Select(result => new RecoveryStagedObservation(
+                result.Id,
+                result.ExpectedOperationId,
+                result.WorkflowOperationId,
+                result.HarnessExecutionId,
+                result.Status,
+                result.PayloadDigest,
+                "Continue this original staged result through its result-specific route; do not invoke the provider again."))
+            .ToArray();
         var recoveryTimers = timers.Select(timer => new RecoveryTimer(
             timer.Id,
             timer.Status,
@@ -230,6 +245,7 @@ public sealed class MachineStore(
             .ToArray();
         var reasons = new List<string>();
         var hasPendingReceipt = pendingInputs.Any(input => input.Status is "Received" or "Pending" or "Processing");
+        hasPendingReceipt |= unresolvedStagedObservations.Length > 0;
         var hasPendingLocal = recoveryTimers.Any(timer => timer.Status == "Pending");
         var hasUnresolvedInput = pendingInputs.Any(input => input.Status is "Unresolved" or "Ambiguous");
         var hasUnknownExternal = outstandingEffects.Any(effect => effect.Status == "OutcomeUnknown");
@@ -295,12 +311,233 @@ public sealed class MachineStore(
             replay,
             reasons,
             pendingInputs,
+            unresolvedStagedObservations,
             outstandingEffects,
             recoveryTimers,
             expectedOperations.Select(operation => new RecoveryExpectedOperation(
                 operation.OperationId, operation.Status, operation.ExpectedRevision, operation.ObservationType)).ToArray());
         await transaction.CommitAsync(cancellationToken);
         return assessment;
+    }
+
+    public async Task<StagedObservationRecord> StageVerifiedExternalResultAsync(
+        string instanceId,
+        string workflowOperationId,
+        string harnessExecutionId,
+        string providerIdentity,
+        string capability,
+        string observationType,
+        string? providerEffectId,
+        DateTimeOffset occurredAt,
+        JsonElement evidence,
+        IReadOnlyList<string> evidenceReferences,
+        DateTimeOffset receivedAt,
+        CancellationToken cancellationToken)
+    {
+        inputFaultPlan.ThrowIfArmed(instanceId, "BeforeExternalResultStaging");
+        if (evidence.ValueKind != JsonValueKind.Object ||
+            string.IsNullOrWhiteSpace(harnessExecutionId) ||
+            string.IsNullOrWhiteSpace(providerIdentity) ||
+            string.IsNullOrWhiteSpace(capability) ||
+            string.IsNullOrWhiteSpace(observationType))
+        {
+            throw new InvalidDataException("A staged external result requires verified harness correlation and an object evidence payload.");
+        }
+
+        await using var transaction = await BeginImmediateTransactionAsync(cancellationToken);
+        var effect = await db.EffectOperations.SingleOrDefaultAsync(
+            record => record.InstanceId == instanceId && record.OperationId == workflowOperationId,
+            cancellationToken)
+            ?? throw new ResourceNotFoundException(
+                $"Workflow operation '{workflowOperationId}' does not exist for instance '{instanceId}'.");
+        var expected = await db.ExpectedOperations.SingleOrDefaultAsync(
+            record => record.InstanceId == instanceId && record.OperationId == workflowOperationId,
+            cancellationToken)
+            ?? throw new DefinitionConflictException(
+                $"Workflow operation '{workflowOperationId}' has no registered expected observation.");
+        var instance = await db.Instances.SingleAsync(record => record.Id == instanceId, cancellationToken);
+        if (effect.Status != "ProviderSucceeded" ||
+            effect.OutcomeConfidence != "ObservedAndValidated" ||
+            effect.HarnessExecutionId != harnessExecutionId ||
+            effect.ProviderIdentity != providerIdentity ||
+            effect.Capability != capability ||
+            effect.ObservationType != observationType ||
+            effect.ExecutionRevision != expected.ExpectedRevision ||
+            expected.SourceIdentity != providerIdentity ||
+            expected.ObservationType != observationType ||
+            expected.Status != "Expected" ||
+            instance.DefinitionId != effect.DefinitionId ||
+            instance.DefinitionVersion != effect.DefinitionVersion)
+        {
+            throw new DefinitionConflictException(
+                "The verified result does not match the durable harness execution, effect intent, expected operation, and definition binding.");
+        }
+
+        var payloadJson = CanonicalizeJson(JsonSerializer.Serialize(new
+        {
+            effectId = providerEffectId,
+            harnessExecutionId
+        }, StoredJsonOptions));
+        var evidenceJson = CanonicalizeJson(evidence.GetRawText());
+        var referencesJson = JsonSerializer.Serialize(
+            evidenceReferences.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal), StoredJsonOptions);
+        var staged = new StagedObservationRecord
+        {
+            Id = CreateStagedObservationId(instanceId, workflowOperationId, harnessExecutionId),
+            InstanceId = instanceId,
+            ExpectedOperationId = expected.OperationId,
+            WorkflowOperationId = workflowOperationId,
+            HarnessExecutionId = harnessExecutionId,
+            ProviderIdentity = providerIdentity,
+            Capability = capability,
+            DefinitionId = effect.DefinitionId,
+            DefinitionVersion = effect.DefinitionVersion,
+            ExecutionRevision = effect.ExecutionRevision,
+            SourceAuthority = "verified-harness-adapter",
+            ResultClassification = "Succeeded",
+            ObservationType = observationType,
+            ProviderEffectId = providerEffectId,
+            OccurredAt = occurredAt.ToUniversalTime(),
+            PayloadJson = payloadJson,
+            EvidenceJson = evidenceJson,
+            EvidenceReferencesJson = referencesJson,
+            PayloadDigest = string.Empty,
+            ReceivedAt = receivedAt.ToUniversalTime(),
+            Status = "Received",
+            Explanation = "The verified external response is durably staged and awaits Gate 5 observation processing."
+        };
+        staged.PayloadDigest = ComputeStagedObservationDigest(staged);
+
+        var prior = await db.StagedObservations.SingleOrDefaultAsync(
+            record => record.InstanceId == instanceId &&
+                record.ExpectedOperationId == workflowOperationId,
+            cancellationToken);
+        if (prior is not null)
+        {
+            if (prior.PayloadDigest != staged.PayloadDigest ||
+                prior.HarnessExecutionId != harnessExecutionId)
+            {
+                throw new DefinitionConflictException(
+                    $"A conflicting external result is already staged for expected operation '{workflowOperationId}'.");
+            }
+            await transaction.CommitAsync(cancellationToken);
+            return prior;
+        }
+        var executionConflict = await db.StagedObservations.AsNoTracking().AnyAsync(
+            record => record.HarnessExecutionId == harnessExecutionId,
+            cancellationToken);
+        if (executionConflict)
+        {
+            throw new DefinitionConflictException(
+                $"Harness execution '{harnessExecutionId}' is already bound to a different staged result.");
+        }
+
+        db.StagedObservations.Add(staged);
+        inputFaultPlan.ThrowIfArmed(instanceId, "DuringExternalResultStagingPersistence");
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        inputFaultPlan.ThrowIfArmed(instanceId, "AfterExternalResultStagingCommit");
+        await inputFaultPlan.WaitIfPausedAsync(
+            instanceId, "AfterExternalResultStagingCommit", cancellationToken);
+        return staged;
+    }
+
+    public async Task<InboundProcessingResult> ContinueStagedObservationAsync(
+        string instanceId,
+        string stagedResultId,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var staged = await db.StagedObservations.AsNoTracking().SingleOrDefaultAsync(
+            record => record.Id == stagedResultId && record.InstanceId == instanceId,
+            cancellationToken)
+            ?? throw new ResourceNotFoundException(
+                $"Staged result '{stagedResultId}' does not exist for instance '{instanceId}'.");
+        if (staged.Status != "Received")
+        {
+            if (staged.ReceiptId is null)
+            {
+                throw new InvalidDataException(
+                    $"Final staged result '{stagedResultId}' has no linked observation receipt.");
+            }
+            return new InboundProcessingResult(
+                await GetInboundMessageAsync(instanceId, staged.ReceiptId, cancellationToken), null);
+        }
+        if (staged.SourceAuthority != "verified-harness-adapter" ||
+            staged.ResultClassification != "Succeeded" ||
+            ComputeStagedObservationDigest(staged) != staged.PayloadDigest)
+        {
+            throw new InvalidDataException(
+                $"Staged result '{stagedResultId}' failed its authority or immutable payload digest check.");
+        }
+
+        var effect = await db.EffectOperations.AsNoTracking().SingleOrDefaultAsync(
+            record => record.InstanceId == instanceId &&
+                record.OperationId == staged.WorkflowOperationId,
+            cancellationToken)
+            ?? throw new InvalidDataException("The staged result has no original workflow effect intent.");
+        var expected = await db.ExpectedOperations.AsNoTracking().SingleOrDefaultAsync(
+            record => record.InstanceId == instanceId &&
+                record.OperationId == staged.ExpectedOperationId,
+            cancellationToken)
+            ?? throw new InvalidDataException("The staged result has no original expected operation.");
+        if (effect.HarnessExecutionId != staged.HarnessExecutionId ||
+            effect.ExecutionRevision != staged.ExecutionRevision ||
+            effect.DefinitionId != staged.DefinitionId ||
+            effect.DefinitionVersion != staged.DefinitionVersion ||
+            effect.ProviderIdentity != staged.ProviderIdentity ||
+            expected.ObservationType != staged.ObservationType ||
+            expected.SourceIdentity != staged.ProviderIdentity ||
+            expected.ExpectedRevision != staged.ExecutionRevision)
+        {
+            throw new InvalidDataException(
+                $"Staged result '{stagedResultId}' no longer matches its original effect and expected-operation correlation.");
+        }
+
+        using var payloadDocument = JsonDocument.Parse(staged.PayloadJson);
+        using var evidenceDocument = JsonDocument.Parse(staged.EvidenceJson);
+        if (payloadDocument.RootElement.ValueKind != JsonValueKind.Object ||
+            evidenceDocument.RootElement.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException($"Staged result '{stagedResultId}' contains a non-object observation payload.");
+        }
+        inputFaultPlan.ThrowIfArmed(instanceId, "BeforeStagedObservationEvaluation");
+        var payload = payloadDocument.RootElement.EnumerateObject()
+            .ToDictionary(property => property.Name, property => property.Value.Clone(), StringComparer.Ordinal);
+        var evidence = evidenceDocument.RootElement.EnumerateObject()
+            .ToDictionary(property => property.Name, property => property.Value.Clone(), StringComparer.Ordinal);
+        return await SubmitInputAsync(
+            instanceId,
+            "Observation",
+            $"harness-effect-result-{staged.WorkflowOperationId}",
+            null,
+            null,
+            $"observation-harness-{staged.WorkflowOperationId}",
+            staged.ObservationType,
+            staged.ExecutionRevision,
+            staged.ExpectedOperationId,
+            staged.ProviderIdentity,
+            staged.OccurredAt,
+            payload,
+            facts: null,
+            evidence: evidence,
+            decisionEvidence: null,
+            factsProvenance: null,
+            trustedSource: true,
+            now,
+            cancellationToken,
+            stagedResultId: staged.Id);
+    }
+
+    public async Task<IReadOnlyList<StagedObservationRecord>> ListStagedObservationsAsync(
+        string instanceId,
+        CancellationToken cancellationToken)
+    {
+        await EnsureInstanceExistsAsync(instanceId, cancellationToken);
+        return await db.StagedObservations.AsNoTracking()
+            .Where(record => record.InstanceId == instanceId)
+            .OrderBy(record => record.ReceivedAt).ThenBy(record => record.Id)
+            .ToListAsync(cancellationToken);
     }
 
     private async Task<ReplaySnapshot> ReadReplaySnapshotAsync(
@@ -840,7 +1077,8 @@ public sealed class MachineStore(
         IReadOnlyDictionary<string, string>? factsProvenance,
         bool trustedSource,
         DateTimeOffset now,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? stagedResultId = null)
     {
         if (inputKind is not ("Command" or "Observation"))
         {
@@ -1135,11 +1373,23 @@ public sealed class MachineStore(
                             message.Explanation = $"Input checks passed, but the deterministic evaluator refused the mapped event: {submission.Attempt.Explanation}";
                         }
                     }
+                    if (stagedResultId is not null)
+                    {
+                        await FinalizeStagedObservationWithinTransactionAsync(
+                            stagedResultId, message, submission, now, cancellationToken);
+                        inputFaultPlan.ThrowIfArmed(instanceId, "DuringStagedObservationFinalization");
+                    }
                     inputFaultPlan.ThrowIfArmed(instanceId, "BeforeFinalPersistence");
                     await inputFaultPlan.WaitIfPausedAsync(
                         instanceId, "BeforeFinalPersistence", cancellationToken);
                     await db.SaveChangesAsync(cancellationToken);
                     await evaluationTransaction.CommitAsync(cancellationToken);
+                    if (stagedResultId is not null)
+                    {
+                        inputFaultPlan.ThrowIfArmed(instanceId, "AfterStagedObservationCommit");
+                        await inputFaultPlan.WaitIfPausedAsync(
+                            instanceId, "AfterStagedObservationCommit", cancellationToken);
+                    }
                     var currentSubmission = submission is null
                         ? null
                         : submission with { Instance = await ReadInstanceAsync(instanceId, cancellationToken) };
@@ -1147,11 +1397,23 @@ public sealed class MachineStore(
                 }
             }
 
+            if (stagedResultId is not null)
+            {
+                await FinalizeStagedObservationWithinTransactionAsync(
+                    stagedResultId, message, submission: null, now, cancellationToken);
+                inputFaultPlan.ThrowIfArmed(instanceId, "DuringStagedObservationFinalization");
+            }
             inputFaultPlan.ThrowIfArmed(instanceId, "BeforeFinalPersistence");
             await inputFaultPlan.WaitIfPausedAsync(
                 instanceId, "BeforeFinalPersistence", cancellationToken);
             await db.SaveChangesAsync(cancellationToken);
             await evaluationTransaction.CommitAsync(cancellationToken);
+            if (stagedResultId is not null)
+            {
+                inputFaultPlan.ThrowIfArmed(instanceId, "AfterStagedObservationCommit");
+                await inputFaultPlan.WaitIfPausedAsync(
+                    instanceId, "AfterStagedObservationCommit", cancellationToken);
+            }
             return new InboundProcessingResult(message, null);
         }
         finally
@@ -1168,6 +1430,55 @@ public sealed class MachineStore(
                     InstanceLocks.Remove(instanceId);
                 }
             }
+        }
+    }
+
+    private async Task FinalizeStagedObservationWithinTransactionAsync(
+        string stagedResultId,
+        InboundMessageRecord message,
+        SubmissionResult? submission,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        var staged = await db.StagedObservations.SingleAsync(
+            record => record.Id == stagedResultId && record.InstanceId == message.InstanceId,
+            cancellationToken);
+        if (staged.Status != "Received" ||
+            staged.SourceAuthority != "verified-harness-adapter" ||
+            ComputeStagedObservationDigest(staged) != staged.PayloadDigest)
+        {
+            throw new DefinitionConflictException(
+                $"Staged result '{stagedResultId}' is no longer eligible for finalization.");
+        }
+
+        staged.Status = message.Status == "Accepted" ? "Accepted" : "Refused";
+        staged.ReceiptId = message.Id;
+        staged.AttemptId = submission?.Attempt.Id ?? message.AttemptId;
+        staged.Outcome = message.Status;
+        staged.Explanation = message.Explanation;
+        staged.ResolvedAt = now;
+
+        var effect = await db.EffectOperations.SingleAsync(
+            record => record.InstanceId == staged.InstanceId &&
+                record.OperationId == staged.WorkflowOperationId,
+            cancellationToken);
+        var effectAttempt = await db.EffectAttempts
+            .Where(record => record.EffectOperationId == effect.Id &&
+                record.HarnessExecutionId == staged.HarnessExecutionId)
+            .OrderByDescending(record => record.AttemptNumber)
+            .FirstOrDefaultAsync(cancellationToken);
+        effect.Status = message.Status == "Accepted"
+            ? "ObservationAccepted"
+            : "ObservationRefused";
+        effect.UpdatedAt = now;
+        if (effectAttempt is not null)
+        {
+            effectAttempt.ObservationStatus = message.Status;
+            effectAttempt.ObservationReceiptId = message.Id;
+            effectAttempt.WorkflowTransitionId = submission?.Attempt.TransitionId;
+            effectAttempt.WorkflowStateBefore = submission?.Attempt.PreviousState;
+            effectAttempt.WorkflowStateAfter = submission?.Attempt.TargetState;
+            effectAttempt.WorkflowRevisionAfter = submission?.Attempt.RevisionAfter;
         }
     }
 
@@ -1869,6 +2180,37 @@ public sealed class MachineStore(
 
     private static string ComputeDigest(string json) =>
         Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(CanonicalizeJson(json))));
+
+    private static string ComputeStagedObservationDigest(StagedObservationRecord staged) =>
+        ComputeDigest(JsonSerializer.Serialize(new
+        {
+            staged.InstanceId,
+            staged.ExpectedOperationId,
+            staged.WorkflowOperationId,
+            staged.HarnessExecutionId,
+            staged.ProviderIdentity,
+            staged.Capability,
+            staged.DefinitionId,
+            staged.DefinitionVersion,
+            staged.ExecutionRevision,
+            staged.SourceAuthority,
+            staged.ResultClassification,
+            staged.ObservationType,
+            staged.ProviderEffectId,
+            occurredAt = staged.OccurredAt.ToUniversalTime(),
+            staged.PayloadJson,
+            staged.EvidenceJson,
+            staged.EvidenceReferencesJson
+        }, StoredJsonOptions));
+
+    private static string CreateStagedObservationId(
+        string instanceId,
+        string workflowOperationId,
+        string harnessExecutionId)
+    {
+        var identity = Encoding.UTF8.GetBytes($"{instanceId}\0{workflowOperationId}\0{harnessExecutionId}");
+        return $"staged-{Convert.ToHexString(SHA256.HashData(identity)).ToLowerInvariant()}";
+    }
 
     private static string CanonicalizeJson(string json)
     {

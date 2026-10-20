@@ -144,6 +144,147 @@ public sealed class Gate7HarnessTests
     }
 
     [Fact]
+    public async Task Verified_harness_result_is_durable_before_gate5_acceptance_and_resumes_once()
+    {
+        using var runtime = await TestRuntime.StartAsync(HarnessResponse.Success);
+        var instanceId = await runtime.CreateAssessmentReadyInstanceAsync();
+        await runtime.ArmInputFaultAsync(instanceId, "AfterExternalResultStagingCommit");
+
+        using (var interrupted = await runtime.StartOfferAsync(instanceId, "staged-offer"))
+        {
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, interrupted.StatusCode);
+        }
+
+        var beforeResume = await runtime.Client.GetFromJsonAsync<JsonElement[]>(
+            $"/api/instances/{instanceId}/staged-observations");
+        var staged = Assert.Single(beforeResume!);
+        var stagedId = staged.GetProperty("id").GetString()!;
+        Assert.Equal("Received", staged.GetProperty("status").GetString());
+        Assert.Equal("verified-harness-adapter", staged.GetProperty("sourceAuthority").GetString());
+        Assert.Equal("harness-execution-success", staged.GetProperty("harnessExecutionId").GetString());
+        Assert.Equal("offer-document", staged.GetProperty("capability").GetString());
+        Assert.Contains("\"documentId\":\"offer-document\"", staged.GetProperty("evidenceJson").GetString());
+        Assert.Contains("harness-evidence-1", staged.GetProperty("evidenceReferencesJson").GetString());
+        Assert.DoesNotContain("test-key-", staged.GetRawText());
+        Assert.Equal(1, runtime.Handler.ExecutionPostCount);
+
+        var assessment = await runtime.Client.GetFromJsonAsync<JsonElement>(
+            $"/api/instances/{instanceId}/recovery");
+        Assert.Contains(assessment.GetProperty("unresolvedStagedObservations").EnumerateArray(), item =>
+            item.GetProperty("stagedResultId").GetString() == stagedId);
+        Assert.Equal("AssessmentReady",
+            (await runtime.GetInstanceAsync(instanceId)).GetProperty("currentState").GetString());
+
+        await runtime.RestartApiAsync();
+        using var resumed = await runtime.Client.PostAsync(
+            $"/api/instances/{instanceId}/staged-observations/{stagedId}/resume", content: null);
+        Assert.Equal(HttpStatusCode.OK, resumed.StatusCode);
+        Assert.Equal("Accepted",
+            (await resumed.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("message")
+                .GetProperty("status").GetString());
+        using var repeated = await runtime.Client.PostAsync(
+            $"/api/instances/{instanceId}/staged-observations/{stagedId}/resume", content: null);
+        Assert.Equal(HttpStatusCode.OK, repeated.StatusCode);
+        Assert.Equal(0, runtime.Handler.ExecutionPostCount);
+        Assert.Equal("AwaitingOfferAcceptance",
+            (await runtime.GetInstanceAsync(instanceId)).GetProperty("currentState").GetString());
+        var history = await runtime.Client.GetFromJsonAsync<JsonElement[]>(
+            $"/api/instances/{instanceId}/history");
+        Assert.Equal(2, history!.Length);
+        var afterResume = await runtime.Client.GetFromJsonAsync<JsonElement[]>(
+            $"/api/instances/{instanceId}/staged-observations");
+        Assert.Equal("Accepted", Assert.Single(afterResume!).GetProperty("status").GetString());
+    }
+
+    [Fact]
+    public async Task Staged_success_after_cancellation_is_preserved_but_refused_by_gate5()
+    {
+        using var runtime = await TestRuntime.StartAsync(HarnessResponse.Success);
+        var instanceId = await runtime.CreateAssessmentReadyInstanceAsync();
+        await runtime.ArmInputFaultAsync(instanceId, "AfterExternalResultStagingCommit");
+        using (var interrupted = await runtime.StartOfferAsync(instanceId, "result-before-cancel"))
+        {
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, interrupted.StatusCode);
+        }
+
+        using (var cancelled = await runtime.Client.PostAsJsonAsync(
+            $"/api/instances/{instanceId}/commands", new
+            {
+                messageId = "cancel-after-result-staged",
+                type = "CancelApplication",
+                expectedRevision = 1
+            }))
+        {
+            Assert.Equal(HttpStatusCode.OK, cancelled.StatusCode);
+        }
+        var staged = Assert.Single(await runtime.Client.GetFromJsonAsync<JsonElement[]>(
+            $"/api/instances/{instanceId}/staged-observations") ?? []);
+        using var resumed = await runtime.Client.PostAsync(
+            $"/api/instances/{instanceId}/staged-observations/{staged.GetProperty("id").GetString()}/resume",
+            content: null);
+        Assert.Equal(HttpStatusCode.OK, resumed.StatusCode);
+        using var result = JsonDocument.Parse(await resumed.Content.ReadAsStringAsync());
+        Assert.Equal("Stale", result.RootElement.GetProperty("message").GetProperty("status").GetString());
+        Assert.Equal("Cancelled",
+            (await runtime.GetInstanceAsync(instanceId)).GetProperty("currentState").GetString());
+        var finalStaged = Assert.Single(await runtime.Client.GetFromJsonAsync<JsonElement[]>(
+            $"/api/instances/{instanceId}/staged-observations") ?? []);
+        Assert.Equal("Refused", finalStaged.GetProperty("status").GetString());
+        Assert.Contains("\"documentId\":\"offer-document\"",
+            finalStaged.GetProperty("evidenceJson").GetString());
+        Assert.Equal(1, runtime.Handler.ExecutionPostCount);
+    }
+
+    [Theory]
+    [InlineData("BeforeExternalResultStaging", false, false)]
+    [InlineData("DuringExternalResultStagingPersistence", false, false)]
+    [InlineData("BeforeStagedObservationEvaluation", true, false)]
+    [InlineData("DuringStagedObservationFinalization", true, false)]
+    [InlineData("AfterStagedObservationCommit", true, true)]
+    public async Task Staged_result_fault_boundaries_preserve_only_committed_work(
+        string point,
+        bool stagingCommitted,
+        bool observationCommitted)
+    {
+        using var runtime = await TestRuntime.StartAsync(HarnessResponse.Success);
+        var instanceId = await runtime.CreateAssessmentReadyInstanceAsync();
+        await runtime.ArmInputFaultAsync(instanceId, point);
+        using (var interrupted = await runtime.StartOfferAsync(instanceId, $"fault-{point}"))
+        {
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, interrupted.StatusCode);
+        }
+
+        var staged = await runtime.Client.GetFromJsonAsync<JsonElement[]>(
+            $"/api/instances/{instanceId}/staged-observations");
+        if (!stagingCommitted)
+        {
+            Assert.Empty(staged ?? []);
+            using var resumedEffect = await runtime.Client.PostAsync(
+                $"/api/instances/{instanceId}/effects/fault-{point}/resume", content: null);
+            Assert.Equal(HttpStatusCode.OK, resumedEffect.StatusCode);
+        }
+        else
+        {
+            var stored = Assert.Single(staged!);
+            var stagedId = stored.GetProperty("id").GetString()!;
+            Assert.Equal(observationCommitted ? "Accepted" : "Received",
+                stored.GetProperty("status").GetString());
+            using var resumed = await runtime.Client.PostAsync(
+                $"/api/instances/{instanceId}/staged-observations/{stagedId}/resume", content: null);
+            Assert.Equal(HttpStatusCode.OK, resumed.StatusCode);
+            Assert.Equal("Accepted",
+                (await resumed.Content.ReadFromJsonAsync<JsonElement>())
+                    .GetProperty("message").GetProperty("status").GetString());
+        }
+
+        Assert.Equal("AwaitingOfferAcceptance",
+            (await runtime.GetInstanceAsync(instanceId)).GetProperty("currentState").GetString());
+        Assert.Equal(2, (await runtime.Client.GetFromJsonAsync<JsonElement[]>(
+            $"/api/instances/{instanceId}/history") ?? []).Length);
+        Assert.Equal(1, runtime.Handler.ExecutionPostCount);
+    }
+
+    [Fact]
     public async Task Harness_rejection_is_not_converted_to_a_successful_workflow_observation()
     {
         using var runtime = await TestRuntime.StartAsync(HarnessResponse.Rejected);
@@ -600,6 +741,14 @@ public sealed class Gate7HarnessTests
         {
             using var response = await Client.PostAsync(
                 $"/api/test-controls/effects/{Uri.EscapeDataString(operationId)}/{point}",
+                content: null);
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        }
+
+        public async Task ArmInputFaultAsync(string instanceId, string point)
+        {
+            using var response = await Client.PostAsync(
+                $"/api/test-controls/inputs/{Uri.EscapeDataString(instanceId)}/{point}",
                 content: null);
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
         }

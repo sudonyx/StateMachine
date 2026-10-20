@@ -10,6 +10,7 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
     public DbSet<TransitionHistoryRecord> TransitionHistory => Set<TransitionHistoryRecord>();
     public DbSet<InboundMessageRecord> InboundMessages => Set<InboundMessageRecord>();
     public DbSet<ExpectedOperationRecord> ExpectedOperations => Set<ExpectedOperationRecord>();
+    public DbSet<StagedObservationRecord> StagedObservations => Set<StagedObservationRecord>();
     public DbSet<EffectOperationRecord> EffectOperations => Set<EffectOperationRecord>();
     public DbSet<EffectAttemptRecord> EffectAttempts => Set<EffectAttemptRecord>();
     public DbSet<TimerRecord> Timers => Set<TimerRecord>();
@@ -374,6 +375,44 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
                     ON TransitionHistory (InstanceId, RevisionAfter);
                 """, cancellationToken);
 
+    public Task EnsureGate10SchemaAsync(CancellationToken cancellationToken = default) =>
+        Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS StagedObservations (
+                Id TEXT NOT NULL CONSTRAINT PK_StagedObservations PRIMARY KEY,
+                InstanceId TEXT NOT NULL,
+                ExpectedOperationId TEXT NOT NULL,
+                WorkflowOperationId TEXT NOT NULL,
+                HarnessExecutionId TEXT NOT NULL,
+                ProviderIdentity TEXT NOT NULL,
+                Capability TEXT NOT NULL,
+                DefinitionId TEXT NOT NULL,
+                DefinitionVersion TEXT NOT NULL,
+                ExecutionRevision INTEGER NOT NULL,
+                SourceAuthority TEXT NOT NULL,
+                ResultClassification TEXT NOT NULL,
+                ObservationType TEXT NOT NULL,
+                ProviderEffectId TEXT NULL,
+                OccurredAt INTEGER NOT NULL,
+                PayloadJson TEXT NOT NULL,
+                EvidenceJson TEXT NOT NULL,
+                EvidenceReferencesJson TEXT NOT NULL,
+                PayloadDigest TEXT NOT NULL,
+                ReceivedAt INTEGER NOT NULL,
+                Status TEXT NOT NULL,
+                ReceiptId TEXT NULL,
+                AttemptId TEXT NULL,
+                Outcome TEXT NULL,
+                Explanation TEXT NOT NULL,
+                ResolvedAt INTEGER NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS UX_StagedObservations_InstanceId_ExpectedOperationId
+                ON StagedObservations (InstanceId, ExpectedOperationId);
+            CREATE UNIQUE INDEX IF NOT EXISTS UX_StagedObservations_HarnessExecutionId
+                ON StagedObservations (HarnessExecutionId);
+            CREATE INDEX IF NOT EXISTS IX_StagedObservations_InstanceId_Status_ReceivedAt
+                ON StagedObservations (InstanceId, Status, ReceivedAt, Id);
+            """, cancellationToken);
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<DefinitionRecord>().HasKey(record => new { record.Id, record.Version });
@@ -392,6 +431,14 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
             .HasDatabaseName("IX_InboundMessages_InstanceId_DeliveryId");
         modelBuilder.Entity<ExpectedOperationRecord>().HasKey(record => record.Id);
         modelBuilder.Entity<ExpectedOperationRecord>().HasIndex(record => new { record.InstanceId, record.OperationId }).IsUnique();
+        modelBuilder.Entity<StagedObservationRecord>().HasKey(record => record.Id);
+        modelBuilder.Entity<StagedObservationRecord>()
+            .HasIndex(record => new { record.InstanceId, record.ExpectedOperationId })
+            .IsUnique().HasDatabaseName("UX_StagedObservations_InstanceId_ExpectedOperationId");
+        modelBuilder.Entity<StagedObservationRecord>().HasIndex(record => record.HarnessExecutionId)
+            .IsUnique().HasDatabaseName("UX_StagedObservations_HarnessExecutionId");
+        modelBuilder.Entity<StagedObservationRecord>()
+            .HasIndex(record => new { record.InstanceId, record.Status, record.ReceivedAt, record.Id });
         modelBuilder.Entity<EffectOperationRecord>().HasKey(record => record.Id);
         modelBuilder.Entity<EffectOperationRecord>().HasIndex(record => new { record.InstanceId, record.OperationId }).IsUnique();
         modelBuilder.Entity<EffectAttemptRecord>().HasKey(record => record.Id);
@@ -418,6 +465,13 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
             .HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null,
                 value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
         modelBuilder.Entity<ExpectedOperationRecord>().Property(record => record.ResolvedAt)
+            .HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null,
+                value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+        modelBuilder.Entity<StagedObservationRecord>().Property(record => record.OccurredAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        modelBuilder.Entity<StagedObservationRecord>().Property(record => record.ReceivedAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        modelBuilder.Entity<StagedObservationRecord>().Property(record => record.ResolvedAt)
             .HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null,
                 value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
         modelBuilder.Entity<ExpectedOperationRecord>().Property(record => record.ExpectedAt)
@@ -545,6 +599,36 @@ public sealed class ExpectedOperationRecord
     public required string RequiredEvidenceJson { get; set; }
     public required string Status { get; set; }
     public string? ResultDigest { get; set; }
+    public DateTimeOffset? ResolvedAt { get; set; }
+}
+
+public sealed class StagedObservationRecord
+{
+    public required string Id { get; set; }
+    public required string InstanceId { get; set; }
+    public required string ExpectedOperationId { get; set; }
+    public required string WorkflowOperationId { get; set; }
+    public required string HarnessExecutionId { get; set; }
+    public required string ProviderIdentity { get; set; }
+    public required string Capability { get; set; }
+    public required string DefinitionId { get; set; }
+    public required string DefinitionVersion { get; set; }
+    public long ExecutionRevision { get; set; }
+    public required string SourceAuthority { get; set; }
+    public required string ResultClassification { get; set; }
+    public required string ObservationType { get; set; }
+    public string? ProviderEffectId { get; set; }
+    public DateTimeOffset OccurredAt { get; set; }
+    public required string PayloadJson { get; set; }
+    public required string EvidenceJson { get; set; }
+    public required string EvidenceReferencesJson { get; set; }
+    public required string PayloadDigest { get; set; }
+    public DateTimeOffset ReceivedAt { get; set; }
+    public required string Status { get; set; }
+    public string? ReceiptId { get; set; }
+    public string? AttemptId { get; set; }
+    public string? Outcome { get; set; }
+    public required string Explanation { get; set; }
     public DateTimeOffset? ResolvedAt { get; set; }
 }
 

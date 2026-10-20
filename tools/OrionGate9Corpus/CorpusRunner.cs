@@ -200,7 +200,7 @@ public static class CorpusRunner
                         }
                         continue;
                     }
-                    if (record.RaceGroup is not null && mode == "concurrent")
+                    if (record.RaceGroup is not null && mode != "baseline")
                     {
                         var sameGroupEarlier = appRecords.Take(index).Any(item => item.RaceGroup == record.RaceGroup);
                         if (sameGroupEarlier)

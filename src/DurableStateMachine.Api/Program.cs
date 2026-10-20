@@ -44,6 +44,7 @@ await using (var scope = app.Services.CreateAsyncScope())
     await database.EnsureGate7SchemaAsync();
     await database.EnsureGate8SchemaAsync();
     await database.EnsureGate9SchemaAsync();
+    await database.EnsureGate10SchemaAsync();
 }
 
 app.Use(async (context, next) =>
@@ -254,6 +255,53 @@ instances.MapPost("/{id}/inbound-messages/{receiptId}/resume", async (
     return result.Submission?.ConcurrencyConflict == true ? Results.Conflict(response) : Results.Ok(response);
 }).WithName("ResumeInboundMessage")
   .WithSummary("Resume one durable unresolved input from its original envelope and persisted authority context.");
+instances.MapGet("/{id}/staged-observations", async (
+    string id, MachineStore store, CancellationToken cancellationToken) =>
+{
+    var staged = await store.ListStagedObservationsAsync(id, cancellationToken);
+    return Results.Ok(staged.Select(result => new
+    {
+        result.Id,
+        result.InstanceId,
+        result.ExpectedOperationId,
+        result.WorkflowOperationId,
+        result.HarnessExecutionId,
+        result.ProviderIdentity,
+        result.Capability,
+        result.DefinitionId,
+        result.DefinitionVersion,
+        result.ExecutionRevision,
+        result.SourceAuthority,
+        result.ResultClassification,
+        result.ObservationType,
+        result.ProviderEffectId,
+        result.OccurredAt,
+        result.PayloadJson,
+        result.EvidenceJson,
+        result.EvidenceReferencesJson,
+        result.PayloadDigest,
+        result.ReceivedAt,
+        result.Status,
+        result.ReceiptId,
+        result.AttemptId,
+        result.Outcome,
+        result.Explanation,
+        result.ResolvedAt
+    }));
+}).WithName("ListStagedObservations")
+  .WithSummary("Inspect durable external results without evaluating or invoking an external system.");
+instances.MapPost("/{id}/staged-observations/{resultId}/resume", async (
+    string id, string resultId, MachineStore store, TimeProvider timeProvider,
+    CancellationToken cancellationToken) =>
+{
+    var result = await store.ContinueStagedObservationAsync(
+        id, resultId, timeProvider.GetUtcNow(), cancellationToken);
+    var response = ToInputResponse(result, await store.GetInstanceAsync(id, cancellationToken));
+    return result.Submission?.ConcurrencyConflict == true
+        ? Results.Conflict(response)
+        : Results.Ok(response);
+}).WithName("ResumeStagedObservation")
+  .WithSummary("Continue one original durably staged external result through the existing Gate 5 input checks.");
 instances.MapGet("/{id}/attempts", async (string id, MachineStore store, CancellationToken cancellationToken) =>
     Results.Ok((await store.ListAttemptsAsync(id, cancellationToken)).Select(attempt => attempt.ToResponse())))
     .WithName("ListAttempts").WithSummary("List event attempts in received order.");

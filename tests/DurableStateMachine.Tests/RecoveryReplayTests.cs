@@ -2,12 +2,14 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Diagnostics;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 using DurableStateMachine.Api;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Data.Sqlite;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace DurableStateMachine.Tests;
 
@@ -70,6 +72,32 @@ public sealed class RecoveryReplayTests
             "blockedEvents": [],
             "invalidatedByDueTimers": []
           }]
+        }
+        """;
+    private const string CommandCancellationDefinition = """
+        {
+          "languageVersion": "1.1",
+          "id": "recovery-cancellation-race",
+          "version": "1",
+          "initialState": "Draft",
+          "states": [
+            { "id": "Draft" },
+            { "id": "Running" },
+            { "id": "Cancelled", "terminal": true }
+          ],
+          "events": ["Start", "Cancel"],
+          "inputPolicy": {
+            "commands": [
+              { "name": "Start", "event": "Start" },
+              { "name": "Cancel", "event": "Cancel" }
+            ],
+            "observations": []
+          },
+          "transitions": [
+            { "id": "start", "source": "Draft", "event": "Start", "target": "Running" },
+            { "id": "cancel-before-start", "source": "Draft", "event": "Cancel", "target": "Cancelled" },
+            { "id": "cancel-running", "source": "Running", "event": "Cancel", "target": "Cancelled" }
+          ]
         }
         """;
 
@@ -794,6 +822,213 @@ public sealed class RecoveryReplayTests
     }
 
     [Fact]
+    public async Task Two_hosts_arbitrate_recovery_against_commands_cancellation_and_due_timers_in_both_commit_orders()
+    {
+        var database = Path.Combine(Path.GetTempPath(), $"dsm-gate10-races-{Guid.NewGuid():N}.db");
+        var previousDatabase = Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_DB");
+        var previousControls = Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS");
+        var previousKey = Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY");
+        const string trustedKey = "gate10-two-host-race-key";
+        var clock = new MutableTimeProvider(new DateTimeOffset(2026, 10, 20, 12, 0, 0, TimeSpan.Zero));
+        Environment.SetEnvironmentVariable("DURABLE_STATE_MACHINE_DB", database);
+        Environment.SetEnvironmentVariable("DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS", "true");
+        Environment.SetEnvironmentVariable("DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY", trustedKey);
+        try
+        {
+            using var factoryA = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+                builder.ConfigureTestServices(services =>
+                {
+                    services.RemoveAll<TimeProvider>();
+                    services.AddSingleton<TimeProvider>(clock);
+                }));
+            using var factoryB = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+                builder.ConfigureTestServices(services =>
+                {
+                    services.RemoveAll<TimeProvider>();
+                    services.AddSingleton<TimeProvider>(clock);
+                }));
+            using var clientA = factoryA.CreateClient();
+            using var clientB = factoryB.CreateClient();
+
+            Assert.Equal(HttpStatusCode.OK, (await clientA.PostAsync("/api/definitions", Json(TimedDefinition))).StatusCode);
+            Assert.Equal(HttpStatusCode.OK,
+                (await clientA.PostAsync("/api/definitions", Json(CommandCancellationDefinition))).StatusCode);
+
+            async Task CreateInstance(HttpClient client, string instanceId, string definitionId) =>
+                Assert.Equal(HttpStatusCode.Created, (await client.PostAsJsonAsync("/api/instances", new
+                {
+                    id = instanceId,
+                    definitionId,
+                    definitionVersion = "1"
+                })).StatusCode);
+
+            async Task<string> InterruptCommand(string instanceId, string messageId, string type, long revision)
+            {
+                Assert.Equal(HttpStatusCode.OK,
+                    (await clientA.PostAsync(
+                        $"/api/test-controls/inputs/{instanceId}/AfterIntakeCommitBeforeEvaluation",
+                        Json("{}"))).StatusCode);
+                using var interrupted = await clientA.PostAsJsonAsync(
+                    $"/api/instances/{instanceId}/commands", new
+                    {
+                        messageId,
+                        type,
+                        expectedRevision = revision
+                    });
+                Assert.Equal(HttpStatusCode.ServiceUnavailable, interrupted.StatusCode);
+                var receipts = await clientA.GetFromJsonAsync<JsonElement[]>(
+                    $"/api/instances/{instanceId}/inbound-messages");
+                return Assert.Single(receipts!, receipt =>
+                    receipt.GetProperty("messageId").GetString() == messageId)
+                    .GetProperty("id").GetString()!;
+            }
+
+            async Task<JsonElement> SubmitCommand(HttpClient client, string instanceId, string messageId, string type, long revision)
+            {
+                using var response = await client.PostAsJsonAsync(
+                    $"/api/instances/{instanceId}/commands", new
+                    {
+                        messageId,
+                        type,
+                        expectedRevision = revision
+                    });
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                return await response.Content.ReadFromJsonAsync<JsonElement>();
+            }
+
+            async Task<JsonElement> Resume(HttpClient client, string instanceId, string receiptId)
+            {
+                using var response = await client.PostAsync(
+                    $"/api/instances/{instanceId}/inbound-messages/{receiptId}/resume", content: null);
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                return await response.Content.ReadFromJsonAsync<JsonElement>();
+            }
+
+            var commandWinsId = $"command-wins-{Guid.NewGuid():N}";
+            await CreateInstance(clientA, commandWinsId, "recovery-timer-test");
+            var commandWinsReceipt = await InterruptCommand(commandWinsId, "recover-start-later", "Start", 0);
+            Assert.Equal("Accepted", (await SubmitCommand(
+                clientB, commandWinsId, "competing-start", "Start", 0))
+                .GetProperty("message").GetProperty("status").GetString());
+            Assert.Equal("Stale", (await Resume(clientA, commandWinsId, commandWinsReceipt))
+                .GetProperty("message").GetProperty("status").GetString());
+
+            var recoveryWinsId = $"recovery-wins-{Guid.NewGuid():N}";
+            await CreateInstance(clientA, recoveryWinsId, "recovery-timer-test");
+            var recoveryWinsReceipt = await InterruptCommand(recoveryWinsId, "recover-start-first", "Start", 0);
+            Assert.Equal("Accepted", (await Resume(clientB, recoveryWinsId, recoveryWinsReceipt))
+                .GetProperty("message").GetProperty("status").GetString());
+            Assert.Equal("Stale", (await SubmitCommand(
+                clientA, recoveryWinsId, "competing-start-later", "Start", 0))
+                .GetProperty("message").GetProperty("status").GetString());
+
+            var cancellationWinsId = $"cancel-wins-{Guid.NewGuid():N}";
+            await CreateInstance(clientA, cancellationWinsId, "recovery-cancellation-race");
+            var cancellationWinsReceipt = await InterruptCommand(
+                cancellationWinsId, "recover-start-before-cancel", "Start", 0);
+            Assert.Equal("Accepted", (await SubmitCommand(
+                clientB, cancellationWinsId, "cancel-first", "Cancel", 0))
+                .GetProperty("message").GetProperty("status").GetString());
+            Assert.Equal("Stale", (await Resume(clientA, cancellationWinsId, cancellationWinsReceipt))
+                .GetProperty("message").GetProperty("status").GetString());
+            Assert.Equal("Cancelled", (await clientA.GetFromJsonAsync<JsonElement>(
+                $"/api/instances/{cancellationWinsId}")).GetProperty("currentState").GetString());
+
+            var recoveryBeforeCancelId = $"recover-cancel-{Guid.NewGuid():N}";
+            await CreateInstance(clientA, recoveryBeforeCancelId, "recovery-cancellation-race");
+            var recoveryBeforeCancelReceipt = await InterruptCommand(
+                recoveryBeforeCancelId, "recover-start-before-cancel-commit", "Start", 0);
+            Assert.Equal("Accepted", (await Resume(clientB, recoveryBeforeCancelId, recoveryBeforeCancelReceipt))
+                .GetProperty("message").GetProperty("status").GetString());
+            Assert.Equal("Accepted", (await SubmitCommand(
+                clientA, recoveryBeforeCancelId, "cancel-after-recovery", "Cancel", 1))
+                .GetProperty("message").GetProperty("status").GetString());
+            Assert.Equal("Cancelled", (await clientB.GetFromJsonAsync<JsonElement>(
+                $"/api/instances/{recoveryBeforeCancelId}")).GetProperty("currentState").GetString());
+
+            var timerWinsId = $"timer-wins-{Guid.NewGuid():N}";
+            var recoveryWinsTimerId = $"recover-timer-wins-{Guid.NewGuid():N}";
+            await CreateInstance(clientA, timerWinsId, "recovery-timer-test");
+            await CreateInstance(clientA, recoveryWinsTimerId, "recovery-timer-test");
+            Assert.Equal("Accepted", (await SubmitCommand(
+                clientA, timerWinsId, "timer-start-1", "Start", 0))
+                .GetProperty("message").GetProperty("status").GetString());
+            Assert.Equal("Accepted", (await SubmitCommand(
+                clientA, recoveryWinsTimerId, "timer-start-2", "Start", 0))
+                .GetProperty("message").GetProperty("status").GetString());
+            clock.Advance(TimeSpan.FromHours(12));
+            var timerWinsReceipt = await InterruptCommand(timerWinsId, "timer-race-recovery-1", "Start", 1);
+            var recoveryWinsTimerReceipt = await InterruptCommand(
+                recoveryWinsTimerId, "timer-race-recovery-2", "Start", 1);
+            Assert.Equal("Accepted", (await Resume(clientB, recoveryWinsTimerId, recoveryWinsTimerReceipt))
+                .GetProperty("message").GetProperty("status").GetString());
+            clock.Advance(TimeSpan.FromHours(12));
+
+            async Task<JsonElement[]> ProcessDueTimers(HttpClient client)
+            {
+                using var request = new HttpRequestMessage(HttpMethod.Post, "/api/test-controls/timers/process-due?limit=100");
+                request.Headers.Add("X-State-Machine-Trusted-Ingestion-Key", trustedKey);
+                using var response = await client.SendAsync(request);
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                return await response.Content.ReadFromJsonAsync<JsonElement[]>() ?? [];
+            }
+
+            var fired = await ProcessDueTimers(clientB);
+            Assert.Contains(fired, timer =>
+                timer.GetProperty("timer").GetProperty("instanceId").GetString() == timerWinsId &&
+                timer.GetProperty("timer").GetProperty("status").GetString() == "Fired");
+            Assert.Contains(fired, timer =>
+                timer.GetProperty("timer").GetProperty("instanceId").GetString() == recoveryWinsTimerId &&
+                timer.GetProperty("timer").GetProperty("status").GetString() == "Fired");
+            Assert.Equal("Stale", (await Resume(clientA, timerWinsId, timerWinsReceipt))
+                .GetProperty("message").GetProperty("status").GetString());
+            Assert.Empty(await ProcessDueTimers(clientA));
+
+            foreach (var (client, instanceId, expectedRevision) in new[]
+                     {
+                         (clientA, commandWinsId, 2L),
+                         (clientB, recoveryWinsId, 2L),
+                         (clientA, cancellationWinsId, 1L),
+                         (clientB, recoveryBeforeCancelId, 2L),
+                         (clientA, timerWinsId, 2L),
+                         (clientB, recoveryWinsTimerId, 3L)
+                     })
+            {
+                var replay = await client.GetFromJsonAsync<JsonElement>(
+                    $"/api/instances/{instanceId}/replay");
+                var timerEvidence = await client.GetFromJsonAsync<JsonElement[]>(
+                    $"/api/instances/{instanceId}/timers");
+                Assert.True(replay.GetProperty("outcome").GetString() == "Consistent",
+                    $"Replay for '{instanceId}' was inconsistent: {replay.GetProperty("integrityFindings").GetRawText()}; " +
+                    $"timers: {JsonSerializer.Serialize(timerEvidence)}");
+                var reconstructedRevision = replay.GetProperty("reconstructedRevision").GetInt64();
+                Assert.True(expectedRevision == reconstructedRevision,
+                    $"Unexpected reconstructed revision {reconstructedRevision} for '{instanceId}'.");
+                Assert.Empty(await client.GetFromJsonAsync<JsonElement[]>(
+                    $"/api/instances/{instanceId}/effects") ?? []);
+            }
+            Assert.Single(await clientA.GetFromJsonAsync<JsonElement[]>(
+                $"/api/instances/{timerWinsId}/timers") ?? []);
+            Assert.Equal(2, (await clientB.GetFromJsonAsync<JsonElement[]>(
+                $"/api/instances/{recoveryWinsTimerId}/timers") ?? []).Length);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("DURABLE_STATE_MACHINE_DB", previousDatabase);
+            Environment.SetEnvironmentVariable("DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS", previousControls);
+            Environment.SetEnvironmentVariable("DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY", previousKey);
+            SqliteConnection.ClearAllPools();
+            foreach (var path in new[] { database, $"{database}-wal", $"{database}-shm" })
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+        }
+    }
+
+    [Fact]
     public async Task Operating_system_process_termination_preserves_a_pending_external_effect()
     {
         const string trustedKey = "gate10-effect-process-test-key";
@@ -907,6 +1142,145 @@ public sealed class RecoveryReplayTests
         }
     }
 
+            [Fact]
+            public async Task Operating_system_process_termination_preserves_a_staged_harness_result_for_local_continuation()
+            {
+                const string trustedKey = "gate10-staged-result-process-test-key";
+                var database = Path.Combine(Path.GetTempPath(), $"dsm-process-staged-{Guid.NewGuid():N}.db");
+                var providerDirectory = Path.Combine(Path.GetTempPath(), $"dsm-process-staged-provider-{Guid.NewGuid():N}");
+                var apiAssembly = Path.Combine(AppContext.BaseDirectory, "DurableStateMachine.Api.dll");
+                var instanceId = $"process-staged-{Guid.NewGuid():N}";
+                const string operationId = "process-staged-operation";
+                Process? api = null;
+                Process? restartedApi = null;
+                HttpResponseMessage? interruptedResponse = null;
+                using var harness = new ControlledHarnessServer(GetUnusedPort());
+                try
+                {
+                    var firstPort = GetUnusedPort();
+                    api = StartApiProcess(apiAssembly, database, firstPort, trustedKey, providerDirectory, harness.BaseUrl);
+                    using (var client = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{firstPort}") })
+                    {
+                        await WaitForApiAsync(client, api);
+                        var definition = await File.ReadAllTextAsync(
+                            Path.Combine(AppContext.BaseDirectory, "definitions", "orion-v1.json"));
+                        Assert.Equal(HttpStatusCode.OK, (await client.PostAsync("/api/definitions", Json(definition))).StatusCode);
+                        Assert.Equal(HttpStatusCode.Created,
+                            (await client.PostAsJsonAsync("/api/instances", new
+                            {
+                                id = instanceId,
+                                definitionId = "orion-equipment-lease",
+                                definitionVersion = "3.0",
+                                facts = new
+                                {
+                                    documentsComplete = true,
+                                    riskScore = 75,
+                                    equipmentValue = 50000,
+                                    checksComplete = true,
+                                    eligibilityDecision = "Eligible",
+                                    cancellationPermitted = true
+                                }
+                            })).StatusCode);
+                        Assert.Equal(HttpStatusCode.OK,
+                            (await client.PostAsJsonAsync($"/api/instances/{instanceId}/commands", new
+                            {
+                                messageId = "stage-process-submit",
+                                type = "SubmitApplication",
+                                expectedRevision = 0
+                            })).StatusCode);
+                        Assert.Equal(HttpStatusCode.OK,
+                            (await client.PostAsync(
+                                $"/api/test-controls/inputs/{instanceId}/AfterExternalResultStagingCommit/pause",
+                                Json("{}"))).StatusCode);
+
+                        using var effectRequest = new HttpRequestMessage(
+                            HttpMethod.Post, $"/api/instances/{instanceId}/effects")
+                        {
+                            Content = JsonSerializerContent(new
+                            {
+                                operationId,
+                                capability = "offer-document",
+                                customerReference = "synthetic-customer",
+                                offerReference = "synthetic-offer"
+                            })
+                        };
+                        effectRequest.Headers.Add("X-State-Machine-Trusted-Ingestion-Key", trustedKey);
+                        var interruptedRequest = client.SendAsync(effectRequest);
+                        await WaitForPauseAsync(client, api,
+                            $"/api/test-controls/inputs/{instanceId}/AfterExternalResultStagingCommit/pause-status");
+                        Assert.Equal(1, harness.ExecutionPostCount);
+                        api.Kill(entireProcessTree: true);
+                        await api.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+                        try
+                        {
+                            interruptedResponse = await interruptedRequest.WaitAsync(TimeSpan.FromSeconds(10));
+                        }
+                        catch (HttpRequestException)
+                        {
+                        }
+                        catch (TaskCanceledException)
+                        {
+                        }
+                    }
+
+                    var secondPort = GetUnusedPort();
+                    restartedApi = StartApiProcess(
+                        apiAssembly, database, secondPort, trustedKey, providerDirectory, harness.BaseUrl);
+                    using (var restartedClient = new HttpClient { BaseAddress = new Uri($"http://127.0.0.1:{secondPort}") })
+                    {
+                        await WaitForApiAsync(restartedClient, restartedApi);
+                        var assessment = await restartedClient.GetFromJsonAsync<JsonElement>(
+                            $"/api/instances/{instanceId}/recovery");
+                        var stagedInRecovery = Assert.Single(
+                            assessment.GetProperty("unresolvedStagedObservations").EnumerateArray().ToArray());
+                        Assert.Equal("process-staged-operation",
+                            stagedInRecovery.GetProperty("workflowOperationId").GetString());
+                        var staged = Assert.Single(await restartedClient.GetFromJsonAsync<JsonElement[]>(
+                            $"/api/instances/{instanceId}/staged-observations") ?? []);
+                        var stagedId = staged.GetProperty("id").GetString()!;
+                        Assert.Equal("Received", staged.GetProperty("status").GetString());
+                        Assert.Equal("offer-document", staged.GetProperty("capability").GetString());
+                        Assert.Contains("\"documentId\":\"process-offer-document\"",
+                            staged.GetProperty("evidenceJson").GetString());
+
+                        using var resumed = await restartedClient.PostAsync(
+                            $"/api/instances/{instanceId}/staged-observations/{stagedId}/resume", content: null);
+                        Assert.Equal(HttpStatusCode.OK, resumed.StatusCode);
+                        using var resumedBody = JsonDocument.Parse(await resumed.Content.ReadAsStringAsync());
+                        Assert.Equal("Accepted", resumedBody.RootElement.GetProperty("message")
+                            .GetProperty("status").GetString());
+                        using var repeated = await restartedClient.PostAsync(
+                            $"/api/instances/{instanceId}/staged-observations/{stagedId}/resume", content: null);
+                        Assert.Equal(HttpStatusCode.OK, repeated.StatusCode);
+                        var history = await restartedClient.GetFromJsonAsync<JsonElement[]>(
+                            $"/api/instances/{instanceId}/history");
+                        Assert.Equal(2, history!.Length);
+                        Assert.Equal("AwaitingOfferAcceptance",
+                            (await restartedClient.GetFromJsonAsync<JsonElement>(
+                                $"/api/instances/{instanceId}")).GetProperty("currentState").GetString());
+                        Assert.Equal(1, harness.ExecutionPostCount);
+                    }
+                }
+                finally
+                {
+                    interruptedResponse?.Dispose();
+                    StopOwnedProcess(api);
+                    StopOwnedProcess(restartedApi);
+                    SqliteConnection.ClearAllPools();
+                    foreach (var path in new[] { database, $"{database}-wal", $"{database}-shm" })
+                    {
+                        if (File.Exists(path))
+                        {
+                            File.Delete(path);
+                        }
+                    }
+                    if (Directory.Exists(providerDirectory))
+                    {
+                        Directory.Delete(providerDirectory, recursive: true);
+                    }
+                }
+            }
+
     [Theory]
     [InlineData("AfterIntakeCommitBeforeEvaluation")]
     [InlineData("BeforeFinalPersistence")]
@@ -1017,7 +1391,8 @@ public sealed class RecoveryReplayTests
         string database,
         int port,
         string? trustedKey = null,
-        string? providerDirectory = null)
+        string? providerDirectory = null,
+        string? harnessBaseUrl = null)
     {
         var startInfo = new ProcessStartInfo("dotnet")
         {
@@ -1039,6 +1414,14 @@ public sealed class RecoveryReplayTests
         if (providerDirectory is not null)
         {
             startInfo.Environment["DURABLE_STATE_MACHINE_PROVIDER_DB_DIR"] = providerDirectory;
+        }
+        if (harnessBaseUrl is not null)
+        {
+            startInfo.Environment["Harness__BaseUrl"] = harnessBaseUrl;
+            startInfo.Environment["Harness__Capabilities__offer-document__ProviderIdentity"] = "synthetic-offer-provider";
+            startInfo.Environment["Harness__Capabilities__offer-document__ProviderId"] = "11111111-1111-1111-1111-111111111111";
+            startInfo.Environment["Harness__Capabilities__offer-document__ApiDescriptionVersionId"] = "22222222-2222-2222-2222-222222222222";
+            startInfo.Environment["Harness__Capabilities__offer-document__OperationKey"] = "PUT:/offers/{operationId}";
         }
         var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Failed to start the API child process.");
         _ = process.StandardOutput.ReadToEndAsync();
@@ -1140,6 +1523,182 @@ public sealed class RecoveryReplayTests
             process.WaitForExit(10_000);
         }
         process.Dispose();
+    }
+
+    private sealed class MutableTimeProvider(DateTimeOffset initialTime) : TimeProvider
+    {
+        private DateTimeOffset _utcNow = initialTime.ToUniversalTime();
+
+        public override DateTimeOffset GetUtcNow() => _utcNow;
+
+        public void Advance(TimeSpan duration) => _utcNow = _utcNow.Add(duration);
+    }
+
+    private sealed class ControlledHarnessServer : IDisposable
+    {
+        private const string ExecutionId = "child-process-harness-execution";
+        private readonly HttpListener _listener = new();
+        private readonly CancellationTokenSource _shutdown = new();
+        private readonly Task _serveTask;
+        private string? _executionJson;
+        private int _executionPostCount;
+
+        public ControlledHarnessServer(int port)
+        {
+            BaseUrl = $"http://127.0.0.1:{port}/";
+            _listener.Prefixes.Add(BaseUrl);
+            _listener.Start();
+            _serveTask = ServeAsync();
+        }
+
+        public string BaseUrl { get; }
+        public int ExecutionPostCount => Volatile.Read(ref _executionPostCount);
+
+        public void Dispose()
+        {
+            _shutdown.Cancel();
+            _listener.Stop();
+            _listener.Close();
+            try
+            {
+                _serveTask.GetAwaiter().GetResult();
+            }
+            catch (HttpListenerException)
+            {
+            }
+            _shutdown.Dispose();
+        }
+
+        private async Task ServeAsync()
+        {
+            while (!_shutdown.IsCancellationRequested)
+            {
+                HttpListenerContext context;
+                try
+                {
+                    context = await _listener.GetContextAsync().WaitAsync(_shutdown.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch (HttpListenerException)
+                {
+                    return;
+                }
+                await HandleAsync(context);
+            }
+        }
+
+        private async Task HandleAsync(HttpListenerContext context)
+        {
+            var path = context.Request.Url?.AbsolutePath ?? "";
+            string response;
+            if (path.EndsWith("/callable-operations", StringComparison.Ordinal))
+            {
+                response = """
+                    [{"id":"child-operation","key":"PUT:/offers/{operationId}","replaySafety":0}]
+                    """;
+            }
+            else if (path == "/executions" && context.Request.HttpMethod == "POST")
+            {
+                using var request = await JsonDocument.ParseAsync(context.Request.InputStream);
+                var input = request.RootElement;
+                Interlocked.Increment(ref _executionPostCount);
+                var execution = JsonSerializer.Serialize(new
+                {
+                    id = ExecutionId,
+                    providerId = input.GetProperty("providerId").GetString(),
+                    apiDescriptionVersionId = input.GetProperty("apiDescriptionVersionId").GetString(),
+                    operationKey = input.GetProperty("operationKey").GetString(),
+                    credentialBindingId = (string?)null,
+                    idempotencyKey = input.GetProperty("idempotencyKey").GetString(),
+                    state = 2,
+                    requestedAt = "2026-10-20T12:00:00Z",
+                    startedAt = "2026-10-20T12:00:00Z",
+                    completedAt = "2026-10-20T12:00:01Z",
+                    rejectionReason = (int?)null,
+                    failureCode = (string?)null,
+                    failureMessage = (string?)null,
+                    responseStatusCode = 200,
+                    mutationSafety = 0,
+                    idempotencyDecision = 0
+                });
+                lock (_listener)
+                {
+                    _executionJson = execution;
+                }
+                var providerResponse = JsonSerializer.Serialize(new
+                {
+                    outcome = "Succeeded",
+                    effectId = "child-process-effect",
+                    evidence = new
+                    {
+                        documentId = "process-offer-document",
+                        offerDigest = "sha256:child-process"
+                    },
+                    occurredAt = "2026-10-20T12:00:01Z"
+                });
+                response = JsonSerializer.Serialize(new
+                {
+                    execution = JsonDocument.Parse(execution).RootElement,
+                    providerResponse = new
+                    {
+                        statusCode = 200,
+                        contentType = "application/json",
+                        body = providerResponse,
+                        truncated = false
+                    }
+                });
+                context.Response.StatusCode = (int)HttpStatusCode.Created;
+            }
+            else if (path.EndsWith("/attempts", StringComparison.Ordinal))
+            {
+                response = """[{"id":"child-harness-attempt"}]""";
+            }
+            else if (path.EndsWith("/evidence", StringComparison.Ordinal))
+            {
+                response = """[{"id":"child-harness-evidence"}]""";
+            }
+            else if (path.EndsWith("/inspection", StringComparison.Ordinal))
+            {
+                var execution = GetExecutionJson();
+                response = JsonSerializer.Serialize(new
+                {
+                    execution = JsonDocument.Parse(execution).RootElement,
+                    outcomeConfidence = "ObservedAndValidated",
+                    operation = new { replaySafety = 0 }
+                });
+            }
+            else if (path.EndsWith("/replay", StringComparison.Ordinal))
+            {
+                response = """{"providerCalled":false,"replayDecision":0}""";
+            }
+            else if (path.StartsWith("/executions/", StringComparison.Ordinal))
+            {
+                response = GetExecutionJson();
+            }
+            else
+            {
+                context.Response.StatusCode = (int)HttpStatusCode.NotFound;
+                response = """{"error":"not found"}""";
+            }
+
+            var bytes = Encoding.UTF8.GetBytes(response);
+            context.Response.ContentType = "application/json";
+            context.Response.ContentLength64 = bytes.Length;
+            await context.Response.OutputStream.WriteAsync(bytes);
+            context.Response.Close();
+        }
+
+        private string GetExecutionJson()
+        {
+            lock (_listener)
+            {
+                return _executionJson ?? throw new InvalidOperationException(
+                    "The controlled harness was inspected before execution creation.");
+            }
+        }
     }
 
     private sealed class CountingExternalHandler : HttpMessageHandler

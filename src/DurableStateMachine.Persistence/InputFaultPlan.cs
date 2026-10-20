@@ -12,7 +12,13 @@ public sealed class InputFaultPlan
         "AfterIntakeCommitBeforeEvaluation",
         "DuringGuardEvaluation",
         "BeforeFinalPersistence",
-        "DuringProjectionUpdate"
+        "DuringProjectionUpdate",
+        "BeforeExternalResultStaging",
+        "DuringExternalResultStagingPersistence",
+        "AfterExternalResultStagingCommit",
+        "BeforeStagedObservationEvaluation",
+        "DuringStagedObservationFinalization",
+        "AfterStagedObservationCommit"
     ];
 
     public void Arm(string instanceId, string point)

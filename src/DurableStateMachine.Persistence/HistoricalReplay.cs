@@ -184,59 +184,78 @@ public static class HistoricalReplay
                     "An inbound receipt references an attempt that is not present in the inspected snapshot.",
                     [receipt.Id, receipt.AttemptId]));
             }
-            var historyById = history.ToDictionary(entry => entry.Id, StringComparer.Ordinal);
-            foreach (var timer in timers)
+        }
+
+        var historyById = history.ToDictionary(entry => entry.Id, StringComparer.Ordinal);
+        foreach (var timer in timers)
+        {
+            var timerDeclaration = definition.Timers.SingleOrDefault(item => item.Id == timer.TimerDeclarationId);
+            if (timerDeclaration is null)
             {
-                var timerDeclaration = definition.Timers.SingleOrDefault(item => item.Id == timer.TimerDeclarationId);
-                if (timerDeclaration is null)
+                findings.Add(new("timer-declaration-missing",
+                    "A durable timer does not match a timer declaration in the bound definition.", [$"timer:{timer.Id}"]));
+            }
+            if (!historyById.TryGetValue(timer.OriginTransitionHistoryId, out var originHistory))
+            {
+                findings.Add(new("timer-origin-transition-missing",
+                    "A durable timer references an origin transition that is not present in accepted history.",
+                    [$"timer:{timer.Id}", timer.OriginTransitionHistoryId]));
+            }
+            else if (originHistory.TransitionId != timer.OriginTransitionId ||
+                     originHistory.Event != timer.OriginEvent ||
+                     originHistory.RevisionAfter != timer.OriginRevision)
+            {
+                findings.Add(new("timer-origin-transition-mismatch",
+                    "A durable timer's origin identity, event or revision disagrees with accepted history.",
+                    [$"timer:{timer.Id}", originHistory.Id]));
+            }
+            if (timer.DefinitionId != instance.DefinitionId || timer.DefinitionVersion != instance.DefinitionVersion)
+            {
+                findings.Add(new("timer-definition-binding-mismatch",
+                    "A durable timer does not match the instance's immutable definition binding.", [$"timer:{timer.Id}"]));
+            }
+            if (timer.AttemptId is not null && !attemptsById.ContainsKey(timer.AttemptId))
+            {
+                findings.Add(new("timer-attempt-missing",
+                    "A processed timer references an attempt that is not present in the inspected snapshot.",
+                    [$"timer:{timer.Id}", timer.AttemptId]));
+            }
+            else if (timer.AttemptId is not null && timerDeclaration is not null &&
+                     attemptsById[timer.AttemptId].Event != timerDeclaration.Event)
+            {
+                findings.Add(new("timer-event-mismatch",
+                    "A timer's processing attempt does not use its bound timer event.", [$"timer:{timer.Id}", timer.AttemptId]));
+            }
+            if (timer.ResultTransitionId is { } resultTransitionId)
+            {
+                if (!historyById.TryGetValue(resultTransitionId, out var timerHistory))
                 {
-                    findings.Add(new("timer-declaration-missing",
-                        "A durable timer does not match a timer declaration in the bound definition.", [$"timer:{timer.Id}"]));
+                    findings.Add(new("timer-result-transition-missing",
+                        "A timer's result or cancellation transition is missing from accepted history.",
+                        [$"timer:{timer.Id}", resultTransitionId]));
                 }
-                if (!historyById.TryGetValue(timer.OriginTransitionHistoryId, out var originHistory))
+                else
                 {
-                    findings.Add(new("timer-origin-transition-missing",
-                        "A durable timer references an origin transition that is not present in accepted history.",
-                        [$"timer:{timer.Id}", timer.OriginTransitionHistoryId]));
+                    var validCancellation = timer.Status == "Cancelled" &&
+                        timer.AttemptId is null &&
+                        timerDeclaration is not null &&
+                        (timerHistory.NewState != timerDeclaration.WhileState ||
+                         timerDeclaration.CancelOnTransitions.Contains(timerHistory.TransitionId, StringComparer.Ordinal));
+                    var validFiring = timer.Status == "Fired" &&
+                        timer.AttemptId == timerHistory.AttemptId &&
+                        timer.AttemptId is not null;
+                    if (!validCancellation && !validFiring)
+                    {
+                        findings.Add(new("timer-result-transition-mismatch",
+                            "The timer result does not link to a matching firing attempt or declared cancellation transition.",
+                            [$"timer:{timer.Id}", resultTransitionId]));
+                    }
                 }
-                else if (originHistory.TransitionId != timer.OriginTransitionId ||
-                         originHistory.Event != timer.OriginEvent ||
-                         originHistory.RevisionAfter != timer.OriginRevision)
-                {
-                    findings.Add(new("timer-origin-transition-mismatch",
-                        "A durable timer's origin identity, event or revision disagrees with accepted history.",
-                        [$"timer:{timer.Id}", originHistory.Id]));
-                }
-                if (timer.DefinitionId != instance.DefinitionId || timer.DefinitionVersion != instance.DefinitionVersion)
-                {
-                    findings.Add(new("timer-definition-binding-mismatch",
-                        "A durable timer does not match the instance's immutable definition binding.", [$"timer:{timer.Id}"]));
-                }
-                if (timer.AttemptId is not null && !attemptsById.ContainsKey(timer.AttemptId))
-                {
-                    findings.Add(new("timer-attempt-missing",
-                        "A processed timer references an attempt that is not present in the inspected snapshot.",
-                        [$"timer:{timer.Id}", timer.AttemptId]));
-                }
-                else if (timer.AttemptId is not null && timerDeclaration is not null &&
-                         attemptsById[timer.AttemptId].Event != timerDeclaration.Event)
-                {
-                    findings.Add(new("timer-event-mismatch",
-                        "A timer's processing attempt does not use its bound timer event.", [$"timer:{timer.Id}", timer.AttemptId]));
-                }
-                if (timer.ResultTransitionId is not null &&
-                    (!historyById.TryGetValue(timer.ResultTransitionId, out var timerHistory) ||
-                     timer.AttemptId != timerHistory.AttemptId))
-                {
-                    findings.Add(new("timer-result-transition-mismatch",
-                        "The timer result does not link to a matching accepted transition and attempt.",
-                        [$"timer:{timer.Id}", timer.ResultTransitionId]));
-                }
-                if (timer.Status == "Fired" && timer.ResultTransitionId is null)
-                {
-                    findings.Add(new("fired-timer-transition-missing",
-                        "A timer is marked fired without a linked accepted transition.", [$"timer:{timer.Id}"]));
-                }
+            }
+            if (timer.Status == "Fired" && timer.ResultTransitionId is null)
+            {
+                findings.Add(new("fired-timer-transition-missing",
+                    "A timer is marked fired without a linked accepted transition.", [$"timer:{timer.Id}"]));
             }
         }
 
@@ -448,6 +467,7 @@ public sealed record RecoveryAssessment(
     HistoricalReplayReport Replay,
     IReadOnlyList<string> Reasons,
     IReadOnlyList<RecoveryInput> PendingLocalInputs,
+    IReadOnlyList<RecoveryStagedObservation> UnresolvedStagedObservations,
     IReadOnlyList<RecoveryEffect> OutstandingEffects,
     IReadOnlyList<RecoveryTimer> Timers,
     IReadOnlyList<RecoveryExpectedOperation> ExpectedOperations);
@@ -457,6 +477,15 @@ public sealed record RecoveryInput(
     string Status,
     string ReasonCode,
     string? AttemptId,
+    string RecoveryGuidance);
+
+public sealed record RecoveryStagedObservation(
+    string StagedResultId,
+    string ExpectedOperationId,
+    string WorkflowOperationId,
+    string HarnessExecutionId,
+    string Status,
+    string PayloadDigest,
     string RecoveryGuidance);
 
 public sealed record RecoveryEffect(
