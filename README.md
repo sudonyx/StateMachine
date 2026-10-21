@@ -1,6 +1,6 @@
 # Durable State Machine
 
-A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 7 routes synthetic Orion effects through the independently running Generic Harness and retains durable correlation between harness execution evidence and Gate 5 workflow transitions. Gate 8 adds versioned declarative timers, persisted UTC deadlines, atomic timer lifecycle updates, explicit due processing and restart recovery. Gate 9 strengthens input identity and revision arbitration across independent API hosts sharing SQLite, and adds a reproducible adversarial corpus and runner. Gate 10 adds read-only historical reconstruction, decision verification from stored evidence, projection-integrity reporting, recovery assessment, durable pre-evaluation intake, verified external-result staging and explicit safe continuation. It does not replay external effects or claim recovery of requests/results lost before their respective local durable commits. Gate 6's direct provider path remains available only for development/test comparison. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
+A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 7 routes synthetic Orion effects through the independently running Generic Harness and retains durable correlation between harness execution evidence and Gate 5 workflow transitions. Gate 8 adds versioned declarative timers, persisted UTC deadlines, atomic timer lifecycle updates, explicit due processing and restart recovery. Gate 9 strengthens input identity and revision arbitration across independent API hosts sharing SQLite, and adds a reproducible adversarial corpus and runner. Gate 10 adds read-only historical reconstruction, decision verification from stored evidence, projection-integrity reporting, recovery assessment, durable pre-evaluation intake, verified external-result staging and explicit safe continuation. Gate 11 adds immutable Orion 5.0 alongside 4.0, explicit bounded migration with administrative authorization, and replay across definition epochs. It does not automatically select versions by date, transform facts, migrate pending work or implement every amendment. Gate 6's direct provider path remains available only for development/test comparison. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
 
 ## Requirements, build and tests
 
@@ -14,7 +14,7 @@ dotnet test DurableStateMachine.slnx
 ## Solution structure
 
 - `src/DurableStateMachine.Core/` — definition loading, validation, typed facts and pure deterministic evaluation.
-- `src/DurableStateMachine.Persistence/` — EF Core SQLite records and transactional runtime/input/effect-intent/timer operations.
+- `src/DurableStateMachine.Persistence/` — EF Core SQLite records and transactional runtime/input/effect-intent/timer/migration operations.
 - `src/DurableStateMachine.Api/` — HTTP endpoints, Gate 7 harness adapter, Gate 8 timer processor, development-only Gate 6 direct coordinator, synthetic provider stores, DTOs, error mapping and generated OpenAPI document.
 - `src/DurableStateMachine.ProviderHost/` — independently runnable HTTP host for each synthetic provider capability and its generated OpenAPI description.
 - `clients/DurableStateMachine.Cli/` — generic command-line HTTP client.
@@ -25,7 +25,7 @@ dotnet test DurableStateMachine.slnx
 - `test-data/` — fixed 5,000-delivery Orion adversarial corpus.
 - `definitions/` — Orion and document-review examples.
 - `docs/` — supported language, API and design documentation.
-- `references/` — qualification brief and fictional Orion requirements source.
+- `reference/` — qualification brief and fictional Orion requirements source.
 
 ## Start the API
 
@@ -59,9 +59,27 @@ dotnet run --project clients\DurableStateMachine.Cli -- attempts $id
 dotnet run --project clients\DurableStateMachine.Cli -- history $id
 ```
 
-The CLI supports `register`, `definitions`, `create`, `inspect`, `send`, `attempts`, `history`, `receipts`, `expected-operations`, `timers`, `effects`, `replay`, `verify-decisions` and `recovery`. `create` accepts optional inline scalar facts or `@path-to-json-file` (the latter avoids shell quoting problems). Configure the base URL with `DURABLE_STATE_MACHINE_API_URL` or pass `--url http://host:port` before the command. Workflow rejections are returned as readable `200 OK` result envelopes with reason codes; malformed requests and unknown resources use HTTP error statuses.
+The CLI supports `register`, `definitions`, `create`, `inspect`, `send`, `attempts`, `history`, `receipts`, `expected-operations`, `timers`, `effects`, `replay`, `verify-decisions`, `recovery`, `migrate-preview`, `migrate` and `migrations`. `create` accepts optional inline scalar facts or `@path-to-json-file` (the latter avoids shell quoting problems). Configure the base URL with `DURABLE_STATE_MACHINE_API_URL` or pass `--url http://host:port` before the command. Workflow rejections are returned as readable `200 OK` result envelopes with reason codes; malformed requests and unknown resources use HTTP error statuses.
 
 The REST routes and request/response examples are in [gate-3-api.md](./docs/gate-3-api.md). The underlying machine format is documented in [state-machine-language-v1.md](./docs/state-machine-language-v1.md).
+
+## Gate 11 definition evolution
+
+Register [Orion 5.0](./definitions/orion-v5.json) without replacing [Orion 4.0](./definitions/orion-v4.json). Existing instances remain pinned to their creation version. The training API exposes a read-only migration preview and a controlled, durable migration endpoint. Execution is restricted to Development and requires `DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY`; the shared key is not production IAM.
+
+The only successful migration contract is Orion 4.0 `Draft` to Orion 5.0 `Draft`, with no outstanding timer or external/local work. A refused attempt is durably inspectable and does not change workflow state or accepted history. Replay validates the exact definition digest for each epoch. For example, after registering both definitions:
+
+```powershell
+$env:DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY = "<local-development-key>"
+dotnet run --project clients\DurableStateMachine.Cli -- migrate-preview <instance-id> `
+  orion-equipment-lease 4.0 orion-equipment-lease 5.0 0 <migration-id> "approved training migration"
+dotnet run --project clients\DurableStateMachine.Cli -- migrate <instance-id> `
+  orion-equipment-lease 4.0 orion-equipment-lease 5.0 0 <migration-id> "approved training migration"
+dotnet run --project clients\DurableStateMachine.Cli -- migrations <instance-id>
+dotnet run --project clients\DurableStateMachine.Cli -- replay <instance-id>
+```
+
+V5 implements a bounded subset of the fictional amendment pack, including preliminary offer review, a five-day new-offer expiry, seven-day follow-up for newly created v5 requests, Specialist Assessment terminology and an explicit cancellation-review fact. The runtime does not enforce effective dates or establish that caller-supplied per-attempt facts are true. See [gate-11-design.md](./docs/gate-11-design.md), [gate-11-amendment-traceability.md](./docs/gate-11-amendment-traceability.md), [gate-11-test-results.md](./docs/gate-11-test-results.md), and [orion-definition-v5.md](./docs/orion-definition-v5.md) for details and unsupported requirements.
 
 ## Gate 10 recovery inspection
 

@@ -78,6 +78,30 @@ For a successful verified Generic Harness result, the trusted adapter first comm
 
 The generic CLI supports `receipts`, `expected-operations`, `timers`, `effects`, `replay`, `verify-decisions` and `recovery` commands for inspection. See [gate-10-design.md](./gate-10-design.md) and [gate-10-crash-matrix.md](./gate-10-crash-matrix.md) for evidence boundaries and limitations.
 
+## Gate 11 definition versions and migration
+
+`POST /api/definitions` still registers exact immutable versions. `GET /api/definitions` lists all retained versions; `GET /api/definitions/{id}/{version}` returns the exact stored definition and digest. Creating an instance requires an explicit `definitionId` and `definitionVersion`. Registration does not alter any instance.
+
+`POST /api/instances/{id}/migration-preview` performs a read-only eligibility check. `POST /api/instances/{id}/migrations` executes a validated migration only when the API runs in Development and the request has the configured `X-State-Machine-Trusted-Ingestion-Key`. Both take:
+
+```json
+{
+  "migrationId": "mig-2027-0001",
+  "sourceDefinitionId": "orion-equipment-lease",
+  "sourceDefinitionVersion": "4.0",
+  "targetDefinitionId": "orion-equipment-lease",
+  "targetDefinitionVersion": "5.0",
+  "expectedRevision": 0,
+  "authorisationReason": "Approved early-draft migration for demonstration"
+}
+```
+
+The API currently resolves only the registered `orion-4-to-5-early-draft@1` contract, mapping `Draft` to `Draft`. It refuses unknown targets, unsupported pairs/states, changed bindings/revisions, incompatible state transitions, terminal states, required-fact gaps and outstanding local/external work. Preview returns `Eligible` or `Refused` with findings and does not persist. Execution returns `200 OK` with a `Committed` or `Refused` migration record and the current instance projection. A refused execution is durably recorded; it changes no state, definition binding, revision, accepted history, timer or effect. Reusing a migration ID with changed request content returns `409 Conflict`.
+
+`GET /api/instances/{id}/migrations` inspects committed and refused attempts. The stored reason is operator-provided audit text; authorization is established by the application boundary, not by the reason or a caller-supplied Boolean. The shared training key is not production IAM. The CLI commands are `migrate-preview`, `migrate`, and `migrations`; set `DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY` for execution.
+
+Replay starts from the first committed epoch's exact retained definition and verifies each migration boundary and digest before checking transitions in that epoch. Timers are checked against their original definition identity and persisted deadlines. See [gate-11-design.md](./gate-11-design.md) and [gate-11-amendment-traceability.md](./gate-11-amendment-traceability.md).
+
 ## Durable timers
 
 Timed definitions schedule timers atomically with an accepted triggering transition. Timer due times are persisted UTC instants; they are not recalculated when the API restarts or when a newer definition version is registered.

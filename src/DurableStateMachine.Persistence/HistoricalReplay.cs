@@ -11,7 +11,8 @@ public static class HistoricalReplay
 
     public static HistoricalReplayReport Reconstruct(
         InstanceRecord instance,
-        DefinitionRecord? definitionRecord,
+        IReadOnlyList<DefinitionRecord> definitionRecords,
+        IReadOnlyList<MigrationRecord> migrations,
         IReadOnlyList<TransitionHistoryRecord> history,
         IReadOnlyList<InputAttemptRecord> attempts,
         IReadOnlyList<InboundMessageRecord> receipts,
@@ -19,10 +20,18 @@ public static class HistoricalReplay
         bool verifyDecisions)
     {
         var mode = verifyDecisions ? "DecisionVerification" : "StateReconstruction";
-        if (definitionRecord is null)
+        var definitionsByIdentity = definitionRecords.ToDictionary(
+            record => (record.Id, record.Version));
+        var committedMigrations = migrations
+            .Where(item => item.Status == "Committed")
+            .OrderBy(item => item.SourceRevision).ThenBy(item => item.CommittedAt).ThenBy(item => item.Id)
+            .ToArray();
+        var initialDefinitionId = committedMigrations.FirstOrDefault()?.SourceDefinitionId ?? instance.DefinitionId;
+        var initialDefinitionVersion = committedMigrations.FirstOrDefault()?.SourceDefinitionVersion ?? instance.DefinitionVersion;
+        if (!definitionsByIdentity.TryGetValue((initialDefinitionId, initialDefinitionVersion), out var definitionRecord))
         {
             return Unavailable(instance, mode, "UnsupportedHistoricalFormat",
-                "bound-definition-missing", "The exact immutable definition version bound to the instance is unavailable.");
+                "historical-definition-missing", "An exact definition version required by this instance's history is unavailable.");
         }
 
         MachineDefinition definition;
@@ -38,11 +47,11 @@ public static class HistoricalReplay
 
         var findings = new List<ReplayFinding>();
         var decisionFindings = new List<DecisionVerificationFinding>();
-        if (definition.Id != instance.DefinitionId || definition.Version != instance.DefinitionVersion ||
-            definitionRecord.Id != instance.DefinitionId || definitionRecord.Version != instance.DefinitionVersion)
+        if (definition.Id != initialDefinitionId || definition.Version != initialDefinitionVersion ||
+            definitionRecord.Id != initialDefinitionId || definitionRecord.Version != initialDefinitionVersion)
         {
             findings.Add(new("definition-binding-mismatch",
-                "The stored definition identity does not match the instance's immutable definition binding.", []));
+                "The stored definition identity does not match the first definition epoch.", []));
         }
         var definitionDigest = Convert.ToHexString(
             SHA256.HashData(Encoding.UTF8.GetBytes(definitionRecord.DefinitionJson)));
@@ -53,6 +62,9 @@ public static class HistoricalReplay
                 "The stored definition digest or language-version metadata does not agree with the immutable definition JSON.", []));
         }
 
+        var initialState = definition.InitialState;
+        var activeDefinition = definition;
+        var activeDefinitionRecord = definitionRecord;
         var attemptsById = attempts.ToDictionary(attempt => attempt.Id, StringComparer.Ordinal);
         var historiesByAttempt = history.GroupBy(entry => entry.AttemptId, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
@@ -68,13 +80,80 @@ public static class HistoricalReplay
         var evidenceReferences = attempts.Select(attempt => $"attempt:{attempt.Id}")
             .Concat(receipts.Select(receipt => $"receipt:{receipt.Id}"))
             .Concat(timers.Select(timer => $"timer:{timer.Id}"))
+            .Concat(migrations.Select(migration => $"migration:{migration.Id}"))
             .ToList();
         var state = definition.InitialState;
         var expectedRevision = 0L;
         var seenRevisions = new HashSet<long>();
+        var appliedMigrationIds = new HashSet<string>(StringComparer.Ordinal);
+
+        void ApplyMigrationsAtRevision(long revision)
+        {
+            foreach (var migration in committedMigrations.Where(item =>
+                         item.SourceRevision == revision && !appliedMigrationIds.Contains(item.Id)))
+            {
+                evidenceReferences.Add($"migration:{migration.Id}");
+                appliedMigrationIds.Add(migration.Id);
+                var valid = migration.SourceRevision == migration.TargetRevision &&
+                            migration.ExpectedRevision == migration.SourceRevision &&
+                            migration.SourceRevision == revision &&
+                            migration.SourceDefinitionId == activeDefinition.Id &&
+                            migration.SourceDefinitionVersion == activeDefinition.Version &&
+                            migration.SourceState == state &&
+                            migration.AuthorisationContext == "configured-controlled-administration" &&
+                            migration.Outcome == "migration-committed";
+                if (!definitionsByIdentity.TryGetValue(
+                        (migration.SourceDefinitionId, migration.SourceDefinitionVersion), out var sourceRecord) ||
+                    !definitionsByIdentity.TryGetValue(
+                        (migration.TargetDefinitionId, migration.TargetDefinitionVersion), out var targetRecord))
+                {
+                    findings.Add(new("migration-definition-missing",
+                        "A committed migration references a definition that is no longer retained.", [$"migration:{migration.Id}"]));
+                    continue;
+                }
+                if (sourceRecord.ContentDigest != migration.SourceDefinitionDigest ||
+                    targetRecord.ContentDigest != migration.TargetDefinitionDigest ||
+                    ComputeDigest(sourceRecord.DefinitionJson) != migration.SourceDefinitionDigest ||
+                    ComputeDigest(targetRecord.DefinitionJson) != migration.TargetDefinitionDigest)
+                {
+                    findings.Add(new("migration-definition-digest-mismatch",
+                        "A committed migration's source or target definition digest does not match retained content.",
+                        [$"migration:{migration.Id}"]));
+                    continue;
+                }
+                try
+                {
+                    var source = MachineDefinitionLoader.Load(sourceRecord.DefinitionJson);
+                    var target = MachineDefinitionLoader.Load(targetRecord.DefinitionJson);
+                    valid &= source.States.TryGetValue(migration.SourceState, out var sourceState) &&
+                             !sourceState.IsTerminal &&
+                             target.States.TryGetValue(migration.TargetState, out var targetState) &&
+                             !targetState.IsTerminal &&
+                             !string.IsNullOrWhiteSpace(migration.PlanId) &&
+                             !string.IsNullOrWhiteSpace(migration.PlanVersion);
+                    if (!valid)
+                    {
+                        findings.Add(new("migration-boundary-invalid",
+                            "The migration record does not establish a valid definition, state, revision, or authorisation boundary.",
+                            [$"migration:{migration.Id}"]));
+                        continue;
+                    }
+                    state = migration.TargetState;
+                    activeDefinition = target;
+                    activeDefinitionRecord = targetRecord;
+                }
+                catch (MachineDefinitionException exception)
+                {
+                    findings.Add(new("migration-definition-invalid",
+                        $"A definition required at the migration boundary is invalid: {exception.Message}",
+                        [$"migration:{migration.Id}"]));
+                }
+            }
+        }
 
         foreach (var entry in history.OrderBy(item => item.RevisionAfter).ThenBy(item => item.Id, StringComparer.Ordinal))
         {
+            ApplyMigrationsAtRevision(expectedRevision);
             evidenceReferences.Add($"history:{entry.Id}");
             if (receiptsByAttempt.TryGetValue(entry.AttemptId, out var linkedReceipts))
             {
@@ -104,24 +183,24 @@ public static class HistoricalReplay
                 findings.Add(new("state-discontinuity",
                     $"Expected previous state '{state}', found '{entry.PreviousState}'.", [entry.Id]));
             }
-            if (!definition.States.ContainsKey(entry.PreviousState) || !definition.States.ContainsKey(entry.NewState))
+            if (!activeDefinition.States.ContainsKey(entry.PreviousState) || !activeDefinition.States.ContainsKey(entry.NewState))
             {
                 findings.Add(new("state-not-in-bound-definition",
                     "The accepted transition contains a state not declared by the bound definition.", [entry.Id]));
             }
-            if (definition.States.TryGetValue(state, out var priorState) && priorState.IsTerminal)
+            if (activeDefinition.States.TryGetValue(state, out var priorState) && priorState.IsTerminal)
             {
                 findings.Add(new("transition-after-terminal-state",
                     $"History contains a transition after terminal state '{state}'.", [entry.Id]));
             }
             if (entry.InstanceId != instance.Id ||
-                entry.DefinitionId != instance.DefinitionId ||
-                entry.DefinitionVersion != instance.DefinitionVersion)
+                entry.DefinitionId != activeDefinition.Id ||
+                entry.DefinitionVersion != activeDefinition.Version)
             {
                 findings.Add(new("transition-definition-binding-mismatch",
                     "The history row belongs to a different instance or definition version.", [entry.Id]));
             }
-            var declaredTransition = definition.Transitions.SingleOrDefault(item => item.Id == entry.TransitionId);
+            var declaredTransition = activeDefinition.Transitions.SingleOrDefault(item => item.Id == entry.TransitionId);
             if (declaredTransition is null ||
                 declaredTransition.Source != entry.PreviousState ||
                 declaredTransition.Event != entry.Event ||
@@ -153,12 +232,19 @@ public static class HistoricalReplay
 
                 if (verifyDecisions)
                 {
-                    decisionFindings.Add(VerifyDecision(attempt, entry, definition));
+                    decisionFindings.Add(VerifyDecision(attempt, entry, activeDefinition));
                 }
             }
 
             expectedRevision++;
             state = entry.NewState;
+        }
+
+        ApplyMigrationsAtRevision(expectedRevision);
+        foreach (var migration in committedMigrations.Where(item => !appliedMigrationIds.Contains(item.Id)))
+        {
+            findings.Add(new("migration-boundary-revision-mismatch",
+                "A committed migration does not occur at a reconstructed revision boundary.", [$"migration:{migration.Id}"]));
         }
 
         foreach (var attempt in attempts.Where(item => item.Status == EvaluationStatus.Accepted.ToString()))
@@ -189,11 +275,27 @@ public static class HistoricalReplay
         var historyById = history.ToDictionary(entry => entry.Id, StringComparer.Ordinal);
         foreach (var timer in timers)
         {
-            var timerDeclaration = definition.Timers.SingleOrDefault(item => item.Id == timer.TimerDeclarationId);
+            var timerDefinition = definitionsByIdentity.GetValueOrDefault(
+                (timer.DefinitionId, timer.DefinitionVersion));
+            MachineDefinition? parsedTimerDefinition = null;
+            if (timerDefinition is not null)
+            {
+                try
+                {
+                    parsedTimerDefinition = MachineDefinitionLoader.Load(timerDefinition.DefinitionJson);
+                }
+                catch (MachineDefinitionException)
+                {
+                    findings.Add(new("timer-definition-invalid",
+                        "A timer references a definition that cannot be loaded.", [$"timer:{timer.Id}"]));
+                }
+            }
+            var timerDeclaration = parsedTimerDefinition?.Timers.SingleOrDefault(
+                item => item.Id == timer.TimerDeclarationId);
             if (timerDeclaration is null)
             {
                 findings.Add(new("timer-declaration-missing",
-                    "A durable timer does not match a timer declaration in the bound definition.", [$"timer:{timer.Id}"]));
+                    "A durable timer does not match a timer declaration in its recorded definition epoch.", [$"timer:{timer.Id}"]));
             }
             if (!historyById.TryGetValue(timer.OriginTransitionHistoryId, out var originHistory))
             {
@@ -203,16 +305,19 @@ public static class HistoricalReplay
             }
             else if (originHistory.TransitionId != timer.OriginTransitionId ||
                      originHistory.Event != timer.OriginEvent ||
-                     originHistory.RevisionAfter != timer.OriginRevision)
+                     originHistory.RevisionAfter != timer.OriginRevision ||
+                     originHistory.DefinitionId != timer.DefinitionId ||
+                     originHistory.DefinitionVersion != timer.DefinitionVersion)
             {
                 findings.Add(new("timer-origin-transition-mismatch",
                     "A durable timer's origin identity, event or revision disagrees with accepted history.",
                     [$"timer:{timer.Id}", originHistory.Id]));
             }
-            if (timer.DefinitionId != instance.DefinitionId || timer.DefinitionVersion != instance.DefinitionVersion)
+            if (timerDefinition is null ||
+                timerDefinition.ContentDigest != ComputeDigest(timerDefinition.DefinitionJson))
             {
                 findings.Add(new("timer-definition-binding-mismatch",
-                    "A durable timer does not match the instance's immutable definition binding.", [$"timer:{timer.Id}"]));
+                    "A durable timer's recorded definition is missing or its immutable content digest is invalid.", [$"timer:{timer.Id}"]));
             }
             if (timer.AttemptId is not null && !attemptsById.ContainsKey(timer.AttemptId))
             {
@@ -259,10 +364,12 @@ public static class HistoricalReplay
             }
         }
 
-        if (!definition.States.ContainsKey(instance.CurrentState))
+        if (!activeDefinition.States.ContainsKey(instance.CurrentState) ||
+            activeDefinition.Id != instance.DefinitionId ||
+            activeDefinition.Version != instance.DefinitionVersion)
         {
             findings.Add(new("projection-state-not-in-bound-definition",
-                $"The current-state projection '{instance.CurrentState}' is not declared by the bound definition.", []));
+                $"The current-state projection '{instance.CurrentState}' does not match the final definition epoch.", []));
         }
         if (instance.Revision != expectedRevision)
         {
@@ -297,13 +404,13 @@ public static class HistoricalReplay
             instance.Id,
             instance.DefinitionId,
             instance.DefinitionVersion,
-            definitionRecord.ContentDigest,
+            activeDefinitionRecord.ContentDigest,
             mode,
             overallOutcome,
             stateOutcome,
             instance.CreatedAt,
-            definition.InitialState,
-            "Derived from the immutable bound definition; no separate creation-history row exists.",
+            initialState,
+            "Derived from the first immutable definition epoch; migration rows establish later definition epochs.",
             state,
             instance.CurrentState,
             expectedRevision,
@@ -408,6 +515,9 @@ public static class HistoricalReplay
 
         return new(attempt.Id, "Verified", "Pure re-evaluation reproduced the stored transition using its bound evidence.", history.Id);
     }
+
+    private static string ComputeDigest(string content) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(content)));
 
     private static HistoricalReplayReport Unavailable(
         InstanceRecord instance,

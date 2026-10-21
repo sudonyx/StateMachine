@@ -14,6 +14,7 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
     public DbSet<EffectOperationRecord> EffectOperations => Set<EffectOperationRecord>();
     public DbSet<EffectAttemptRecord> EffectAttempts => Set<EffectAttemptRecord>();
     public DbSet<TimerRecord> Timers => Set<TimerRecord>();
+    public DbSet<MigrationRecord> Migrations => Set<MigrationRecord>();
 
     public async Task EnsureGate4SchemaAsync(CancellationToken cancellationToken = default)
     {
@@ -413,6 +414,78 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
                 ON StagedObservations (InstanceId, Status, ReceivedAt, Id);
             """, cancellationToken);
 
+    public async Task EnsureGate11SchemaAsync(CancellationToken cancellationToken = default)
+    {
+        await Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS Migrations (
+                Id TEXT NOT NULL CONSTRAINT PK_Migrations PRIMARY KEY,
+                InstanceId TEXT NOT NULL,
+                MigrationId TEXT NOT NULL,
+                PlanId TEXT NOT NULL,
+                PlanVersion TEXT NOT NULL,
+                SourceDefinitionId TEXT NOT NULL,
+                SourceDefinitionVersion TEXT NOT NULL,
+                SourceDefinitionDigest TEXT NOT NULL,
+                TargetDefinitionId TEXT NOT NULL,
+                TargetDefinitionVersion TEXT NOT NULL,
+                TargetDefinitionDigest TEXT NOT NULL,
+                SourceState TEXT NOT NULL,
+                TargetState TEXT NOT NULL,
+                ExpectedRevision INTEGER NOT NULL,
+                SourceRevision INTEGER NOT NULL,
+                TargetRevision INTEGER NOT NULL,
+                AuthorisationContext TEXT NOT NULL,
+                AuthorisationReason TEXT NOT NULL,
+                EligibilityFindingsJson TEXT NOT NULL,
+                OutstandingWorkFindingsJson TEXT NOT NULL,
+                AmendmentReferencesJson TEXT NOT NULL,
+                Status TEXT NOT NULL,
+                Outcome TEXT NOT NULL,
+                Explanation TEXT NOT NULL,
+                CommittedAt INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS UX_Migrations_InstanceId_MigrationId
+                ON Migrations (InstanceId, MigrationId);
+            CREATE INDEX IF NOT EXISTS IX_Migrations_InstanceId_SourceRevision
+                ON Migrations (InstanceId, SourceRevision, CommittedAt, Id);
+            """, cancellationToken);
+        var connection = Database.GetDbConnection();
+        var closeWhenDone = connection.State != System.Data.ConnectionState.Open;
+        if (closeWhenDone)
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        try
+        {
+            var columns = new HashSet<string>(StringComparer.Ordinal);
+            await using (var inspect = connection.CreateCommand())
+            {
+                inspect.CommandText = "PRAGMA table_info('Migrations')";
+                await using var reader = await inspect.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    columns.Add(reader.GetString(1));
+                }
+            }
+            if (!columns.Contains(nameof(MigrationRecord.ExpectedRevision)))
+            {
+                await using var addRevision = connection.CreateCommand();
+                addRevision.CommandText = """
+                    ALTER TABLE Migrations ADD COLUMN ExpectedRevision INTEGER NOT NULL DEFAULT 0;
+                    UPDATE Migrations SET ExpectedRevision = SourceRevision;
+                    """;
+                await addRevision.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            if (closeWhenDone)
+            {
+                await connection.CloseAsync();
+            }
+        }
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<DefinitionRecord>().HasKey(record => new { record.Id, record.Version });
@@ -444,6 +517,12 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
         modelBuilder.Entity<EffectAttemptRecord>().HasKey(record => record.Id);
         modelBuilder.Entity<EffectAttemptRecord>().HasIndex(record => new { record.EffectOperationId, record.AttemptNumber }).IsUnique();
         modelBuilder.Entity<TimerRecord>().HasKey(record => record.Id);
+        modelBuilder.Entity<MigrationRecord>().HasKey(record => record.Id);
+        modelBuilder.Entity<MigrationRecord>()
+            .HasIndex(record => new { record.InstanceId, record.MigrationId })
+            .IsUnique().HasDatabaseName("UX_Migrations_InstanceId_MigrationId");
+        modelBuilder.Entity<MigrationRecord>()
+            .HasIndex(record => new { record.InstanceId, record.SourceRevision, record.CommittedAt, record.Id });
         modelBuilder.Entity<TimerRecord>()
             .HasIndex(record => new { record.InstanceId, record.TimerDeclarationId, record.OriginTransitionHistoryId })
             .IsUnique();
@@ -497,6 +576,8 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
         modelBuilder.Entity<TimerRecord>().Property(record => record.ProcessedAt)
             .HasConversion(value => value.HasValue ? value.Value.UtcTicks : (long?)null,
                 value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
+        modelBuilder.Entity<MigrationRecord>().Property(record => record.CommittedAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
     }
 }
 
@@ -717,4 +798,33 @@ public sealed class TimerRecord
     public string? ActionOperationId { get; set; }
     public required string EvidenceJson { get; set; }
     public required string ProcessingEvidenceJson { get; set; }
+}
+
+public sealed class MigrationRecord
+{
+    public required string Id { get; set; }
+    public required string InstanceId { get; set; }
+    public required string MigrationId { get; set; }
+    public required string PlanId { get; set; }
+    public required string PlanVersion { get; set; }
+    public required string SourceDefinitionId { get; set; }
+    public required string SourceDefinitionVersion { get; set; }
+    public required string SourceDefinitionDigest { get; set; }
+    public required string TargetDefinitionId { get; set; }
+    public required string TargetDefinitionVersion { get; set; }
+    public required string TargetDefinitionDigest { get; set; }
+    public required string SourceState { get; set; }
+    public required string TargetState { get; set; }
+    public long ExpectedRevision { get; set; }
+    public long SourceRevision { get; set; }
+    public long TargetRevision { get; set; }
+    public required string AuthorisationContext { get; set; }
+    public required string AuthorisationReason { get; set; }
+    public required string EligibilityFindingsJson { get; set; }
+    public required string OutstandingWorkFindingsJson { get; set; }
+    public required string AmendmentReferencesJson { get; set; }
+    public required string Status { get; set; }
+    public required string Outcome { get; set; }
+    public required string Explanation { get; set; }
+    public DateTimeOffset CommittedAt { get; set; }
 }

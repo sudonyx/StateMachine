@@ -1,0 +1,571 @@
+{
+    "languageVersion":  "1.2",
+    "id":  "orion-equipment-lease",
+    "version":  "5.0",
+    "initialState":  "Draft",
+    "states":  [
+                   {
+                       "id":  "Draft"
+                   },
+                   {
+                       "id":  "AwaitingDocuments"
+                   },
+                   {
+                       "id":  "AssessmentReady"
+                   },
+                   {
+                       "id":  "SpecialistAssessment"
+                   },
+                   {
+                       "id":  "AwaitingOfferAcceptance"
+                   },
+                   {
+                       "id":  "AssetReservationPending"
+                   },
+                   {
+                       "id":  "CustomerNotificationPending"
+                   },
+                   {
+                       "id":  "Approved",
+                       "terminal":  true
+                   },
+                   {
+                       "id":  "Rejected",
+                       "terminal":  true
+                   },
+                   {
+                       "id":  "Cancelled",
+                       "terminal":  true
+                   },
+                   {
+                       "id":  "OfferExpired",
+                       "terminal":  true
+                   },
+                   {
+                       "id":  "OfferDeclined",
+                       "terminal":  true
+                   },
+                   {
+                       "id":  "PreliminaryOfferReview"
+                   },
+                   {
+                       "id":  "AwaitingRenewedBusinessAuthorisation"
+                   },
+                   {
+                       "id":  "OfferReady"
+                   }
+               ],
+    "events":  [
+                   "Submit",
+                   "DocumentsReceived",
+                   "DocumentFollowUpDue",
+                   "ReferForSpecialistAssessment",
+                   "Approve",
+                   "IssueOffer",
+                   "OfferReminderDue",
+                   "OfferExpired",
+                   "AcceptOffer",
+                   "DeclineOffer",
+                   "EquipmentReserved",
+                   "CustomerNotified",
+                   "Reject",
+                   "Cancel",
+                   "CompletePreliminaryOfferReview",
+                   "RecordRenewedBusinessAuthorisation"
+               ],
+    "inputPolicy":  {
+                        "commands":  [
+                                         {
+                                             "name":  "SubmitApplication",
+                                             "event":  "Submit"
+                                         },
+                                         {
+                                             "name":  "ReceiveDocuments",
+                                             "event":  "DocumentsReceived"
+                                         },
+                                         {
+                                             "name":  "ReferForSpecialistAssessment",
+                                             "event":  "ReferForSpecialistAssessment"
+                                         },
+                                         {
+                                             "name":  "ApproveAssessment",
+                                             "event":  "Approve"
+                                         },
+                                         {
+                                             "name":  "IssueOffer",
+                                             "event":  "IssueOffer"
+                                         },
+                                         {
+                                             "name":  "AcceptOffer",
+                                             "event":  "AcceptOffer"
+                                         },
+                                         {
+                                             "name":  "DeclineOffer",
+                                             "event":  "DeclineOffer"
+                                         },
+                                         {
+                                             "name":  "RejectApplication",
+                                             "event":  "Reject"
+                                         },
+                                         {
+                                             "name":  "CancelApplication",
+                                             "event":  "Cancel"
+                                         },
+                                         {
+                                             "name":  "CompletePreliminaryOfferReview",
+                                             "event":  "CompletePreliminaryOfferReview"
+                                         },
+                                         {
+                                             "name":  "RecordRenewedBusinessAuthorisation",
+                                             "event":  "RecordRenewedBusinessAuthorisation"
+                                         }
+                                     ],
+                        "observations":  [
+                                             {
+                                                 "name":  "DocumentPackageReceived",
+                                                 "event":  "DocumentsReceived",
+                                                 "requiredEvidence":  [
+                                                                          "documentSetDigest"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "OfferDocumentGenerated",
+                                                 "event":  "IssueOffer",
+                                                 "requiredEvidence":  [
+                                                                          "documentId",
+                                                                          "offerDigest"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "EquipmentReserved",
+                                                 "event":  "EquipmentReserved",
+                                                 "requiredEvidence":  [
+                                                                          "reservationId",
+                                                                          "assetId"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "CustomerNotified",
+                                                 "event":  "CustomerNotified",
+                                                 "requiredEvidence":  [
+                                                                          "deliveryId",
+                                                                          "messageDigest"
+                                                                      ]
+                                             }
+                                         ]
+                    },
+    "transitions":  [
+                        {
+                            "id":  "submit-missing-documents",
+                            "source":  "Draft",
+                            "event":  "Submit",
+                            "target":  "AwaitingDocuments",
+                            "description":  "Submission is waiting for required documents.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "documentsComplete",
+                                          "value":  false
+                                      }
+                        },
+                        {
+                            "id":  "submit-ready-for-assessment",
+                            "source":  "Draft",
+                            "event":  "Submit",
+                            "target":  "AssessmentReady",
+                            "description":  "A complete application outside the specialist-assessment band is ready for assessment.",
+                            "guard":  {
+                                          "op":  "and",
+                                          "args":  [
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "documentsComplete",
+                                                           "value":  true
+                                                       },
+                                                       {
+                                                           "op":  "gte",
+                                                           "fact":  "riskScore",
+                                                           "value":  60
+                                                       },
+                                                       {
+                                                           "op":  "lte",
+                                                           "fact":  "equipmentValue",
+                                                           "value":  100000
+                                                       }
+                                                   ]
+                                      }
+                        },
+                        {
+                            "id":  "documents-complete",
+                            "source":  "AwaitingDocuments",
+                            "event":  "DocumentsReceived",
+                            "target":  "AssessmentReady",
+                            "description":  "Required documents are now marked complete.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "documentsComplete",
+                                          "value":  true
+                                      }
+                        },
+                        {
+                            "id":  "document-follow-up-due",
+                            "source":  "AwaitingDocuments",
+                            "event":  "DocumentFollowUpDue",
+                            "target":  "AwaitingDocuments",
+                            "description":  "The declared document-request follow-up became due."
+                        },
+                        {
+                            "id":  "document-follow-up-notification-accepted",
+                            "source":  "AwaitingDocuments",
+                            "event":  "CustomerNotified",
+                            "target":  "AwaitingDocuments",
+                            "description":  "A trusted notification result for the document follow-up was accepted."
+                        },
+                        {
+                            "id":  "refer-for-specialist-assessment",
+                            "source":  "AssessmentReady",
+                            "event":  "ReferForSpecialistAssessment",
+                            "target":  "SpecialistAssessment",
+                            "description":  "An authorised business process has referred the application to a reviewer."
+                        },
+                        {
+                            "id":  "approve-assessment",
+                            "source":  "AssessmentReady",
+                            "event":  "Approve",
+                            "target":  "PreliminaryOfferReview",
+                            "description":  "Required checks are complete and the assessment permits approval.",
+                            "guard":  {
+                                          "op":  "and",
+                                          "args":  [
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "checksComplete",
+                                                           "value":  true
+                                                       },
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "eligibilityDecision",
+                                                           "value":  "Eligible"
+                                                       }
+                                                   ]
+                                      }
+                        },
+                        {
+                            "id":  "issue-offer-after-eligibility",
+                            "source":  "OfferReady",
+                            "event":  "IssueOffer",
+                            "target":  "AwaitingOfferAcceptance",
+                            "description":  "An offer is issued only after checks and the bound eligibility decision permit it.",
+                            "guard":  {
+                                          "op":  "and",
+                                          "args":  [
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "checksComplete",
+                                                           "value":  true
+                                                       },
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "eligibilityDecision",
+                                                           "value":  "Eligible"
+                                                       }
+                                                   ]
+                                      }
+                        },
+                        {
+                            "id":  "accept-valid-offer",
+                            "source":  "AwaitingOfferAcceptance",
+                            "event":  "AcceptOffer",
+                            "target":  "AssetReservationPending",
+                            "description":  "The offer remains eligible under its persisted deadline and supplied evaluation facts.",
+                            "guard":  {
+                                          "op":  "and",
+                                          "args":  [
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "offerValidAtEvaluation",
+                                                           "value":  true
+                                                       },
+                                                       {
+                                                           "op":  "exists",
+                                                           "fact":  "offerEvaluationTime"
+                                                       }
+                                                   ]
+                                      }
+                        },
+                        {
+                            "id":  "decline-offer",
+                            "source":  "AwaitingOfferAcceptance",
+                            "event":  "DeclineOffer",
+                            "target":  "OfferDeclined",
+                            "description":  "The customer declined the offer before its expiry deadline."
+                        },
+                        {
+                            "id":  "offer-reminder-due",
+                            "source":  "AwaitingOfferAcceptance",
+                            "event":  "OfferReminderDue",
+                            "target":  "AwaitingOfferAcceptance",
+                            "description":  "The declared pre-expiry reminder became due."
+                        },
+                        {
+                            "id":  "offer-expired",
+                            "source":  "AwaitingOfferAcceptance",
+                            "event":  "OfferExpired",
+                            "target":  "OfferExpired",
+                            "description":  "The offer expired at its persisted deadline without an earlier accepted response."
+                        },
+                        {
+                            "id":  "offer-reminder-notification-accepted",
+                            "source":  "AwaitingOfferAcceptance",
+                            "event":  "CustomerNotified",
+                            "target":  "AwaitingOfferAcceptance",
+                            "description":  "A trusted notification result for the offer reminder was accepted."
+                        },
+                        {
+                            "id":  "asset-reservation-confirmed",
+                            "source":  "AssetReservationPending",
+                            "event":  "EquipmentReserved",
+                            "target":  "CustomerNotificationPending",
+                            "description":  "The synthetic provider confirms the requested equipment reservation."
+                        },
+                        {
+                            "id":  "customer-notified",
+                            "source":  "CustomerNotificationPending",
+                            "event":  "CustomerNotified",
+                            "target":  "Approved",
+                            "description":  "The synthetic provider confirms notification delivery."
+                        },
+                        {
+                            "id":  "approve-specialist-assessment",
+                            "source":  "SpecialistAssessment",
+                            "event":  "Approve",
+                            "target":  "PreliminaryOfferReview",
+                            "description":  "A reviewer approves after checks and justification are recorded.",
+                            "guard":  {
+                                          "op":  "and",
+                                          "args":  [
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "checksComplete",
+                                                           "value":  true
+                                                       },
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "specialistAssessmentComplete",
+                                                           "value":  true
+                                                       },
+                                                       {
+                                                           "op":  "exists",
+                                                           "fact":  "reviewerJustification"
+                                                       }
+                                                   ]
+                                      }
+                        },
+                        {
+                            "id":  "reject-specialist-assessment",
+                            "source":  "SpecialistAssessment",
+                            "event":  "Reject",
+                            "target":  "Rejected",
+                            "description":  "A reviewer rejects the application."
+                        },
+                        {
+                            "id":  "cancel-awaiting-documents",
+                            "source":  "AwaitingDocuments",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "The application is cancelled while waiting for documents.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "cancellationPermitted",
+                                          "value":  true
+                                      }
+                        },
+                        {
+                            "id":  "cancel-assessment",
+                            "source":  "AssessmentReady",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "The application is cancelled before a final decision.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "cancellationPermitted",
+                                          "value":  true
+                                      }
+                        },
+                        {
+                            "id":  "cancel-specialist-assessment",
+                            "source":  "SpecialistAssessment",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "The application is cancelled during specialist assessment.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "cancellationPermitted",
+                                          "value":  true
+                                      }
+                        },
+                        {
+                            "id":  "cancel-awaiting-offer",
+                            "source":  "AwaitingOfferAcceptance",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "An offer-awaiting application is cancelled.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "cancellationPermitted",
+                                          "value":  true
+                                      }
+                        },
+                        {
+                            "id":  "cancel-reservation-pending",
+                            "source":  "AssetReservationPending",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "An application is cancelled while equipment reservation is outstanding.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "cancellationPermitted",
+                                          "value":  true
+                                      }
+                        },
+                        {
+                            "id":  "cancel-notification-pending",
+                            "source":  "CustomerNotificationPending",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "An application is cancelled while customer notification is outstanding.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "cancellationPermitted",
+                                          "value":  true
+                                      }
+                        },
+                        {
+                            "id":  "preliminary-review-clear",
+                            "source":  "PreliminaryOfferReview",
+                            "event":  "CompletePreliminaryOfferReview",
+                            "target":  "OfferReady",
+                            "description":  "Release preparation may continue after the approved equipment, duration, and pricing are confirmed consistent.",
+                            "guard":  {
+                                          "op":  "and",
+                                          "args":  [
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "preliminaryOfferReviewComplete",
+                                                           "value":  true
+                                                       },
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "materialDiscrepancy",
+                                                           "value":  false
+                                                       }
+                                                   ]
+                                      }
+                        },
+                        {
+                            "id":  "preliminary-review-refer-for-renewed-authorisation",
+                            "source":  "PreliminaryOfferReview",
+                            "event":  "CompletePreliminaryOfferReview",
+                            "target":  "AwaitingRenewedBusinessAuthorisation",
+                            "description":  "A material discrepancy pauses release and requires renewed business authorisation.",
+                            "guard":  {
+                                          "op":  "and",
+                                          "args":  [
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "preliminaryOfferReviewComplete",
+                                                           "value":  true
+                                                       },
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "materialDiscrepancy",
+                                                           "value":  true
+                                                       }
+                                                   ]
+                                      }
+                        },
+                        {
+                            "id":  "renewed-authorisation-received",
+                            "source":  "AwaitingRenewedBusinessAuthorisation",
+                            "event":  "RecordRenewedBusinessAuthorisation",
+                            "target":  "PreliminaryOfferReview",
+                            "description":  "The application returns for a fresh preliminary review after renewed authorisation is evidenced.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "renewedBusinessAuthorisationReceived",
+                                          "value":  true
+                                      }
+                        },
+                        {
+                            "id":  "cancel-during-preliminary-offer-review",
+                            "source":  "PreliminaryOfferReview",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "Cancellation during final offer preparation requires reviewer authorisation.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "cancellationReviewerAuthorised",
+                                          "value":  true
+                                      }
+                        }
+                    ],
+    "timers":  [
+                   {
+                       "id":  "document-request-follow-up",
+                       "onTransition":  "submit-missing-documents",
+                       "duration":  "P7D",
+                       "event":  "DocumentFollowUpDue",
+                       "whileState":  "AwaitingDocuments",
+                       "cancelOnTransitions":  [
+                                                   "documents-complete",
+                                                   "cancel-awaiting-documents"
+                                               ],
+                       "effectIntent":  {
+                                            "capability":  "customer-notification",
+                                            "observationType":  "CustomerNotified",
+                                            "request":  {
+                                                            "customerReference":  "synthetic-customer-1",
+                                                            "messageTemplate":  "Please provide the outstanding documents for your application."
+                                                        }
+                                        }
+                   },
+                   {
+                       "id":  "offer-reminder",
+                       "onTransition":  "issue-offer-after-eligibility",
+                       "duration":  "P4D",
+                       "event":  "OfferReminderDue",
+                       "whileState":  "AwaitingOfferAcceptance",
+                       "cancelOnTransitions":  [
+                                                   "accept-valid-offer",
+                                                   "decline-offer",
+                                                   "cancel-awaiting-offer"
+                                               ],
+                       "invalidatedByDueTimers":  [
+                                                      "offer-expiry"
+                                                  ],
+                       "effectIntent":  {
+                                            "capability":  "customer-notification",
+                                            "observationType":  "CustomerNotified",
+                                            "request":  {
+                                                            "customerReference":  "synthetic-customer-1",
+                                                            "messageTemplate":  "Your synthetic equipment lease offer expires soon."
+                                                        }
+                                        }
+                   },
+                   {
+                       "id":  "offer-expiry",
+                       "onTransition":  "issue-offer-after-eligibility",
+                       "duration":  "P5D",
+                       "event":  "OfferExpired",
+                       "whileState":  "AwaitingOfferAcceptance",
+                       "cancelOnTransitions":  [
+                                                   "accept-valid-offer",
+                                                   "decline-offer",
+                                                   "cancel-awaiting-offer"
+                                               ],
+                       "blockedEvents":  [
+                                             "AcceptOffer",
+                                             "DeclineOffer"
+                                         ]
+                   }
+               ]
+}

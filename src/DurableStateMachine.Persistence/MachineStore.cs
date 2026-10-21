@@ -141,10 +141,133 @@ public sealed class MachineStore(
     {
         await using var transaction = await BeginReadSnapshotAsync(cancellationToken);
         var snapshot = await ReadReplaySnapshotAsync(instanceId, cancellationToken);
-        var report = HistoricalReplay.Reconstruct(snapshot.Instance, snapshot.Definition, snapshot.History,
-            snapshot.Attempts, snapshot.Receipts, snapshot.Timers, verifyDecisions);
+        var report = HistoricalReplay.Reconstruct(snapshot.Instance, snapshot.Definitions, snapshot.Migrations,
+            snapshot.History, snapshot.Attempts, snapshot.Receipts, snapshot.Timers, verifyDecisions);
         await transaction.CommitAsync(cancellationToken);
         return report;
+    }
+
+    public async Task<MigrationEligibility> PreviewMigrationAsync(
+        string instanceId,
+        MigrationRequest request,
+        DefinitionMigrationPlan? plan,
+        CancellationToken cancellationToken)
+    {
+        await using var transaction = await BeginReadSnapshotAsync(cancellationToken);
+        var instance = await db.Instances.AsNoTracking().SingleOrDefaultAsync(
+            record => record.Id == instanceId, cancellationToken)
+            ?? throw new ResourceNotFoundException($"Instance '{instanceId}' does not exist.");
+        var eligibility = await EvaluateMigrationAsync(instance, request, plan, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return eligibility;
+    }
+
+    public async Task<MigrationExecutionResult> ExecuteMigrationAsync(
+        string instanceId,
+        MigrationRequest request,
+        DefinitionMigrationPlan? plan,
+        DateTimeOffset now,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.MigrationId) || request.MigrationId.Length > 128 ||
+            string.IsNullOrWhiteSpace(request.AuthorisationReason) || request.ExpectedRevision < 0)
+        {
+            throw new ArgumentException("A migration ID, authorisation reason, and non-negative expected revision are required.");
+        }
+
+        await using var transaction = await BeginImmediateTransactionAsync(cancellationToken);
+        var instance = await db.Instances.SingleOrDefaultAsync(
+            record => record.Id == instanceId, cancellationToken)
+            ?? throw new ResourceNotFoundException($"Instance '{instanceId}' does not exist.");
+
+        var prior = await db.Migrations.SingleOrDefaultAsync(
+            record => record.InstanceId == instanceId && record.MigrationId == request.MigrationId,
+            cancellationToken);
+        if (prior is not null)
+        {
+            if (prior.SourceDefinitionId != request.SourceDefinitionId ||
+                prior.SourceDefinitionVersion != request.SourceDefinitionVersion ||
+                prior.TargetDefinitionId != request.TargetDefinitionId ||
+                prior.TargetDefinitionVersion != request.TargetDefinitionVersion ||
+                prior.ExpectedRevision != request.ExpectedRevision ||
+                prior.AuthorisationReason != request.AuthorisationReason ||
+                prior.PlanId != (plan?.Id ?? "unsupported") ||
+                prior.PlanVersion != (plan?.Version ?? "0"))
+            {
+                throw new DefinitionConflictException(
+                    $"Migration identity '{request.MigrationId}' was already used with different content.");
+            }
+            await transaction.CommitAsync(cancellationToken);
+            return new MigrationExecutionResult(prior, ToDetails(instance));
+        }
+
+        var eligibility = await EvaluateMigrationAsync(instance, request, plan, cancellationToken);
+        var record = CreateMigrationRecord(instance, request, plan, eligibility, now);
+        var sourceDefinition = await db.Definitions.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == request.SourceDefinitionId && item.Version == request.SourceDefinitionVersion,
+            cancellationToken);
+        var targetDefinition = await db.Definitions.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == request.TargetDefinitionId && item.Version == request.TargetDefinitionVersion,
+            cancellationToken);
+        record.SourceDefinitionDigest = sourceDefinition is null
+            ? string.Empty
+            : ComputeDefinitionDigest(sourceDefinition.DefinitionJson);
+        record.TargetDefinitionDigest = targetDefinition is null
+            ? string.Empty
+            : ComputeDefinitionDigest(targetDefinition.DefinitionJson);
+        if (eligibility.Status == "Eligible")
+        {
+            var correspondence = plan!.StateCorrespondences.Single(item => item.SourceState == instance.CurrentState);
+            var changed = await db.Instances
+                .Where(item => item.Id == instanceId &&
+                               item.Revision == request.ExpectedRevision &&
+                               item.DefinitionId == request.SourceDefinitionId &&
+                               item.DefinitionVersion == request.SourceDefinitionVersion &&
+                               item.CurrentState == instance.CurrentState)
+                .ExecuteUpdateAsync(update => update
+                    .SetProperty(item => item.DefinitionId, request.TargetDefinitionId)
+                    .SetProperty(item => item.DefinitionVersion, request.TargetDefinitionVersion)
+                    .SetProperty(item => item.CurrentState, correspondence.TargetState)
+                    .SetProperty(item => item.UpdatedAt, now), cancellationToken);
+            if (changed != 1)
+            {
+                record.Status = "Refused";
+                record.Outcome = "concurrent-instance-change";
+                record.Explanation = "The instance changed before the conditional migration update could commit.";
+                eligibility = eligibility with
+                {
+                    Status = "Refused",
+                    Findings = [.. eligibility.Findings, record.Explanation]
+                };
+                record.EligibilityFindingsJson = JsonSerializer.Serialize(eligibility.Findings, StoredJsonOptions);
+            }
+            else
+            {
+                record.Status = "Committed";
+                record.Outcome = "migration-committed";
+                record.Explanation = "The validated definition epoch was committed without changing instance facts, revision, timers, or external work.";
+                instance.DefinitionId = request.TargetDefinitionId;
+                instance.DefinitionVersion = request.TargetDefinitionVersion;
+                instance.CurrentState = correspondence.TargetState;
+                instance.UpdatedAt = now;
+            }
+        }
+
+        db.Migrations.Add(record);
+        await db.SaveChangesAsync(cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+        return new MigrationExecutionResult(record, ToDetails(instance));
+    }
+
+    public async Task<IReadOnlyList<MigrationRecord>> ListMigrationsAsync(
+        string instanceId,
+        CancellationToken cancellationToken)
+    {
+        await EnsureInstanceExistsAsync(instanceId, cancellationToken);
+        return await db.Migrations.AsNoTracking()
+            .Where(record => record.InstanceId == instanceId)
+            .OrderBy(record => record.CommittedAt).ThenBy(record => record.Id)
+            .ToListAsync(cancellationToken);
     }
 
     public async Task<RecoveryAssessment> GetRecoveryAssessmentAsync(
@@ -179,8 +302,8 @@ public sealed class MachineStore(
             .OrderBy(record => record.ExpectedAt).ThenBy(record => record.Id)
             .ToListAsync(cancellationToken);
 
-        var replay = HistoricalReplay.Reconstruct(instance, snapshot.Definition, snapshot.History,
-            attempts, receipts, timers, verifyDecisions: false);
+        var replay = HistoricalReplay.Reconstruct(instance, snapshot.Definitions, snapshot.Migrations,
+            snapshot.History, attempts, receipts, timers, verifyDecisions: false);
         var effectAttemptsByOperation = effectAttempts
             .GroupBy(attempt => attempt.EffectOperationId, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.OrderBy(item => item.AttemptNumber).Last(), StringComparer.Ordinal);
@@ -547,9 +670,11 @@ public sealed class MachineStore(
         var instance = await db.Instances.AsNoTracking().SingleOrDefaultAsync(
             record => record.Id == instanceId, cancellationToken)
             ?? throw new ResourceNotFoundException($"Instance '{instanceId}' does not exist.");
-        var definition = await db.Definitions.AsNoTracking().SingleOrDefaultAsync(
-            record => record.Id == instance.DefinitionId && record.Version == instance.DefinitionVersion,
-            cancellationToken);
+        var definitions = await db.Definitions.AsNoTracking().ToListAsync(cancellationToken);
+        var migrations = await db.Migrations.AsNoTracking()
+            .Where(record => record.InstanceId == instanceId)
+            .OrderBy(record => record.SourceRevision).ThenBy(record => record.CommittedAt).ThenBy(record => record.Id)
+            .ToListAsync(cancellationToken);
         var history = await db.TransitionHistory.AsNoTracking()
             .Where(record => record.InstanceId == instanceId)
             .OrderBy(record => record.RevisionAfter).ThenBy(record => record.Id)
@@ -566,8 +691,238 @@ public sealed class MachineStore(
             .Where(record => record.InstanceId == instanceId)
             .OrderBy(record => record.DueAt).ThenBy(record => record.Id)
             .ToListAsync(cancellationToken);
-        return new ReplaySnapshot(instance, definition, history, attempts, receipts, timers);
+        return new ReplaySnapshot(instance, definitions, migrations, history, attempts, receipts, timers);
     }
+
+    private async Task<MigrationEligibility> EvaluateMigrationAsync(
+        InstanceRecord instance,
+        MigrationRequest request,
+        DefinitionMigrationPlan? plan,
+        CancellationToken cancellationToken)
+    {
+        var findings = new List<string>();
+        var outstanding = new List<string>();
+        var sourceRecord = await db.Definitions.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == request.SourceDefinitionId && item.Version == request.SourceDefinitionVersion,
+            cancellationToken);
+        var targetRecord = await db.Definitions.AsNoTracking().SingleOrDefaultAsync(
+            item => item.Id == request.TargetDefinitionId && item.Version == request.TargetDefinitionVersion,
+            cancellationToken);
+        var sourceDigest = sourceRecord is null ? null : ComputeDefinitionDigest(sourceRecord.DefinitionJson);
+        var targetDigest = targetRecord is null ? null : ComputeDefinitionDigest(targetRecord.DefinitionJson);
+
+        if (targetRecord is null)
+        {
+            findings.Add("unknown-target-definition");
+        }
+        if (plan is null)
+        {
+            findings.Add("unsupported-source-target-pair");
+        }
+        else if (plan.SourceDefinitionId != request.SourceDefinitionId ||
+                 plan.SourceDefinitionVersion != request.SourceDefinitionVersion ||
+                 plan.TargetDefinitionId != request.TargetDefinitionId ||
+                 plan.TargetDefinitionVersion != request.TargetDefinitionVersion)
+        {
+            findings.Add("migration-plan-binding-mismatch");
+        }
+        if (instance.DefinitionId != request.SourceDefinitionId ||
+            instance.DefinitionVersion != request.SourceDefinitionVersion)
+        {
+            findings.Add(instance.DefinitionId == request.TargetDefinitionId &&
+                          instance.DefinitionVersion == request.TargetDefinitionVersion
+                ? "instance-already-on-target-version"
+                : "source-definition-binding-mismatch");
+        }
+        if (instance.Revision != request.ExpectedRevision)
+        {
+            findings.Add("source-instance-revision-changed");
+        }
+        if (sourceRecord is null)
+        {
+            findings.Add("missing-historical-source-definition");
+        }
+        else if (sourceDigest != sourceRecord.ContentDigest)
+        {
+            findings.Add("source-definition-digest-mismatch");
+        }
+        if (targetRecord is not null && targetDigest != targetRecord.ContentDigest)
+        {
+            findings.Add("target-definition-digest-mismatch");
+        }
+
+        string? targetState = null;
+        if (sourceRecord is not null && targetRecord is not null && plan is not null)
+        {
+            try
+            {
+                var sourceDefinition = MachineDefinitionLoader.Load(sourceRecord.DefinitionJson);
+                var targetDefinition = MachineDefinitionLoader.Load(targetRecord.DefinitionJson);
+                if (sourceDefinition.States.TryGetValue(instance.CurrentState, out var sourceState) &&
+                    sourceState.IsTerminal)
+                {
+                    findings.Add("terminal-instance-migration-forbidden");
+                }
+                var correspondence = plan.StateCorrespondences.SingleOrDefault(
+                    item => item.SourceState == instance.CurrentState);
+                if (!plan.SupportedSourceStates.Contains(instance.CurrentState, StringComparer.Ordinal))
+                {
+                    findings.Add("source-state-not-supported-by-migration-plan");
+                }
+                if (correspondence is null)
+                {
+                    findings.Add("source-state-not-mapped");
+                }
+                else
+                {
+                    targetState = correspondence.TargetState;
+                    if (string.IsNullOrWhiteSpace(correspondence.BusinessMeaning))
+                    {
+                        findings.Add("state-correspondence-has-no-business-meaning");
+                    }
+                    if (!sourceDefinition.States.TryGetValue(instance.CurrentState, out sourceState) ||
+                        !targetDefinition.States.TryGetValue(correspondence.TargetState, out var mappedTarget))
+                    {
+                        findings.Add("mapped-state-missing-from-definition");
+                    }
+                    else
+                    {
+                        if (sourceState.IsTerminal != mappedTarget.IsTerminal || mappedTarget.IsTerminal)
+                        {
+                            findings.Add("incompatible-state-lifecycle-semantics");
+                        }
+                        var oldOutgoing = sourceDefinition.Transitions
+                            .Where(item => item.Source == instance.CurrentState)
+                            .OrderBy(item => item.Id, StringComparer.Ordinal).ToArray();
+                        var newOutgoing = targetDefinition.Transitions
+                            .Where(item => item.Source == correspondence.TargetState)
+                            .OrderBy(item => item.Id, StringComparer.Ordinal).ToArray();
+                        if (oldOutgoing.Length != newOutgoing.Length ||
+                            oldOutgoing.Where((item, index) => !SameTransitionSemantics(
+                                item, newOutgoing.ElementAtOrDefault(index), plan)).Any())
+                        {
+                            findings.Add("incompatible-outgoing-transition-semantics");
+                        }
+                    }
+                }
+                var facts = DeserializeFacts(instance.FactsJson);
+                foreach (var requiredFact in plan.RequiredTargetFacts)
+                {
+                    if (!facts.ContainsKey(requiredFact))
+                    {
+                        findings.Add($"unsatisfied-target-fact:{requiredFact}");
+                    }
+                }
+            }
+            catch (MachineDefinitionException)
+            {
+                findings.Add("missing-or-invalid-definition-evidence");
+            }
+        }
+
+        if (await db.InboundMessages.AsNoTracking().AnyAsync(item =>
+                item.InstanceId == instance.Id && item.Status == "Received", cancellationToken))
+        {
+            outstanding.Add("pending-durable-intake");
+        }
+        if (await db.StagedObservations.AsNoTracking().AnyAsync(item =>
+                item.InstanceId == instance.Id && item.Status == "Received", cancellationToken))
+        {
+            outstanding.Add("unresolved-staged-external-result");
+        }
+        if (await db.ExpectedOperations.AsNoTracking().AnyAsync(item =>
+                item.InstanceId == instance.Id && item.Status == "Expected", cancellationToken))
+        {
+            outstanding.Add("pending-expected-operation");
+        }
+        if (await db.EffectOperations.AsNoTracking().AnyAsync(item => item.InstanceId == instance.Id, cancellationToken))
+        {
+            outstanding.Add("existing-external-effect-operation");
+        }
+        if (await db.Timers.AsNoTracking().AnyAsync(item =>
+                item.InstanceId == instance.Id && item.Status == "Pending", cancellationToken))
+        {
+            outstanding.Add("pending-timer-with-definition-specific-semantics");
+        }
+        findings.AddRange(outstanding);
+
+        return new MigrationEligibility(
+            instance.Id,
+            findings.Count == 0 ? "Eligible" : "Refused",
+            plan?.Id,
+            plan?.Version,
+            request.SourceDefinitionId,
+            request.SourceDefinitionVersion,
+            request.TargetDefinitionId,
+            request.TargetDefinitionVersion,
+            instance.CurrentState,
+            targetState,
+            instance.Revision,
+            findings,
+            outstanding);
+    }
+
+    private static bool SameTransitionSemantics(
+        MachineTransition source,
+        MachineTransition? target,
+        DefinitionMigrationPlan plan)
+    {
+        if (target is null || source.Id != target.Id || source.Event != target.Event)
+        {
+            return false;
+        }
+        var mappedTarget = plan.StateCorrespondences.SingleOrDefault(
+            item => item.SourceState == source.Target)?.TargetState;
+        if (mappedTarget is null || mappedTarget != target.Target)
+        {
+            return false;
+        }
+        var sourceGuard = source.Guard is null ? null :
+            JsonSerializer.Serialize(source.Guard, source.Guard.GetType(), StoredJsonOptions);
+        var targetGuard = target.Guard is null ? null :
+            JsonSerializer.Serialize(target.Guard, target.Guard.GetType(), StoredJsonOptions);
+        return sourceGuard == targetGuard;
+    }
+
+    private static MigrationRecord CreateMigrationRecord(
+        InstanceRecord instance,
+        MigrationRequest request,
+        DefinitionMigrationPlan? plan,
+        MigrationEligibility eligibility,
+        DateTimeOffset now)
+    {
+        return new MigrationRecord
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            InstanceId = instance.Id,
+            MigrationId = request.MigrationId,
+            PlanId = plan?.Id ?? "unsupported",
+            PlanVersion = plan?.Version ?? "0",
+            SourceDefinitionId = request.SourceDefinitionId,
+            SourceDefinitionVersion = request.SourceDefinitionVersion,
+            SourceDefinitionDigest = string.Empty,
+            TargetDefinitionId = request.TargetDefinitionId,
+            TargetDefinitionVersion = request.TargetDefinitionVersion,
+            TargetDefinitionDigest = string.Empty,
+            SourceState = instance.CurrentState,
+            TargetState = eligibility.TargetState ?? instance.CurrentState,
+            ExpectedRevision = request.ExpectedRevision,
+            SourceRevision = instance.Revision,
+            TargetRevision = instance.Revision,
+            AuthorisationContext = "configured-controlled-administration",
+            AuthorisationReason = request.AuthorisationReason,
+            EligibilityFindingsJson = JsonSerializer.Serialize(eligibility.Findings, StoredJsonOptions),
+            OutstandingWorkFindingsJson = JsonSerializer.Serialize(eligibility.OutstandingWorkFindings, StoredJsonOptions),
+            AmendmentReferencesJson = JsonSerializer.Serialize(plan?.AmendmentReferences ?? [], StoredJsonOptions),
+            Status = "Refused",
+            Outcome = eligibility.Findings.FirstOrDefault() ?? "migration-not-eligible",
+            Explanation = string.Join("; ", eligibility.Findings),
+            CommittedAt = now
+        };
+    }
+
+    private static string ComputeDefinitionDigest(string definitionJson) =>
+        Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(definitionJson)));
 
     public async Task<IReadOnlyList<TimerRecord>> ListTimersAsync(string instanceId, CancellationToken cancellationToken)
     {
@@ -2321,7 +2676,8 @@ public sealed class MachineStore(
 
     private sealed record ReplaySnapshot(
         InstanceRecord Instance,
-        DefinitionRecord? Definition,
+        IReadOnlyList<DefinitionRecord> Definitions,
+        IReadOnlyList<MigrationRecord> Migrations,
         IReadOnlyList<TransitionHistoryRecord> History,
         IReadOnlyList<InputAttemptRecord> Attempts,
         IReadOnlyList<InboundMessageRecord> Receipts,

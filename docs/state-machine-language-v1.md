@@ -112,7 +112,11 @@ The persistence layer records the accepted trigger and history identity, origina
 - Terminal states cannot have outgoing transitions.
 - Two unguarded transitions cannot share a source and event. Guarded overlaps are checked when facts are evaluated; runtime ambiguity is refused.
 - Language versions `1.0`, `1.1` and `1.2` are accepted. Unknown JSON properties and unsupported guard operators are errors. Language 1.1 adds input policies; language 1.2 adds the optional timer declarations described above. The flat-state and guard semantics remain unchanged.
-- States are flat. Hierarchy, parallel regions, entry/exit actions, arbitrary code and definition migration are unsupported. Timer declarations do not execute code or call providers.
+- States are flat. Hierarchy, parallel regions, entry/exit actions and arbitrary code are unsupported. Definitions contain no migration syntax: Gate 11 supports only explicitly registered migration contracts outside the evaluator, and refuses pairs/states without a contract. Timer declarations do not execute code or call providers.
+
+## Gate 11 definition versioning
+
+Language 1.2 remains unchanged for Gate 11. Each `(id, version)` is immutable, and a created instance remains bound to its exact version unless an explicitly requested migration contract is validated and durably committed. There is no automatic latest-version selection, effective-date policy selector, general migration DSL or fact transformation language. A migration contract is application-registered and checked by the persistence boundary; see [gate-11-design.md](./gate-11-design.md). Orion 5.0 is an example of a separate version using only existing states, guards, input mappings and timer declarations; see [orion-definition-v5.md](./orion-definition-v5.md).
 
 Validation exceptions expose a list of `ValidationIssue` values (`Code`, JSON `Path`, and `Message`). Invalid JSON is reported as `invalid-json`.
 

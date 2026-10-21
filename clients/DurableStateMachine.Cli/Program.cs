@@ -29,6 +29,41 @@ try
         case "definitions" when argsList.Count == 1:
             await PrintResponse(await client.GetAsync("api/definitions"));
             break;
+        case "migrate-preview" when argsList.Count == 9:
+        case "migrate" when argsList.Count == 9:
+        {
+            if (!long.TryParse(argsList[6], out var expectedRevision) || expectedRevision < 0)
+            {
+                throw new ArgumentException("Expected revision must be a non-negative integer.");
+            }
+            var request = new
+            {
+                migrationId = argsList[7],
+                sourceDefinitionId = argsList[2],
+                sourceDefinitionVersion = argsList[3],
+                targetDefinitionId = argsList[4],
+                targetDefinitionVersion = argsList[5],
+                expectedRevision,
+                authorisationReason = argsList[8]
+            };
+            if (command == "migrate")
+            {
+                var key = Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY");
+                if (!string.IsNullOrWhiteSpace(key))
+                {
+                    client.DefaultRequestHeaders.TryAddWithoutValidation(
+                        "X-State-Machine-Trusted-Ingestion-Key", key);
+                }
+            }
+            var route = $"api/instances/{Uri.EscapeDataString(argsList[1])}";
+            await PrintResponse(await client.PostAsJsonAsync(
+                command == "migrate" ? $"{route}/migrations" : $"{route}/migration-preview", request));
+            break;
+        }
+        case "migrations" when argsList.Count == 2:
+            await PrintResponse(await client.GetAsync(
+                $"api/instances/{Uri.EscapeDataString(argsList[1])}/migrations"));
+            break;
         case "create" when argsList.Count is 4 or 5:
         {
             JsonDocument? facts = null;
@@ -148,6 +183,9 @@ static void PrintUsage() =>
         Usage: dsm [--url http://localhost:5000] <command>
           register <definition.json>
           definitions
+          migrate-preview <instance-id> <source-id> <source-version> <target-id> <target-version> <expected-revision> <migration-id> <reason>
+          migrate <instance-id> <source-id> <source-version> <target-id> <target-version> <expected-revision> <migration-id> <reason>
+          migrations <instance-id>
           create <instance-id> <definition-id> <version> [facts-json | @facts-file]
           inspect <instance-id>
           send <instance-id> <event>
@@ -161,4 +199,5 @@ static void PrintUsage() =>
           verify-decisions <instance-id>
           recovery <instance-id>
         Set DURABLE_STATE_MACHINE_API_URL to configure the API URL.
+        Set DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY for development-only migration execution.
         """);

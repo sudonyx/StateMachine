@@ -45,6 +45,7 @@ await using (var scope = app.Services.CreateAsyncScope())
     await database.EnsureGate8SchemaAsync();
     await database.EnsureGate9SchemaAsync();
     await database.EnsureGate10SchemaAsync();
+    await database.EnsureGate11SchemaAsync();
 }
 
 app.Use(async (context, next) =>
@@ -323,6 +324,39 @@ instances.MapGet("/{id}/replay/decision-verification", async (
     Results.Ok(await store.GetHistoricalReplayAsync(id, verifyDecisions: true, cancellationToken)))
     .WithName("VerifyHistoricalDecisions")
     .WithSummary("Re-evaluate recorded decisions using only immutable historical evidence and the bound definition.");
+instances.MapPost("/{id}/migration-preview", async (
+    string id, MigrationRequest request, MachineStore store, CancellationToken cancellationToken) =>
+{
+    var plan = OrionMigrationPlans.Resolve(request);
+    var preview = await store.PreviewMigrationAsync(id, request, plan, cancellationToken);
+    return Results.Ok(preview);
+}).WithName("PreviewInstanceMigration")
+  .WithSummary("Read-only eligibility preview for an explicitly named, registered migration contract.");
+instances.MapPost("/{id}/migrations", async (
+    string id, MigrationRequest request, HttpRequest httpRequest, MachineStore store,
+    TimeProvider timeProvider, CancellationToken cancellationToken) =>
+{
+    if (!app.Environment.IsDevelopment() || !IsTrustedIngestion(httpRequest))
+    {
+        return Results.Json(new ApiError("controlled-administration-required",
+            "Migration execution requires the configured development controlled-administration boundary."),
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+    var plan = OrionMigrationPlans.Resolve(request);
+    var result = await store.ExecuteMigrationAsync(
+        id, request, plan, timeProvider.GetUtcNow(), cancellationToken);
+    return Results.Ok(new
+    {
+        migration = MigrationResponse.From(result.Migration),
+        instance = result.Instance.ToResponse()
+    });
+}).WithName("ExecuteInstanceMigration")
+  .WithSummary("Explicitly execute and durably record an eligible migration under the development administration boundary.");
+instances.MapGet("/{id}/migrations", async (
+    string id, MachineStore store, CancellationToken cancellationToken) =>
+    Results.Ok((await store.ListMigrationsAsync(id, cancellationToken)).Select(MigrationResponse.From)))
+    .WithName("ListInstanceMigrations")
+    .WithSummary("Inspect committed and refused migration attempts without changing the instance.");
 instances.MapGet("/{id}/recovery", async (
     string id, MachineStore store, TimeProvider timeProvider, CancellationToken cancellationToken) =>
     Results.Ok(await store.GetRecoveryAssessmentAsync(id, timeProvider.GetUtcNow(), cancellationToken)))
