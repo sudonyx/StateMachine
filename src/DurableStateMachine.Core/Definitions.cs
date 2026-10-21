@@ -21,8 +21,18 @@ public sealed record MachineTransition(
     string Target,
     string? Description,
     GuardExpression? Guard);
-public sealed record CommandInputMapping(string Name, string Event);
-public sealed record ObservationInputMapping(string Name, string Event, IReadOnlyList<string> RequiredEvidence);
+public sealed record MachineConcern(
+    string Id,
+    string InitialState,
+    IReadOnlyDictionary<string, MachineState> States,
+    IReadOnlySet<string> Events,
+    IReadOnlyList<MachineTransition> Transitions);
+public sealed record CommandInputMapping(string Name, string Event, string? Concern = null);
+public sealed record ObservationInputMapping(
+    string Name,
+    string Event,
+    IReadOnlyList<string> RequiredEvidence,
+    string? Concern = null);
 public sealed record MachineInputPolicy(
     IReadOnlyDictionary<string, CommandInputMapping> Commands,
     IReadOnlyDictionary<string, ObservationInputMapping> Observations);
@@ -45,9 +55,11 @@ public sealed class MachineDefinition
         string version,
         string languageVersion,
         string initialState,
+        string? cancellationEvent,
         IReadOnlyDictionary<string, MachineState> states,
         IReadOnlySet<string> events,
         IReadOnlyList<MachineTransition> transitions,
+        IReadOnlyDictionary<string, MachineConcern> concerns,
         MachineInputPolicy? inputPolicy,
         IReadOnlyList<TimerDeclaration> timers)
     {
@@ -55,9 +67,11 @@ public sealed class MachineDefinition
         Version = version;
         LanguageVersion = languageVersion;
         InitialState = initialState;
+        CancellationEvent = cancellationEvent;
         States = states;
         Events = events;
         Transitions = transitions;
+        Concerns = concerns;
         InputPolicy = inputPolicy;
         Timers = timers;
     }
@@ -66,9 +80,11 @@ public sealed class MachineDefinition
     public string Version { get; }
     public string LanguageVersion { get; }
     public string InitialState { get; }
+    public string? CancellationEvent { get; }
     public IReadOnlyDictionary<string, MachineState> States { get; }
     public IReadOnlySet<string> Events { get; }
     public IReadOnlyList<MachineTransition> Transitions { get; }
+    public IReadOnlyDictionary<string, MachineConcern> Concerns { get; }
     public MachineInputPolicy? InputPolicy { get; }
     public IReadOnlyList<TimerDeclaration> Timers { get; }
 }
@@ -105,12 +121,14 @@ public abstract record GuardExpression
     internal sealed record Presence(string Operator, string Fact) : GuardExpression;
     internal sealed record Logical(string Operator, IReadOnlyList<GuardExpression> Arguments) : GuardExpression;
     internal sealed record Negation(GuardExpression Argument) : GuardExpression;
+    internal sealed record ConcernState(string Concern, string State) : GuardExpression;
+    internal sealed record ParentState(string State) : GuardExpression;
 }
 
 public static class MachineDefinitionLoader
 {
     private static readonly string[] RootProperties =
-        ["languageVersion", "id", "version", "initialState", "states", "events", "transitions", "inputPolicy", "timers"];
+        ["languageVersion", "id", "version", "initialState", "states", "events", "transitions", "inputPolicy", "timers", "concerns", "cancellationEvent"];
 
     public static MachineDefinition Load(string json)
     {
@@ -140,27 +158,38 @@ public static class MachineDefinitionLoader
             {
                 issues.Add(new("missing-property", "$.languageVersion", "Required property 'languageVersion' is missing."));
             }
-            else if (languageVersion is not null && languageVersion is not ("1.0" or "1.1" or "1.2"))
+            else if (languageVersion is not null && languageVersion is not ("1.0" or "1.1" or "1.2" or "1.3"))
             {
-                issues.Add(new("unsupported-language-version", "$.languageVersion", $"Language version '{languageVersion}' is not supported; expected '1.0', '1.1' or '1.2'."));
+                issues.Add(new("unsupported-language-version", "$.languageVersion", $"Language version '{languageVersion}' is not supported; expected '1.0', '1.1', '1.2' or '1.3'."));
             }
             if (languageVersion == "1.0" && root.TryGetProperty("inputPolicy", out _))
             {
                 issues.Add(new("input-policy-version", "$.inputPolicy", "Input policies require language version '1.1'."));
             }
-            if (languageVersion is not "1.2" && root.TryGetProperty("timers", out _))
+            if (languageVersion is not ("1.2" or "1.3") && root.TryGetProperty("timers", out _))
             {
-                issues.Add(new("timer-version", "$.timers", "Timer declarations require language version '1.2'."));
+                issues.Add(new("timer-version", "$.timers", "Timer declarations require language version '1.2' or '1.3'."));
+            }
+            if (languageVersion is not "1.3" && root.TryGetProperty("concerns", out _))
+            {
+                issues.Add(new("concern-version", "$.concerns", "Concern declarations require language version '1.3'."));
+            }
+            if (languageVersion is not "1.3" && root.TryGetProperty("cancellationEvent", out _))
+            {
+                issues.Add(new("cancellation-version", "$.cancellationEvent",
+                    "Cancellation declarations require language version '1.3'."));
             }
 
             var id = ReadRequiredString(root, "id", "$.id", issues);
             var version = ReadRequiredString(root, "version", "$.version", issues);
             var initialState = ReadRequiredString(root, "initialState", "$.initialState", issues);
+            var cancellationEvent = ReadString(root, "cancellationEvent", "$.cancellationEvent", issues);
 
             var states = ReadStates(root, issues);
             var events = ReadEvents(root, issues);
             var transitions = ReadTransitions(root, issues);
-            var inputPolicy = ReadInputPolicy(root, languageVersion, events, issues);
+            var concerns = ReadConcerns(root, languageVersion, issues);
+            var inputPolicy = ReadInputPolicy(root, languageVersion, events, concerns, issues);
             var timers = ReadTimers(root, languageVersion, states, events, transitions, inputPolicy, issues);
 
             if (states.Values.All(state => !state.IsTerminal))
@@ -174,6 +203,15 @@ public static class MachineDefinitionLoader
             }
 
             ValidateTransitions(states, events, transitions, issues);
+            ValidateConcernReferences(transitions, concerns, "$.transitions", issues);
+            ValidateParentStateReferences(transitions, states, languageVersion, "$.transitions", issues);
+            foreach (var concern in concerns.Values)
+            {
+                ValidateConcernReferences(concern.Transitions, concerns, $"$.concerns[{concern.Id}].transitions", issues);
+                ValidateParentStateReferences(
+                    concern.Transitions, states, languageVersion, $"$.concerns[{concern.Id}].transitions", issues);
+            }
+            ValidateCancellation(cancellationEvent, events, concerns, issues);
             ValidateTimers(timers, states, events, transitions, inputPolicy, issues);
             if (timers.Count > 0 && inputPolicy is null)
             {
@@ -190,11 +228,96 @@ public static class MachineDefinitionLoader
                 version!,
                 languageVersion!,
                 initialState!,
+                cancellationEvent,
                 new ReadOnlyDictionary<string, MachineState>(states),
                 events.ToFrozenSet(StringComparer.Ordinal),
                 transitions.AsReadOnly(),
+                new ReadOnlyDictionary<string, MachineConcern>(concerns),
                 inputPolicy,
                 timers.AsReadOnly());
+        }
+    }
+
+    private static void ValidateParentStateReferences(
+        IReadOnlyList<MachineTransition> transitions,
+        IReadOnlyDictionary<string, MachineState> states,
+        string? languageVersion,
+        string path,
+        List<ValidationIssue> issues)
+    {
+        static IEnumerable<GuardExpression.ParentState> Find(GuardExpression? guard)
+        {
+            if (guard is GuardExpression.ParentState state)
+            {
+                yield return state;
+            }
+            else if (guard is GuardExpression.Logical logical)
+            {
+                foreach (var child in logical.Arguments)
+                {
+                    foreach (var match in Find(child))
+                    {
+                        yield return match;
+                    }
+                }
+            }
+            else if (guard is GuardExpression.Negation negation)
+            {
+                foreach (var match in Find(negation.Argument))
+                {
+                    yield return match;
+                }
+            }
+        }
+
+        foreach (var transition in transitions)
+        {
+            foreach (var stateReference in Find(transition.Guard))
+            {
+                if (languageVersion is not "1.3")
+                {
+                    issues.Add(new("parent-state-guard-version", $"{path}[{transition.Id}].guard",
+                        "Parent-state guards require language version '1.3'."));
+                }
+                if (!states.ContainsKey(stateReference.State))
+                {
+                    issues.Add(new("unknown-guard-parent-state", $"{path}[{transition.Id}].guard",
+                        $"Guard references undeclared parent state '{stateReference.State}'."));
+                }
+            }
+        }
+    }
+
+    private static void ValidateCancellation(
+        string? cancellationEvent,
+        IReadOnlySet<string> events,
+        IReadOnlyDictionary<string, MachineConcern> concerns,
+        List<ValidationIssue> issues)
+    {
+        if (cancellationEvent is null)
+        {
+            return;
+        }
+        if (!events.Contains(cancellationEvent))
+        {
+            issues.Add(new("undeclared-cancellation-event", "$.cancellationEvent",
+                $"Cancellation event '{cancellationEvent}' is not declared by the parent machine."));
+            return;
+        }
+        foreach (var concern in concerns.Values)
+        {
+            foreach (var state in concern.States.Values.Where(state => !state.IsTerminal))
+            {
+                var matching = concern.Transitions.Where(transition =>
+                    transition.Source == state.Id && transition.Event == cancellationEvent).ToArray();
+                if (matching.Length != 1 || matching[0].Guard is not null ||
+                    !concern.States.TryGetValue(matching[0].Target, out var target) || !target.IsTerminal)
+                {
+                    issues.Add(new("invalid-concern-cancellation",
+                        $"$.concerns[{concern.Id}].transitions",
+                        $"Nonterminal state '{state.Id}' must have exactly one unguarded '{cancellationEvent}' transition to a terminal state."));
+                }
+            }
         }
     }
 
@@ -212,7 +335,7 @@ public static class MachineDefinitionLoader
         {
             return timers;
         }
-        if (languageVersion != "1.2")
+        if (languageVersion is not ("1.2" or "1.3"))
         {
             return timers;
         }
@@ -424,6 +547,7 @@ public static class MachineDefinitionLoader
         JsonElement root,
         string? languageVersion,
         IReadOnlySet<string> events,
+        IReadOnlyDictionary<string, MachineConcern> concerns,
         List<ValidationIssue> issues)
     {
         if (!root.TryGetProperty("inputPolicy", out var policy))
@@ -437,9 +561,9 @@ public static class MachineDefinitionLoader
         }
 
         CheckProperties(policy, ["commands", "observations"], "$.inputPolicy", issues);
-        var commands = ReadCommandMappings(policy, events, issues);
-        var observations = ReadObservationMappings(policy, events, issues);
-        if (languageVersion is not ("1.1" or "1.2"))
+        var commands = ReadCommandMappings(policy, languageVersion, events, concerns, issues);
+        var observations = ReadObservationMappings(policy, languageVersion, events, concerns, issues);
+        if (languageVersion is not ("1.1" or "1.2" or "1.3"))
         {
             return null;
         }
@@ -450,7 +574,9 @@ public static class MachineDefinitionLoader
 
     private static Dictionary<string, CommandInputMapping> ReadCommandMappings(
         JsonElement policy,
+        string? languageVersion,
         IReadOnlySet<string> events,
+        IReadOnlyDictionary<string, MachineConcern> concerns,
         List<ValidationIssue> issues)
     {
         var commands = new Dictionary<string, CommandInputMapping>(StringComparer.Ordinal);
@@ -469,14 +595,13 @@ public static class MachineDefinitionLoader
                 issues.Add(new("invalid-command-mapping", path, "Each command mapping must be an object."));
                 continue;
             }
-            CheckProperties(value, ["name", "event"], path, issues);
+            CheckProperties(value, ["name", "event", "concern"], path, issues);
             var name = ReadRequiredString(value, "name", path + ".name", issues);
             var eventName = ReadRequiredString(value, "event", path + ".event", issues);
-            if (eventName is not null && !events.Contains(eventName))
-            {
-                issues.Add(new("undeclared-input-event", path + ".event", $"Event '{eventName}' is not declared."));
-            }
-            if (name is not null && eventName is not null && !commands.TryAdd(name, new CommandInputMapping(name, eventName)))
+            var concernId = ReadString(value, "concern", path + ".concern", issues);
+            ValidateInputTarget(name, eventName, concernId, languageVersion, events, concerns, path, issues);
+            if (name is not null && eventName is not null &&
+                !commands.TryAdd(name, new CommandInputMapping(name, eventName, concernId)))
             {
                 issues.Add(new("duplicate-command-mapping", path + ".name", $"Command '{name}' is declared more than once."));
             }
@@ -486,7 +611,9 @@ public static class MachineDefinitionLoader
 
     private static Dictionary<string, ObservationInputMapping> ReadObservationMappings(
         JsonElement policy,
+        string? languageVersion,
         IReadOnlySet<string> events,
+        IReadOnlyDictionary<string, MachineConcern> concerns,
         List<ValidationIssue> issues)
     {
         var observations = new Dictionary<string, ObservationInputMapping>(StringComparer.Ordinal);
@@ -505,13 +632,11 @@ public static class MachineDefinitionLoader
                 issues.Add(new("invalid-observation-mapping", path, "Each observation mapping must be an object."));
                 continue;
             }
-            CheckProperties(value, ["name", "event", "requiredEvidence"], path, issues);
+            CheckProperties(value, ["name", "event", "requiredEvidence", "concern"], path, issues);
             var name = ReadRequiredString(value, "name", path + ".name", issues);
             var eventName = ReadRequiredString(value, "event", path + ".event", issues);
-            if (eventName is not null && !events.Contains(eventName))
-            {
-                issues.Add(new("undeclared-input-event", path + ".event", $"Event '{eventName}' is not declared."));
-            }
+            var concernId = ReadString(value, "concern", path + ".concern", issues);
+            ValidateInputTarget(name, eventName, concernId, languageVersion, events, concerns, path, issues);
 
             var requiredEvidence = new List<string>();
             if (!value.TryGetProperty("requiredEvidence", out var required) || required.ValueKind != JsonValueKind.Array)
@@ -540,7 +665,7 @@ public static class MachineDefinitionLoader
             }
 
             if (name is not null && eventName is not null &&
-                !observations.TryAdd(name, new ObservationInputMapping(name, eventName, requiredEvidence.AsReadOnly())))
+                !observations.TryAdd(name, new ObservationInputMapping(name, eventName, requiredEvidence.AsReadOnly(), concernId)))
             {
                 issues.Add(new("duplicate-observation-mapping", path + ".name", $"Observation '{name}' is declared more than once."));
             }
@@ -548,28 +673,177 @@ public static class MachineDefinitionLoader
         return observations;
     }
 
-    private static Dictionary<string, MachineState> ReadStates(JsonElement root, List<ValidationIssue> issues)
+    private static void ValidateInputTarget(
+        string? name,
+        string? eventName,
+        string? concernId,
+        string? languageVersion,
+        IReadOnlySet<string> events,
+        IReadOnlyDictionary<string, MachineConcern> concerns,
+        string path,
+        List<ValidationIssue> issues)
+    {
+        if (concernId is null)
+        {
+            if (eventName is not null && !events.Contains(eventName))
+            {
+                issues.Add(new("undeclared-input-event", path + ".event", $"Event '{eventName}' is not declared."));
+            }
+            return;
+        }
+        if (languageVersion != "1.3")
+        {
+            issues.Add(new("concern-input-version", path + ".concern", "Concern input routing requires language version '1.3'."));
+        }
+        if (!concerns.TryGetValue(concernId, out var concern))
+        {
+            issues.Add(new("unknown-input-concern", path + ".concern", $"Concern '{concernId}' is not declared."));
+        }
+        else if (eventName is not null && !concern.Events.Contains(eventName))
+        {
+            issues.Add(new("undeclared-concern-input-event", path + ".event",
+                $"Event '{eventName}' is not declared by concern '{concernId}'."));
+        }
+    }
+
+    private static Dictionary<string, MachineConcern> ReadConcerns(
+        JsonElement root,
+        string? languageVersion,
+        List<ValidationIssue> issues)
+    {
+        var concerns = new Dictionary<string, MachineConcern>(StringComparer.Ordinal);
+        if (!root.TryGetProperty("concerns", out var values))
+        {
+            return concerns;
+        }
+        if (values.ValueKind != JsonValueKind.Array)
+        {
+            issues.Add(new("invalid-concerns", "$.concerns", "Concerns must be an array."));
+            return concerns;
+        }
+        if (languageVersion != "1.3")
+        {
+            return concerns;
+        }
+
+        var index = 0;
+        foreach (var value in values.EnumerateArray())
+        {
+            var path = $"$.concerns[{index++}]";
+            if (value.ValueKind != JsonValueKind.Object)
+            {
+                issues.Add(new("invalid-concern", path, "Each concern must be an object."));
+                continue;
+            }
+
+            CheckProperties(value, ["id", "initialState", "states", "events", "transitions"], path, issues);
+            var id = ReadRequiredString(value, "id", path + ".id", issues);
+            var initialState = ReadRequiredString(value, "initialState", path + ".initialState", issues);
+            var states = ReadStates(value, issues, path + ".states");
+            var events = ReadEvents(value, issues, path + ".events");
+            var transitions = ReadTransitions(value, issues, path + ".transitions");
+            if (states.Values.All(state => !state.IsTerminal))
+            {
+                issues.Add(new("missing-concern-terminal-state", path + ".states",
+                    "Each concern must declare at least one terminal state."));
+            }
+            if (initialState is not null && !states.ContainsKey(initialState))
+            {
+                issues.Add(new("unknown-concern-initial-state", path + ".initialState",
+                    $"Initial state '{initialState}' is not declared by concern '{id}'."));
+            }
+            ValidateTransitions(states, events, transitions, issues, path + ".transitions");
+
+            if (id is not null)
+            {
+                var concern = new MachineConcern(id, initialState ?? string.Empty,
+                    new ReadOnlyDictionary<string, MachineState>(states),
+                    events.ToFrozenSet(StringComparer.Ordinal),
+                    transitions.AsReadOnly());
+                if (!concerns.TryAdd(id, concern))
+                {
+                    issues.Add(new("duplicate-concern-id", path + ".id", $"Concern '{id}' is declared more than once."));
+                }
+            }
+        }
+        return concerns;
+    }
+
+    private static void ValidateConcernReferences(
+        IReadOnlyList<MachineTransition> transitions,
+        IReadOnlyDictionary<string, MachineConcern> concerns,
+        string path,
+        List<ValidationIssue> issues)
+    {
+        static IEnumerable<GuardExpression.ConcernState> Find(GuardExpression? guard)
+        {
+            if (guard is GuardExpression.ConcernState state)
+            {
+                yield return state;
+            }
+            else if (guard is GuardExpression.Logical logical)
+            {
+                foreach (var child in logical.Arguments)
+                {
+                    foreach (var match in Find(child))
+                    {
+                        yield return match;
+                    }
+                }
+            }
+            else if (guard is GuardExpression.Negation negation)
+            {
+                foreach (var match in Find(negation.Argument))
+                {
+                    yield return match;
+                }
+            }
+        }
+
+        foreach (var transition in transitions)
+        {
+            foreach (var stateReference in Find(transition.Guard))
+            {
+                var guardPath = $"{path}[{transition.Id}].guard";
+                if (!concerns.TryGetValue(stateReference.Concern, out var concern))
+                {
+                    issues.Add(new("unknown-guard-concern", guardPath,
+                        $"Guard references undeclared concern '{stateReference.Concern}'."));
+                }
+                else if (!concern.States.ContainsKey(stateReference.State))
+                {
+                    issues.Add(new("unknown-guard-concern-state", guardPath,
+                        $"Guard references unknown state '{stateReference.State}' of concern '{stateReference.Concern}'."));
+                }
+            }
+        }
+    }
+
+    private static Dictionary<string, MachineState> ReadStates(
+        JsonElement root,
+        List<ValidationIssue> issues,
+        string path = "$.states")
     {
         var states = new Dictionary<string, MachineState>(StringComparer.Ordinal);
         if (!root.TryGetProperty("states", out var values) || values.ValueKind != JsonValueKind.Array)
         {
-            issues.Add(new("missing-states", "$.states", "States must be an array."));
+            issues.Add(new("missing-states", path, "States must be an array."));
             return states;
         }
 
         var index = 0;
         foreach (var value in values.EnumerateArray())
         {
-            var path = $"$.states[{index}]";
+            var itemPath = $"{path}[{index}]";
             index++;
             if (value.ValueKind != JsonValueKind.Object)
             {
-                issues.Add(new("invalid-state", path, "Each state must be an object."));
+                issues.Add(new("invalid-state", itemPath, "Each state must be an object."));
                 continue;
             }
 
-            CheckProperties(value, ["id", "terminal"], path, issues);
-            var id = ReadRequiredString(value, "id", $"{path}.id", issues);
+            CheckProperties(value, ["id", "terminal"], itemPath, issues);
+            var id = ReadRequiredString(value, "id", $"{itemPath}.id", issues);
             var terminal = false;
             if (value.TryGetProperty("terminal", out var terminalValue))
             {
@@ -579,25 +853,25 @@ public static class MachineDefinitionLoader
                 }
                 else
                 {
-                    issues.Add(new("invalid-terminal-flag", $"{path}.terminal", "Terminal must be a boolean."));
+                    issues.Add(new("invalid-terminal-flag", $"{itemPath}.terminal", "Terminal must be a boolean."));
                 }
             }
 
             if (id is not null && !states.TryAdd(id, new MachineState(id, terminal)))
             {
-                issues.Add(new("duplicate-state", $"{path}.id", $"State '{id}' is declared more than once."));
+                issues.Add(new("duplicate-state", $"{itemPath}.id", $"State '{id}' is declared more than once."));
             }
         }
 
         return states;
     }
 
-    private static HashSet<string> ReadEvents(JsonElement root, List<ValidationIssue> issues)
+    private static HashSet<string> ReadEvents(JsonElement root, List<ValidationIssue> issues, string path = "$.events")
     {
         var events = new HashSet<string>(StringComparer.Ordinal);
         if (!root.TryGetProperty("events", out var values) || values.ValueKind != JsonValueKind.Array)
         {
-            issues.Add(new("missing-events", "$.events", "Events must be an array of strings."));
+            issues.Add(new("missing-events", path, "Events must be an array of strings."));
             return events;
         }
 
@@ -606,11 +880,11 @@ public static class MachineDefinitionLoader
         {
             if (value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString()))
             {
-                issues.Add(new("invalid-event", $"$.events[{index}]", "Event identifiers must be non-empty strings."));
+                issues.Add(new("invalid-event", $"{path}[{index}]", "Event identifiers must be non-empty strings."));
             }
             else if (!events.Add(value.GetString()!))
             {
-                issues.Add(new("duplicate-event", $"$.events[{index}]", $"Event '{value.GetString()}' is declared more than once."));
+                issues.Add(new("duplicate-event", $"{path}[{index}]", $"Event '{value.GetString()}' is declared more than once."));
             }
 
             index++;
@@ -619,42 +893,45 @@ public static class MachineDefinitionLoader
         return events;
     }
 
-    private static List<MachineTransition> ReadTransitions(JsonElement root, List<ValidationIssue> issues)
+    private static List<MachineTransition> ReadTransitions(
+        JsonElement root,
+        List<ValidationIssue> issues,
+        string path = "$.transitions")
     {
         var transitions = new List<MachineTransition>();
         var ids = new HashSet<string>(StringComparer.Ordinal);
         if (!root.TryGetProperty("transitions", out var values) || values.ValueKind != JsonValueKind.Array)
         {
-            issues.Add(new("missing-transitions", "$.transitions", "Transitions must be an array."));
+            issues.Add(new("missing-transitions", path, "Transitions must be an array."));
             return transitions;
         }
 
         var index = 0;
         foreach (var value in values.EnumerateArray())
         {
-            var path = $"$.transitions[{index}]";
+            var itemPath = $"{path}[{index}]";
             index++;
             if (value.ValueKind != JsonValueKind.Object)
             {
-                issues.Add(new("invalid-transition", path, "Each transition must be an object."));
+                issues.Add(new("invalid-transition", itemPath, "Each transition must be an object."));
                 continue;
             }
 
-            CheckProperties(value, ["id", "source", "event", "target", "description", "guard"], path, issues);
-            var id = ReadRequiredString(value, "id", $"{path}.id", issues);
-            var source = ReadRequiredString(value, "source", $"{path}.source", issues);
-            var eventName = ReadRequiredString(value, "event", $"{path}.event", issues);
-            var target = ReadRequiredString(value, "target", $"{path}.target", issues);
-            var description = ReadString(value, "description", $"{path}.description", issues);
+            CheckProperties(value, ["id", "source", "event", "target", "description", "guard"], itemPath, issues);
+            var id = ReadRequiredString(value, "id", $"{itemPath}.id", issues);
+            var source = ReadRequiredString(value, "source", $"{itemPath}.source", issues);
+            var eventName = ReadRequiredString(value, "event", $"{itemPath}.event", issues);
+            var target = ReadRequiredString(value, "target", $"{itemPath}.target", issues);
+            var description = ReadString(value, "description", $"{itemPath}.description", issues);
             GuardExpression? guard = null;
             if (value.TryGetProperty("guard", out var guardElement))
             {
-                guard = ParseGuard(guardElement, $"{path}.guard", issues);
+                guard = ParseGuard(guardElement, $"{itemPath}.guard", issues);
             }
 
             if (id is not null && !ids.Add(id))
             {
-                issues.Add(new("duplicate-transition-id", $"{path}.id", $"Transition '{id}' is declared more than once."));
+                issues.Add(new("duplicate-transition-id", $"{itemPath}.id", $"Transition '{id}' is declared more than once."));
             }
 
             if (id is not null && source is not null && eventName is not null && target is not null)
@@ -747,6 +1024,17 @@ public static class MachineDefinitionLoader
                 var parsedArgument = ParseGuard(argument, $"{path}.arg", issues);
                 return parsedArgument is null ? null : new GuardExpression.Negation(parsedArgument);
 
+            case "concernState":
+                CheckProperties(element, ["op", "concern", "state"], path, issues);
+                var concern = ReadRequiredString(element, "concern", path + ".concern", issues);
+                var state = ReadRequiredString(element, "state", path + ".state", issues);
+                return concern is null || state is null ? null : new GuardExpression.ConcernState(concern, state);
+
+            case "parentState":
+                CheckProperties(element, ["op", "state"], path, issues);
+                var parentState = ReadRequiredString(element, "state", path + ".state", issues);
+                return parentState is null ? null : new GuardExpression.ParentState(parentState);
+
             default:
                 issues.Add(new("unsupported-guard-operator", $"{path}.op", $"Guard operator '{op}' is not supported."));
                 return null;
@@ -757,11 +1045,12 @@ public static class MachineDefinitionLoader
         IReadOnlyDictionary<string, MachineState> states,
         IReadOnlySet<string> events,
         IReadOnlyList<MachineTransition> transitions,
-        List<ValidationIssue> issues)
+        List<ValidationIssue> issues,
+        string pathPrefix = "$.transitions")
     {
         foreach (var transition in transitions)
         {
-            var path = $"$.transitions[{transition.Id}]";
+            var path = $"{pathPrefix}[{transition.Id}]";
             if (!states.TryGetValue(transition.Source, out var source))
             {
                 issues.Add(new("unknown-transition-source", path + ".source", $"Source state '{transition.Source}' is not declared."));
@@ -786,7 +1075,7 @@ public static class MachineDefinitionLoader
             {
                 issues.Add(new(
                     "ambiguous-unguarded-transitions",
-                    "$.transitions",
+                    pathPrefix,
                     $"More than one unguarded transition is declared for state '{group.Key.Source}' and event '{group.Key.Event}'."));
             }
         }

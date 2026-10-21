@@ -59,4 +59,4 @@ SQLite `BEGIN IMMEDIATE` serializes migration against other database writers. Th
 
 Definitions and migration records are retained in the same SQLite database; there is no pruning or external registry. A missing required definition produces an explicit replay limitation. Database-file administrators can still alter records; the local digest/evidence checks detect inconsistency but are not cryptographic protection against an administrator able to rewrite both content and digest.
 
-The migration API is intentionally narrow. There is no arbitrary JSON transformation DSL, automatic migration, startup upgrade, production authorization system, date-aware version resolver, timer supersession, external-effect remapping or automatic retry. Gate 12 is not implemented.
+The migration API is intentionally narrow. There is no arbitrary JSON transformation DSL, automatic migration, startup upgrade, production authorization system, date-aware version resolver, timer supersession, external-effect remapping or automatic retry. Gate 12 adds language 1.3 concern dimensions but does not change the Orion 4.0/5.0 definitions or add a migration to Orion 6.0.

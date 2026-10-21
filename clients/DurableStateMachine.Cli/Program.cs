@@ -92,6 +92,18 @@ try
         case "inspect" when argsList.Count == 2:
             await PrintResponse(await client.GetAsync($"api/instances/{Uri.EscapeDataString(argsList[1])}"));
             break;
+        case "concerns" when argsList.Count == 2:
+            await PrintResponse(await client.GetAsync(
+                $"api/instances/{Uri.EscapeDataString(argsList[1])}/concerns"));
+            break;
+        case "concern-history" when argsList.Count == 2:
+            await PrintResponse(await client.GetAsync(
+                $"api/instances/{Uri.EscapeDataString(argsList[1])}/concerns/history"));
+            break;
+        case "concern-replay" when argsList.Count == 2:
+            await PrintResponse(await client.GetAsync(
+                $"api/instances/{Uri.EscapeDataString(argsList[1])}/concerns/replay"));
+            break;
         case "send" when argsList.Count == 3:
             await PrintResponse(await client.PostAsJsonAsync($"api/instances/{Uri.EscapeDataString(argsList[1])}/events",
                 new { @event = argsList[2] }));
@@ -188,6 +200,9 @@ static void PrintUsage() =>
           migrations <instance-id>
           create <instance-id> <definition-id> <version> [facts-json | @facts-file]
           inspect <instance-id>
+          concerns <instance-id>
+          concern-history <instance-id>
+          concern-replay <instance-id>
           send <instance-id> <event>
           attempts <instance-id>
           history <instance-id>

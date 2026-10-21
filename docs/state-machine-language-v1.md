@@ -1,6 +1,6 @@
-# State-machine language 1.0, 1.1 and 1.2
+# State-machine language 1.0, 1.1, 1.2 and 1.3
 
-The runtime accepts deliberately small JSON definition formats. Definitions are parsed and semantically validated before registration; unsupported or unknown properties are errors rather than ignored input. Language 1.0 retains its original event-submission semantics. Language 1.1 adds opt-in input mappings. Language 1.2 adds declarative durable timers while preserving the interpretation of existing 1.0 and 1.1 definitions.
+The runtime accepts deliberately small JSON definition formats. Definitions are parsed and semantically validated before registration; unsupported or unknown properties are errors rather than ignored input. Language 1.0 retains its original event-submission semantics. Language 1.1 adds opt-in input mappings. Language 1.2 adds declarative durable timers. Language 1.3 adds independent durable concern dimensions and cancellation semantics while preserving input-mapping and timer capabilities.
 
 ## Structure
 
@@ -52,7 +52,7 @@ Language 1.1 and 1.2 may additionally declare an input policy:
 }
 ```
 
-Both `commands` and `observations` arrays are required when `inputPolicy` is present. Each mapping name is unique within its kind and maps to a declared workflow event. Observation mappings list required evidence keys. Language 1.0 definitions must not contain `inputPolicy`; register a new immutable definition version using language 1.1 or 1.2 to opt in.
+Both `commands` and `observations` arrays are required when `inputPolicy` is present. Each mapping name is unique within its kind and maps to a declared workflow event. Observation mappings list required evidence keys. Language 1.0 definitions must not contain `inputPolicy`; register a new immutable definition version using language 1.1 or later to opt in.
 
 ## Language 1.2 timers
 
@@ -99,9 +99,9 @@ Timer properties:
 - `invalidatedByDueTimers` optionally lists timer declaration IDs whose persisted deadline suppresses this timer once that other timer is due, even if it has not yet been processed.
 - `effectIntent` is optional. When the timer event is accepted, the configured capability's durable Gate 7 effect intent and expected observation are created in the same SQLite transaction. It does not invoke a provider.
 
-`timers` is permitted only in language 1.2. A definition with timers must declare `inputPolicy`; timer-generated events cannot be mapped to caller-submittable commands or observations. Direct `/events` submissions are restricted for timed definitions. Ordinary clients cannot make a timer authoritative by submitting its ID or its event.
+`timers` is permitted in language 1.2 and 1.3. A definition with timers must declare `inputPolicy`; timer-generated events cannot be mapped to caller-submittable commands or observations. Direct `/events` submissions are restricted for timed definitions. Ordinary clients cannot make a timer authoritative by submitting its ID or its event.
 
-The persistence layer records the accepted trigger and history identity, originating revision, definition ID/version, trigger time, deadline calculation time and exact UTC `dueAt`. Restart processing reads that persisted value; it does not recalculate from the current definition. The due processor validates the bound definition and current `whileState`, records its processing outcome, and passes eligible events through the same evaluator as other workflow inputs.
+The persistence layer records the accepted trigger and history identity, originating revision, definition ID/version, trigger time, deadline calculation time and exact UTC `dueAt`. Restart processing reads that persisted value; it does not recalculate from the current definition. The due processor validates the bound definition and current `whileState`, records its processing outcome, and passes eligible events through the same evaluator as other workflow inputs. Language 1.3 retains these parent timer semantics; concerns do not declare independent timers.
 
 ## Definition semantics and validation
 
@@ -111,12 +111,86 @@ The persistence layer records the accepted trigger and history identity, origina
 - Every source and target must name a declared state; every transition event must be declared.
 - Terminal states cannot have outgoing transitions.
 - Two unguarded transitions cannot share a source and event. Guarded overlaps are checked when facts are evaluated; runtime ambiguity is refused.
-- Language versions `1.0`, `1.1` and `1.2` are accepted. Unknown JSON properties and unsupported guard operators are errors. Language 1.1 adds input policies; language 1.2 adds the optional timer declarations described above. The flat-state and guard semantics remain unchanged.
+- Language versions `1.0`, `1.1`, `1.2` and `1.3` are accepted. Unknown JSON properties and unsupported guard operators are errors. Language 1.1 adds input policies; language 1.2 adds optional timer declarations; language 1.3 adds optional concern and cancellation declarations. Existing definitions retain their original semantics.
 - States are flat. Hierarchy, parallel regions, entry/exit actions and arbitrary code are unsupported. Definitions contain no migration syntax: Gate 11 supports only explicitly registered migration contracts outside the evaluator, and refuses pairs/states without a contract. Timer declarations do not execute code or call providers.
 
-## Gate 11 definition versioning
+## Language 1.3 durable concerns
 
-Language 1.2 remains unchanged for Gate 11. Each `(id, version)` is immutable, and a created instance remains bound to its exact version unless an explicitly requested migration contract is validated and durably committed. There is no automatic latest-version selection, effective-date policy selector, general migration DSL or fact transformation language. A migration contract is application-registered and checked by the persistence boundary; see [gate-11-design.md](./gate-11-design.md). Orion 5.0 is an example of a separate version using only existing states, guards, input mappings and timer declarations; see [orion-definition-v5.md](./orion-definition-v5.md).
+Language 1.3 may declare independent, named finite-state concerns alongside the
+parent lifecycle. Concerns are separate projections and histories within the
+same instance, not nested or orthogonal statecharts:
+
+```json
+{
+  "languageVersion": "1.3",
+  "id": "example",
+  "version": "1",
+  "initialState": "Open",
+  "cancellationEvent": "Cancel",
+  "states": [{ "id": "Open" }, { "id": "Closed", "terminal": true }],
+  "events": ["Cancel"],
+  "inputPolicy": {
+    "commands": [],
+    "observations": [{
+      "name": "WorkCompleted",
+      "event": "Complete",
+      "concern": "work",
+      "requiredEvidence": ["resultDigest"]
+    }]
+  },
+  "transitions": [
+    { "id": "close", "source": "Open", "event": "Cancel", "target": "Closed" }
+  ],
+  "concerns": [{
+    "id": "work",
+    "initialState": "Pending",
+    "states": [{ "id": "Pending" }, { "id": "Complete" }, { "id": "Cancelled", "terminal": true }],
+    "events": ["Complete", "Cancel"],
+    "transitions": [
+      { "id": "complete-work", "source": "Pending", "event": "Complete", "target": "Complete" },
+      { "id": "cancel-work", "source": "Pending", "event": "Cancel", "target": "Cancelled" }
+    ]
+  }]
+}
+```
+
+The optional `concern` property on an input mapping routes that command or
+observation to exactly one declared concern. Without it, the mapping targets a
+parent event. An accepted concern input changes only that concern: its own
+revision and concern history advance, while the parent state and parent
+revision remain unchanged. The input attempt and inbound receipt are still
+durable and use the same input-authority, expected-operation, evidence,
+deduplication and stale-input checks as other commands and observations.
+Concern-only inputs cannot be submitted through the direct `/events` route.
+
+The optional top-level `cancellationEvent` names a parent event whose accepted
+transition must enter a terminal parent state. Every nonterminal state of every
+declared concern must have exactly one unguarded transition for that event to a
+terminal concern state. Acceptance of the parent cancellation and termination
+of all currently active concerns commit atomically. After the parent is
+terminal, later concern inputs are refused; this does not reverse a completed
+external effect or imply that an outstanding external operation failed.
+
+Guards may use `{"op":"concernState","concern":"work","state":"Complete"}` or
+`{"op":"parentState","state":"Open"}`. These read the evaluation snapshot and
+compose with the existing `and`, `or` and `not` operators. A missing concern
+state is unresolved, not a successful condition. The evaluator reports the
+failed or unresolved child explanations for logical guards so coordination
+refusals identify their unmet prerequisite.
+
+The parent revision tracks parent lifecycle transitions only; each concern has
+its own monotonically increasing revision. Concern history records both the
+unchanged parent revision and the concern revision before/after. Replay
+reconstructs each concern from its bound definition, linked durable input
+attempt and stored evaluation evidence, then checks its projection. Parent
+replay excludes concern-only accepted attempts from the parent-history
+one-to-one check. Both replay paths are read-only and never repeat effects.
+Concerns have no independent timers, nested concerns, arbitrary multi-concern
+transitions or cross-instance transactions in this language version.
+
+## Gate 11 and Gate 12 definition versioning
+
+Each `(id, version)` is immutable, and a created instance remains bound to its exact version unless an explicitly requested migration contract is validated and durably committed. Gate 12 adds no migration from Orion 4.0 or 5.0 to Orion 6.0. There is no automatic latest-version selection, effective-date policy selector, general migration DSL or fact transformation language. A migration contract is application-registered and checked by the persistence boundary; see [gate-11-design.md](./gate-11-design.md). Orion 5.0 remains a separate language 1.2 definition; see [orion-definition-v5.md](./orion-definition-v5.md).
 
 Validation exceptions expose a list of `ValidationIssue` values (`Code`, JSON `Path`, and `Message`). Invalid JSON is reported as `invalid-json`.
 

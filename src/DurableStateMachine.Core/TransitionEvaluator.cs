@@ -60,7 +60,46 @@ public static class TransitionEvaluator
             return Result(EvaluationStatus.Rejected, currentState, eventName, "undeclared-event", $"Event '{eventName}' is not declared by definition '{definition.Id}@{definition.Version}'.");
         }
 
-        var candidates = definition.Transitions
+        return EvaluateTransitions(definition.States, definition.Events, definition.Transitions, currentState, eventName, context);
+    }
+
+    public static TransitionEvaluation EvaluateConcern(
+        MachineConcern concern,
+        string currentState,
+        string eventName,
+        TransitionEvaluationContext context)
+    {
+        ArgumentNullException.ThrowIfNull(concern);
+        ArgumentNullException.ThrowIfNull(currentState);
+        ArgumentNullException.ThrowIfNull(eventName);
+        ArgumentNullException.ThrowIfNull(context);
+        if (!concern.States.TryGetValue(currentState, out var state))
+        {
+            return Result(EvaluationStatus.Rejected, currentState, eventName,
+                "unknown-current-concern-state", $"State '{currentState}' is not declared by concern '{concern.Id}'.");
+        }
+        if (state.IsTerminal)
+        {
+            return Result(EvaluationStatus.Rejected, currentState, eventName,
+                "terminal-concern-state", $"Terminal state '{currentState}' of concern '{concern.Id}' cannot accept further transitions.");
+        }
+        if (!concern.Events.Contains(eventName))
+        {
+            return Result(EvaluationStatus.Rejected, currentState, eventName,
+                "undeclared-concern-event", $"Event '{eventName}' is not declared by concern '{concern.Id}'.");
+        }
+        return EvaluateTransitions(concern.States, concern.Events, concern.Transitions, currentState, eventName, context);
+    }
+
+    private static TransitionEvaluation EvaluateTransitions(
+        IReadOnlyDictionary<string, MachineState> states,
+        IReadOnlySet<string> events,
+        IReadOnlyList<MachineTransition> transitions,
+        string currentState,
+        string eventName,
+        TransitionEvaluationContext context)
+    {
+        var candidates = transitions
             .Where(transition => transition.Source == currentState && transition.Event == eventName)
             .ToArray();
         if (candidates.Length == 0)
@@ -168,11 +207,19 @@ public static class TransitionEvaluator
                 {
                     if (values.Any(value => value.Status == GuardStatus.Disabled))
                     {
-                        return new GuardResult(GuardStatus.Disabled, "logical-and-false", "At least one operand of 'and' is false.");
+                        var details = string.Join("; ", values
+                            .Where(value => value.Status == GuardStatus.Disabled)
+                            .Select(value => value.Explanation));
+                        return new GuardResult(GuardStatus.Disabled, "logical-and-false",
+                            $"At least one 'and' prerequisite is false: {details}");
                     }
                     if (values.Any(value => value.Status == GuardStatus.Unresolved))
                     {
-                        return GuardResult.UnresolvedResult("logical-and-unresolved", "An operand of 'and' is unresolved.");
+                        var details = string.Join("; ", values
+                            .Where(value => value.Status == GuardStatus.Unresolved)
+                            .Select(value => value.Explanation));
+                        return GuardResult.UnresolvedResult("logical-and-unresolved",
+                            $"An 'and' prerequisite is unresolved: {details}");
                     }
                     return GuardResult.Enabled;
                 }
@@ -182,9 +229,15 @@ public static class TransitionEvaluator
                 }
                 if (values.Any(value => value.Status == GuardStatus.Unresolved))
                 {
-                    return GuardResult.UnresolvedResult("logical-or-unresolved", "An operand of 'or' is unresolved.");
+                    var details = string.Join("; ", values
+                        .Where(value => value.Status == GuardStatus.Unresolved)
+                        .Select(value => value.Explanation));
+                    return GuardResult.UnresolvedResult("logical-or-unresolved",
+                        $"An 'or' operand is unresolved: {details}");
                 }
-                return new GuardResult(GuardStatus.Disabled, "logical-or-false", "Every operand of 'or' is false.");
+                var failedAlternatives = string.Join("; ", values.Select(value => value.Explanation));
+                return new GuardResult(GuardStatus.Disabled, "logical-or-false",
+                    $"Every 'or' alternative is false: {failedAlternatives}");
 
             case GuardExpression.Negation negation:
                 var inner = EvaluateGuard(negation.Argument, context);
@@ -194,6 +247,28 @@ public static class TransitionEvaluator
                     GuardStatus.Disabled => GuardResult.Enabled,
                     _ => GuardResult.UnresolvedResult("logical-not-unresolved", "The operand of 'not' is unresolved.")
                 };
+
+            case GuardExpression.ConcernState concernState:
+                if (!context.ConcernStates.TryGetValue(concernState.Concern, out var currentConcernState))
+                {
+                    return GuardResult.UnresolvedResult("missing-concern-state",
+                        $"Current state for concern '{concernState.Concern}' is unavailable.");
+                }
+                return currentConcernState == concernState.State
+                    ? GuardResult.Enabled
+                    : new GuardResult(GuardStatus.Disabled, "concern-state-mismatch",
+                        $"Concern '{concernState.Concern}' is '{currentConcernState}', not '{concernState.State}'.");
+
+            case GuardExpression.ParentState parentState:
+                if (context.ParentState is null)
+                {
+                    return GuardResult.UnresolvedResult("missing-parent-state",
+                        "The current parent state is unavailable.");
+                }
+                return context.ParentState == parentState.State
+                    ? GuardResult.Enabled
+                    : new GuardResult(GuardStatus.Disabled, "parent-state-mismatch",
+                        $"Parent state is '{context.ParentState}', not '{parentState.State}'.");
 
             default:
                 throw new InvalidOperationException($"Unsupported parsed guard type '{expression.GetType().Name}'.");

@@ -9,12 +9,18 @@ public sealed class DefinitionLoaderTests
     {
         var orion = TestSupport.LoadWorkflow("orion-v1.json");
         var timedOrion = TestSupport.LoadWorkflow("orion-v4.json");
+        var concernOrion = TestSupport.LoadWorkflow("orion-v6.json");
         var documents = TestSupport.LoadWorkflow("document-review-v1.json");
 
         Assert.Equal("orion-equipment-lease", orion.Id);
         Assert.Equal("1.1", orion.LanguageVersion);
         Assert.Equal("3.0", orion.Version);
         Assert.Equal("1.2", timedOrion.LanguageVersion);
+        Assert.Equal("1.3", concernOrion.LanguageVersion);
+        Assert.Equal("6.0", concernOrion.Version);
+        Assert.Equal(2, concernOrion.Concerns.Count);
+        Assert.Equal("Pending", concernOrion.Concerns["documentCompleteness"].InitialState);
+        Assert.Equal(12, concernOrion.Transitions.Count);
         Assert.Equal("4.0", timedOrion.Version);
         Assert.Equal(TimeSpan.FromDays(7), timedOrion.Timers.Single(timer => timer.Id == "offer-expiry").Duration);
         Assert.Equal(TimeSpan.FromDays(6), timedOrion.Timers.Single(timer => timer.Id == "offer-reminder").Duration);
@@ -24,6 +30,42 @@ public sealed class DefinitionLoaderTests
         Assert.Equal("internal-document-review", documents.Id);
         Assert.NotEmpty(orion.Transitions);
         Assert.NotEmpty(documents.Transitions);
+    }
+
+    [Fact]
+    public void Language_13_rejects_duplicate_concerns_and_unknown_concern_state_references()
+    {
+        var v6 = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "definitions", "orion-v6.json"));
+        var duplicateConcern = v6.Replace(
+            "\"id\": \"assetAvailability\"",
+            "\"id\": \"documentCompleteness\"",
+            StringComparison.Ordinal);
+        var duplicateError = Assert.Throws<MachineDefinitionException>(
+            () => MachineDefinitionLoader.Load(duplicateConcern));
+        Assert.Contains(duplicateError.Issues, issue => issue.Code == "duplicate-concern-id");
+
+        var unknownState = v6.Replace("\"state\": \"Reserved\"", "\"state\": \"Missing\"",
+            StringComparison.Ordinal);
+        var stateError = Assert.Throws<MachineDefinitionException>(
+            () => MachineDefinitionLoader.Load(unknownState));
+        Assert.Contains(stateError.Issues, issue => issue.Code == "unknown-guard-concern-state");
+    }
+
+    [Fact]
+    public void Language_13_rejects_invalid_concern_transition_target_and_cancellation_contract()
+    {
+        var v6 = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "definitions", "orion-v6.json"));
+        var unknownTarget = v6.Replace("\"target\": \"Complete\"", "\"target\": \"Missing\"",
+            StringComparison.Ordinal);
+        var targetError = Assert.Throws<MachineDefinitionException>(
+            () => MachineDefinitionLoader.Load(unknownTarget));
+        Assert.Contains(targetError.Issues, issue => issue.Code == "unknown-transition-target");
+
+        var invalidCancellation = v6.Replace("\"target\": \"Cancelled\"", "\"target\": \"Complete\"",
+            StringComparison.Ordinal);
+        var cancellationError = Assert.Throws<MachineDefinitionException>(
+            () => MachineDefinitionLoader.Load(invalidCancellation));
+        Assert.Contains(cancellationError.Issues, issue => issue.Code == "invalid-concern-cancellation");
     }
 
     [Fact]
@@ -70,6 +112,58 @@ public sealed class DefinitionLoaderTests
         var eventError = Assert.Throws<MachineDefinitionException>(() => MachineDefinitionLoader.Load(unknownEvent));
         Assert.Contains(eventError.Issues, issue => issue.Code == "undeclared-timer-event");
         Assert.Contains(eventError.Issues, issue => issue.Code == "timer-trigger-state-mismatch");
+    }
+
+    [Fact]
+    public void Language_13_preserves_parent_timer_support()
+    {
+        var definition = """
+            {
+              "languageVersion":"1.3", "id":"timed-concerns", "version":"1", "initialState":"A",
+              "states":[{"id":"A"},{"id":"B","terminal":true}],
+              "events":["Start","Deadline"],
+              "inputPolicy":{"commands":[{"name":"Start","event":"Start"}],"observations":[]},
+              "transitions":[
+                {"id":"start","source":"A","event":"Start","target":"A"},
+                {"id":"expire","source":"A","event":"Deadline","target":"B"}
+              ],
+              "timers":[{
+                "id":"deadline","onTransition":"start","duration":"P1D","event":"Deadline",
+                "whileState":"A","cancelOnTransitions":[],"blockedEvents":[],
+                "invalidatedByDueTimers":[]
+              }]
+            }
+            """;
+
+        var loaded = MachineDefinitionLoader.Load(definition);
+
+        Assert.Single(loaded.Timers);
+        Assert.Equal("deadline", loaded.Timers[0].Id);
+    }
+
+    [Fact]
+    public void Language_13_cancellation_and_parent_state_guards_are_rejected_in_older_versions()
+    {
+        var cancellation = TestSupport.MinimalDefinition()
+            .Replace("\"events\": [\"Go\"],",
+                "\"events\": [\"Go\"], \"cancellationEvent\": \"Go\",",
+                StringComparison.Ordinal);
+        var cancellationError = Assert.Throws<MachineDefinitionException>(
+            () => MachineDefinitionLoader.Load(cancellation));
+        Assert.Contains(cancellationError.Issues, issue => issue.Code == "cancellation-version");
+
+        var parentGuard = TestSupport.MinimalDefinition("""
+            {
+              "id": "guarded",
+              "source": "A",
+              "event": "Go",
+              "target": "B",
+              "guard": { "op": "parentState", "state": "A" }
+            }
+            """);
+        var guardError = Assert.Throws<MachineDefinitionException>(
+            () => MachineDefinitionLoader.Load(parentGuard));
+        Assert.Contains(guardError.Issues, issue => issue.Code == "parent-state-guard-version");
     }
 
     [Fact]

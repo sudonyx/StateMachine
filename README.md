@@ -1,6 +1,6 @@
 # Durable State Machine
 
-A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 7 routes synthetic Orion effects through the independently running Generic Harness and retains durable correlation between harness execution evidence and Gate 5 workflow transitions. Gate 8 adds versioned declarative timers, persisted UTC deadlines, atomic timer lifecycle updates, explicit due processing and restart recovery. Gate 9 strengthens input identity and revision arbitration across independent API hosts sharing SQLite, and adds a reproducible adversarial corpus and runner. Gate 10 adds read-only historical reconstruction, decision verification from stored evidence, projection-integrity reporting, recovery assessment, durable pre-evaluation intake, verified external-result staging and explicit safe continuation. Gate 11 adds immutable Orion 5.0 alongside 4.0, explicit bounded migration with administrative authorization, and replay across definition epochs. It does not automatically select versions by date, transform facts, migrate pending work or implement every amendment. Gate 6's direct provider path remains available only for development/test comparison. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
+A standalone, domain-independent state-machine runtime that executes versioned workflow definitions through a durable HTTP service. Gate 5 distinguishes commands from external observations and accepted workflow events, adding definition-declared input mappings, controlled observation authority, expected-operation correlation, durable duplicate/stale outcomes and evidence inspection. Gate 7 routes synthetic Orion effects through the independently running Generic Harness and retains durable correlation between harness execution evidence and Gate 5 workflow transitions. Gate 8 adds versioned declarative timers, persisted UTC deadlines, atomic timer lifecycle updates, explicit due processing and restart recovery. Gate 9 strengthens input identity and revision arbitration across independent API hosts sharing SQLite, and adds a reproducible adversarial corpus and runner. Gate 10 adds read-only historical reconstruction, decision verification from stored evidence, projection-integrity reporting, recovery assessment, durable pre-evaluation intake, verified external-result staging and explicit safe continuation. Gate 11 adds immutable Orion 5.0 alongside 4.0, explicit bounded migration with administrative authorization, and replay across definition epochs. Gate 12 adds language 1.3's generic durable concern dimensions, explicit parent/concern input routing, declarative coordination guards and atomic cancellation; Orion 6.0 demonstrates document and asset concerns without changing older definitions. No automatic version selection or migration to Orion 6.0 is provided. Gate 6's direct provider path remains available only for development/test comparison. Gate 4's immutable evaluation facts, decision evidence and independent Meridian HTTP integration remain supported.
 
 ## Requirements, build and tests
 
@@ -80,6 +80,32 @@ dotnet run --project clients\DurableStateMachine.Cli -- replay <instance-id>
 ```
 
 V5 implements a bounded subset of the fictional amendment pack, including preliminary offer review, a five-day new-offer expiry, seven-day follow-up for newly created v5 requests, Specialist Assessment terminology and an explicit cancellation-review fact. The runtime does not enforce effective dates or establish that caller-supplied per-attempt facts are true. See [gate-11-design.md](./docs/gate-11-design.md), [gate-11-amendment-traceability.md](./docs/gate-11-amendment-traceability.md), [gate-11-test-results.md](./docs/gate-11-test-results.md), and [orion-definition-v5.md](./docs/orion-definition-v5.md) for details and unsupported requirements.
+
+## Gate 12 durable concerns
+
+Register [Orion 6.0](./definitions/orion-v6.json) alongside Orion 4.0 and 5.0.
+Its parent lifecycle, document completeness and asset availability progress as
+separate durable dimensions in one instance. Parent coordination is expressed
+in the definition using `concernState` guards; observations continue through the
+existing trusted Gate 5 input pipeline. Parent lifecycle revisions and each
+concern's revision/history are tracked separately. Cancellation atomically
+terminates the parent and all active concerns, without implying remote effect
+reversal.
+
+Inspect with the CLI:
+
+```powershell
+dotnet run --project clients\DurableStateMachine.Cli -- concerns <instance-id>
+dotnet run --project clients\DurableStateMachine.Cli -- concern-history <instance-id>
+dotnet run --project clients\DurableStateMachine.Cli -- concern-replay <instance-id>
+```
+
+Language 1.3, API routes, coordination semantics, tested behavior and limitations
+are documented in [state-machine-language-v1.md](./docs/state-machine-language-v1.md),
+[gate-3-api.md](./docs/gate-3-api.md), [gate-12-design.md](./docs/gate-12-design.md),
+[gate-12-architecture-decision.md](./docs/gate-12-architecture-decision.md),
+[gate-12-test-results.md](./docs/gate-12-test-results.md), and
+[orion-definition-v6.md](./docs/orion-definition-v6.md).
 
 ## Gate 10 recovery inspection
 

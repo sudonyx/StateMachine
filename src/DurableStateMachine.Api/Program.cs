@@ -46,6 +46,8 @@ await using (var scope = app.Services.CreateAsyncScope())
     await database.EnsureGate9SchemaAsync();
     await database.EnsureGate10SchemaAsync();
     await database.EnsureGate11SchemaAsync();
+    await database.EnsureGate12SchemaAsync();
+    await database.EnsureGate12AttemptColumnsAsync();
 }
 
 app.Use(async (context, next) =>
@@ -126,6 +128,19 @@ instances.MapPost("/", async (CreateInstanceRequest request, MachineStore store,
 instances.MapGet("/{id}", async (string id, MachineStore store, CancellationToken cancellationToken) =>
     Results.Ok((await store.GetInstanceAsync(id, cancellationToken)).ToResponse()))
     .WithName("GetInstance").WithSummary("Inspect current durable instance state and facts.");
+instances.MapGet("/{id}/concerns", async (string id, MachineStore store, CancellationToken cancellationToken) =>
+    Results.Ok((await store.GetConcernInspectionAsync(id, cancellationToken)).ToResponse()))
+    .WithName("InspectConcernStates")
+    .WithSummary("Inspect the parent lifecycle and each declared durable concern state independently.");
+instances.MapGet("/{id}/concerns/history", async (string id, MachineStore store, CancellationToken cancellationToken) =>
+    Results.Ok((await store.ListConcernHistoryAsync(id, cancellationToken))
+        .Select(entry => entry.ToResponse())))
+    .WithName("ListConcernTransitionHistory")
+    .WithSummary("List accepted concern transitions in concern-revision order.");
+instances.MapGet("/{id}/concerns/replay", async (string id, MachineStore store, CancellationToken cancellationToken) =>
+    Results.Ok(await store.GetConcernReplayAsync(id, cancellationToken)))
+    .WithName("ReconstructConcernHistory")
+    .WithSummary("Reconstruct declared concern states from immutable transition evidence without side effects.");
 instances.MapPost("/{id}/events", async (string id, SubmitEventRequest request, MachineStore store, TimeProvider timeProvider, CancellationToken cancellationToken) =>
 {
     if (await store.IsInputProtectedInstanceAsync(id, cancellationToken))
@@ -568,7 +583,8 @@ static InputProcessingResponse ToInputResponse(InboundProcessingResult result, M
     var submission = result.Submission;
     return new InputProcessingResponse(result.Message.ToResponse(),
         submission?.Attempt.ToResponse(), (submission?.Instance ?? currentInstance).ToResponse(),
-        submission?.Transition?.ToResponse());
+        submission?.Transition?.ToResponse(),
+        submission?.ConcernTransitions?.Select(entry => entry.ToResponse()).ToArray());
 }
 
 static async Task<IResult> RecordMalformedInput(

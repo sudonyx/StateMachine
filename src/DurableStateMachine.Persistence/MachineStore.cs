@@ -110,7 +110,18 @@ public sealed class MachineStore(
             CreatedAt = now,
             UpdatedAt = now
         };
+        var concernRecords = definition.Concerns.Values.Select(concern => new ConcernStateRecord
+        {
+            InstanceId = id,
+            ConcernId = concern.Id,
+            DefinitionId = definitionId,
+            DefinitionVersion = definitionVersion,
+            CurrentState = concern.InitialState,
+            Revision = 0,
+            UpdatedAt = now
+        }).ToArray();
         db.Instances.Add(record);
+        db.ConcernStates.AddRange(concernRecords);
         try
         {
             await db.SaveChangesAsync(cancellationToken);
@@ -118,6 +129,10 @@ public sealed class MachineStore(
         catch (DbUpdateException)
         {
             db.Entry(record).State = EntityState.Detached;
+            foreach (var concernRecord in concernRecords)
+            {
+                db.Entry(concernRecord).State = EntityState.Detached;
+            }
             if (await db.Instances.AsNoTracking().AnyAsync(instance => instance.Id == id, cancellationToken))
             {
                 throw new DefinitionConflictException($"Instance '{id}' already exists.");
@@ -125,6 +140,100 @@ public sealed class MachineStore(
             throw;
         }
         return ToDetails(record);
+    }
+
+    public async Task<ConcernInspection> GetConcernInspectionAsync(string id, CancellationToken cancellationToken)
+    {
+        var instance = await db.Instances.AsNoTracking().SingleOrDefaultAsync(item => item.Id == id, cancellationToken)
+            ?? throw new ResourceNotFoundException($"Instance '{id}' does not exist.");
+        var definitionRecord = await db.Definitions.AsNoTracking().SingleAsync(
+            item => item.Id == instance.DefinitionId && item.Version == instance.DefinitionVersion, cancellationToken);
+        var definition = MachineDefinitionLoader.Load(definitionRecord.DefinitionJson);
+        var rows = await db.ConcernStates.AsNoTracking()
+            .Where(item => item.InstanceId == id)
+            .OrderBy(item => item.ConcernId)
+            .ToListAsync(cancellationToken);
+        var history = await db.ConcernTransitionHistory.AsNoTracking()
+            .Where(item => item.InstanceId == id)
+            .OrderBy(item => item.RevisionAfter).ThenBy(item => item.Id)
+            .ToListAsync(cancellationToken);
+        var findings = new List<ConcernIntegrityFinding>();
+        foreach (var concern in definition.Concerns.Values)
+        {
+            var row = rows.SingleOrDefault(item => item.ConcernId == concern.Id);
+            if (row is null)
+            {
+                findings.Add(new("missing-concern-projection", concern.Id,
+                    "The declared concern has no durable current-state projection."));
+            }
+            else if (row.DefinitionId != instance.DefinitionId || row.DefinitionVersion != instance.DefinitionVersion)
+            {
+                findings.Add(new("concern-definition-mismatch", concern.Id,
+                    "The concern projection is bound to a different definition epoch."));
+            }
+            else if (!concern.States.ContainsKey(row.CurrentState))
+            {
+                findings.Add(new("unknown-concern-projection-state", concern.Id,
+                    $"Projected state '{row.CurrentState}' is not declared by this concern."));
+            }
+        }
+        foreach (var row in rows.Where(item => !definition.Concerns.ContainsKey(item.ConcernId)))
+        {
+            findings.Add(new("undeclared-concern-projection", row.ConcernId,
+                "A concern projection exists but is absent from the bound definition."));
+        }
+        var lastByConcern = history.GroupBy(item => item.ConcernId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.OrderBy(item => item.ConcernRevisionAfter).Last(),
+                StringComparer.Ordinal);
+        var states = rows.Select(row => new ConcernStateDetails(
+            row.ConcernId, row.CurrentState, row.Revision, row.UpdatedAt,
+            lastByConcern.TryGetValue(row.ConcernId, out var last) ? last.Id : null,
+            lastByConcern.TryGetValue(row.ConcernId, out last) ? last.AttemptId : null)).ToArray();
+        return new ConcernInspection(id, instance.DefinitionId, instance.DefinitionVersion,
+            instance.CurrentState, instance.Revision, states, findings);
+    }
+
+    public async Task<IReadOnlyList<ConcernTransitionHistoryRecord>> ListConcernHistoryAsync(
+        string id,
+        CancellationToken cancellationToken)
+    {
+        if (!await db.Instances.AsNoTracking().AnyAsync(item => item.Id == id, cancellationToken))
+        {
+            throw new ResourceNotFoundException($"Instance '{id}' does not exist.");
+        }
+        return await db.ConcernTransitionHistory.AsNoTracking()
+            .Where(item => item.InstanceId == id)
+            .OrderBy(item => item.RevisionAfter).ThenBy(item => item.Id)
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task<ConcernReplayReport> GetConcernReplayAsync(string id, CancellationToken cancellationToken)
+    {
+        await using var transaction = await BeginReadSnapshotAsync(cancellationToken);
+        var instance = await db.Instances.AsNoTracking().SingleOrDefaultAsync(item => item.Id == id, cancellationToken)
+            ?? throw new ResourceNotFoundException($"Instance '{id}' does not exist.");
+        var definition = await db.Definitions.AsNoTracking().SingleAsync(
+            item => item.Id == instance.DefinitionId && item.Version == instance.DefinitionVersion, cancellationToken);
+        var migrations = await db.Migrations.AsNoTracking()
+            .Where(item => item.InstanceId == id && item.Status == "Committed")
+            .ToListAsync(cancellationToken);
+        var projections = await db.ConcernStates.AsNoTracking()
+            .Where(item => item.InstanceId == id).ToListAsync(cancellationToken);
+        var history = await db.ConcernTransitionHistory.AsNoTracking()
+            .Where(item => item.InstanceId == id)
+            .OrderBy(item => item.OccurredAt).ThenBy(item => item.Id)
+            .ToListAsync(cancellationToken);
+        var attempts = await db.InputAttempts.AsNoTracking()
+            .Where(item => item.InstanceId == id).ToListAsync(cancellationToken);
+        var report = migrations.Count != 0
+            ? new ConcernReplayReport(id, instance.DefinitionId, instance.DefinitionVersion,
+                definition.ContentDigest, "UnsupportedHistoricalFormat", [],
+                [new ConcernReplayFinding("concern-definition-migration-unsupported", null,
+                    "Historical concern replay across definition migrations is not supported; migration is refused for concern definitions.")],
+                history.Select(item => $"concern-history:{item.Id}").ToArray())
+            : ConcernHistoricalReplay.Reconstruct(instance, definition, projections, history, attempts);
+        await transaction.CommitAsync(cancellationToken);
+        return report;
     }
 
     public async Task<MachineInstanceDetails> GetInstanceAsync(string id, CancellationToken cancellationToken)
@@ -1682,9 +1791,11 @@ public sealed class MachineStore(
 
                 if (message.ReasonCode == "input-not-processed")
                 {
-                    var eventName = inputKind == "Command"
-                        ? definition.InputPolicy.Commands[inputType].Event
-                        : observationMapping!.Event;
+                    var (eventName, concernId) = inputKind == "Command"
+                        ? (definition.InputPolicy!.Commands[inputType].Event,
+                            definition.InputPolicy.Commands[inputType].Concern)
+                        : (definition.InputPolicy!.Observations[inputType].Event,
+                            definition.InputPolicy.Observations[inputType].Concern);
                     SubmissionResult? submission = null;
                     try
                     {
@@ -1701,7 +1812,8 @@ public sealed class MachineStore(
                     {
                         inputFaultPlan.ThrowIfArmed(instanceId, "DuringGuardEvaluation");
                         submission = await EvaluateEventWithinTransactionAsync(
-                            instance, eventName, now, cancellationToken, facts, decisionEvidence, factsProvenance);
+                            instance, eventName, now, cancellationToken, facts, decisionEvidence, factsProvenance,
+                            concernId);
                     }
                     if (submission is not null)
                     {
@@ -2052,29 +2164,84 @@ public sealed class MachineStore(
         CancellationToken cancellationToken,
         IReadOnlyDictionary<string, FactValue>? attemptFacts,
         ExternalDecisionEvidence? decisionEvidence,
-        IReadOnlyDictionary<string, string>? attemptFactProvenance)
+        IReadOnlyDictionary<string, string>? attemptFactProvenance,
+        string? concernId = null)
     {
         var definitionRecord = await db.Definitions.AsNoTracking().SingleOrDefaultAsync(
             record => record.Id == instance.DefinitionId && record.Version == instance.DefinitionVersion, cancellationToken)
             ?? throw new InvalidOperationException($"The registered definition for instance '{instance.Id}' is missing.");
         var definition = MachineDefinitionLoader.Load(definitionRecord.DefinitionJson);
         var facts = DeserializeFacts(instance.FactsJson);
-        var context = TransitionEvaluationContext.Create(facts, attemptFacts, decisionEvidence, attemptFactProvenance);
-        var blockingTimer = await FindBlockingTimerAsync(instance.Id, definition, eventName, now, cancellationToken);
-        var evaluation = blockingTimer is null
-            ? TransitionEvaluator.Evaluate(definition, instance.CurrentState, eventName, context)
-            : new TransitionEvaluation(
-                EvaluationStatus.Rejected,
-                instance.CurrentState,
-                eventName,
-                null,
-                null,
-                [],
-                "deadline-expired",
-                $"Event '{eventName}' was received at or after timer '{blockingTimer.TimerDeclarationId}' became due at {blockingTimer.DueAt:O}.");
+        var concernRows = await LoadConcernStateVectorAsync(instance, definition, cancellationToken);
+        var concernStates = concernRows.ToDictionary(row => row.ConcernId, row => row.CurrentState, StringComparer.Ordinal);
+        var context = TransitionEvaluationContext.Create(
+            facts, attemptFacts, decisionEvidence, attemptFactProvenance, concernStates, instance.CurrentState);
+        ConcernStateRecord? concernRow = null;
+        TransitionEvaluation evaluation;
+        TimerRecord? blockingTimer = null;
+        if (concernId is not null)
+        {
+            if (!definition.Concerns.TryGetValue(concernId, out var concern))
+            {
+                throw new InvalidOperationException($"Input targets undeclared concern '{concernId}'.");
+            }
+            concernRow = concernRows.Single(row => row.ConcernId == concernId);
+            evaluation = definition.States[instance.CurrentState].IsTerminal
+                ? new TransitionEvaluation(EvaluationStatus.Rejected, concernRow.CurrentState, eventName,
+                    null, null, [], "terminal-parent-state",
+                    $"Terminal parent state '{instance.CurrentState}' cannot accept concern activity.")
+                : TransitionEvaluator.EvaluateConcern(concern, concernRow.CurrentState, eventName, context);
+        }
+        else
+        {
+            blockingTimer = await FindBlockingTimerAsync(instance.Id, definition, eventName, now, cancellationToken);
+            evaluation = blockingTimer is null
+                ? TransitionEvaluator.Evaluate(definition, instance.CurrentState, eventName, context)
+                : new TransitionEvaluation(
+                    EvaluationStatus.Rejected,
+                    instance.CurrentState,
+                    eventName,
+                    null,
+                    null,
+                    [],
+                    "deadline-expired",
+                    $"Event '{eventName}' was received at or after timer '{blockingTimer.TimerDeclarationId}' became due at {blockingTimer.DueAt:O}.");
+        }
+        var cancellationTransitions = new List<(ConcernStateRecord Record, TransitionEvaluation Evaluation)>();
+        if (concernId is null && evaluation.Status == EvaluationStatus.Accepted &&
+            definition.CancellationEvent == eventName)
+        {
+            foreach (var row in concernRows.Where(row => !definition.Concerns[row.ConcernId].States[row.CurrentState].IsTerminal))
+            {
+                var concernEvaluation = TransitionEvaluator.EvaluateConcern(
+                    definition.Concerns[row.ConcernId], row.CurrentState, eventName, context);
+                if (concernEvaluation.Status != EvaluationStatus.Accepted)
+                {
+                    evaluation = new TransitionEvaluation(
+                        EvaluationStatus.Rejected,
+                        instance.CurrentState,
+                        eventName,
+                        null,
+                        null,
+                        concernEvaluation.GuardFindings,
+                        "cancellation-concern-refused",
+                        $"Cancellation was refused because concern '{row.ConcernId}' could not terminate: {concernEvaluation.Explanation}");
+                    cancellationTransitions.Clear();
+                    break;
+                }
+                cancellationTransitions.Add((row, concernEvaluation));
+            }
+        }
+
         var attemptId = Guid.NewGuid().ToString("N");
         var revisionBefore = instance.Revision;
-        var revisionAfter = evaluation.Status == EvaluationStatus.Accepted ? checked(revisionBefore + 1) : revisionBefore;
+        var revisionAfter = evaluation.Status == EvaluationStatus.Accepted && concernId is null
+            ? checked(revisionBefore + 1)
+            : revisionBefore;
+        var previousState = concernRow?.CurrentState ?? instance.CurrentState;
+        var resultState = evaluation.Status == EvaluationStatus.Accepted
+            ? evaluation.TargetState!
+            : previousState;
         var attempt = CreateAttempt(
             attemptId,
             instance.Id,
@@ -2086,10 +2253,15 @@ public sealed class MachineStore(
             instance.DefinitionVersion,
             revisionBefore,
             revisionAfter,
-            evaluation.Status == EvaluationStatus.Accepted ? evaluation.TargetState! : instance.CurrentState,
+            resultState,
             evaluation.Status == EvaluationStatus.Accepted ? "Committed" : "NoChange");
+        if (concernId is not null)
+        {
+            attempt.Dimension = "Concern";
+            attempt.ConcernId = concernId;
+        }
 
-        if (evaluation.Status == EvaluationStatus.Accepted)
+        if (evaluation.Status == EvaluationStatus.Accepted && concernId is null)
         {
             var updated = await db.Instances
                 .Where(record => record.Id == instance.Id && record.Revision == revisionBefore)
@@ -2113,10 +2285,94 @@ public sealed class MachineStore(
                 return new SubmissionResult(attempt, await ReadInstanceAsync(instance.Id, cancellationToken), null, true);
             }
         }
+        else if (evaluation.Status == EvaluationStatus.Accepted && concernId is not null)
+        {
+            var concernRevisionBefore = concernRow!.Revision;
+            var updated = await db.ConcernStates
+                .Where(row => row.InstanceId == instance.Id && row.ConcernId == concernId &&
+                              row.Revision == concernRevisionBefore && row.CurrentState == concernRow.CurrentState)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(row => row.CurrentState, evaluation.TargetState!)
+                    .SetProperty(row => row.Revision, checked(concernRevisionBefore + 1))
+                    .SetProperty(row => row.UpdatedAt, now), cancellationToken);
+            if (updated != 1)
+            {
+                attempt.Status = "Conflict";
+                attempt.TargetState = null;
+                attempt.ReasonCode = "concern-concurrency-conflict";
+                attempt.Explanation = $"Concern '{concernId}' changed while its event was being evaluated.";
+                SetEvidence(attempt, CreateEvidence(
+                    instance.DefinitionId, instance.DefinitionVersion, instance.Id, revisionBefore,
+                    eventName, now, context, evaluation, previousState, "ConcurrencyConflict",
+                    "concern-concurrency-conflict"));
+                db.InputAttempts.Add(attempt);
+                await db.SaveChangesAsync(cancellationToken);
+                return new SubmissionResult(attempt, await ReadInstanceAsync(instance.Id, cancellationToken), null, true);
+            }
+        }
+        foreach (var (record, cancellationEvaluation) in cancellationTransitions)
+        {
+            var concernRevisionBefore = record.Revision;
+            var updated = await db.ConcernStates
+                .Where(row => row.InstanceId == instance.Id && row.ConcernId == record.ConcernId &&
+                              row.Revision == concernRevisionBefore && row.CurrentState == record.CurrentState)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(row => row.CurrentState, cancellationEvaluation.TargetState!)
+                    .SetProperty(row => row.Revision, checked(concernRevisionBefore + 1))
+                    .SetProperty(row => row.UpdatedAt, now), cancellationToken);
+            if (updated != 1)
+            {
+                throw new InvalidOperationException(
+                    $"Concern '{record.ConcernId}' changed inside the SQLite immediate transaction.");
+            }
+        }
 
         db.InputAttempts.Add(attempt);
         TransitionHistoryRecord? history = null;
-        if (evaluation.Status == EvaluationStatus.Accepted)
+        var concernHistories = new List<ConcernTransitionHistoryRecord>();
+        if (evaluation.Status == EvaluationStatus.Accepted && concernId is not null)
+        {
+            concernHistories.Add(new ConcernTransitionHistoryRecord
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                InstanceId = instance.Id,
+                ConcernId = concernId,
+                AttemptId = attemptId,
+                DefinitionId = instance.DefinitionId,
+                DefinitionVersion = instance.DefinitionVersion,
+                TransitionId = evaluation.TransitionId!,
+                PreviousState = evaluation.PreviousState,
+                NewState = evaluation.TargetState!,
+                Event = eventName,
+                RevisionBefore = revisionBefore,
+                RevisionAfter = revisionAfter,
+                ConcernRevisionBefore = concernRow!.Revision,
+                ConcernRevisionAfter = checked(concernRow.Revision + 1),
+                OccurredAt = now
+            });
+        }
+        foreach (var (record, cancellationEvaluation) in cancellationTransitions)
+        {
+            concernHistories.Add(new ConcernTransitionHistoryRecord
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                InstanceId = instance.Id,
+                ConcernId = record.ConcernId,
+                AttemptId = attemptId,
+                DefinitionId = instance.DefinitionId,
+                DefinitionVersion = instance.DefinitionVersion,
+                TransitionId = cancellationEvaluation.TransitionId!,
+                PreviousState = cancellationEvaluation.PreviousState,
+                NewState = cancellationEvaluation.TargetState!,
+                Event = eventName,
+                RevisionBefore = revisionBefore,
+                RevisionAfter = revisionAfter,
+                ConcernRevisionBefore = record.Revision,
+                ConcernRevisionAfter = checked(record.Revision + 1),
+                OccurredAt = now
+            });
+        }
+        if (evaluation.Status == EvaluationStatus.Accepted && concernId is null)
         {
             history = new TransitionHistoryRecord
             {
@@ -2137,7 +2393,37 @@ public sealed class MachineStore(
             await ApplyTimerTransitionChangesAsync(
                 instance, definition, history, revisionAfter, now, cancellationToken);
         }
-        return new SubmissionResult(attempt, await ReadInstanceAsync(instance.Id, cancellationToken), history, false);
+        db.ConcernTransitionHistory.AddRange(concernHistories);
+        return new SubmissionResult(attempt, await ReadInstanceAsync(instance.Id, cancellationToken), history, false,
+            concernHistories);
+    }
+
+    private async Task<IReadOnlyList<ConcernStateRecord>> LoadConcernStateVectorAsync(
+        InstanceRecord instance,
+        MachineDefinition definition,
+        CancellationToken cancellationToken)
+    {
+        var rows = await db.ConcernStates.AsNoTracking()
+            .Where(row => row.InstanceId == instance.Id)
+            .OrderBy(row => row.ConcernId)
+            .ToListAsync(cancellationToken);
+        if (rows.Count != definition.Concerns.Count ||
+            rows.Any(row => !definition.Concerns.ContainsKey(row.ConcernId) ||
+                            row.DefinitionId != instance.DefinitionId ||
+                            row.DefinitionVersion != instance.DefinitionVersion))
+        {
+            throw new InvalidDataException(
+                $"Concern state vector for instance '{instance.Id}' does not match its immutable definition.");
+        }
+        foreach (var row in rows)
+        {
+            if (!definition.Concerns[row.ConcernId].States.ContainsKey(row.CurrentState))
+            {
+                throw new InvalidDataException(
+                    $"Concern '{row.ConcernId}' has undeclared projected state '{row.CurrentState}'.");
+            }
+        }
+        return rows;
     }
 
     private async Task<TimerRecord?> FindBlockingTimerAsync(
@@ -2457,7 +2743,9 @@ public sealed class MachineStore(
             evaluation.TransitionId,
             reasonCode,
             evaluation.PreviousState,
-            resultingState);
+            resultingState,
+            context.ConcernStates,
+            context.ParentState);
 
     private static void SetEvidence(InputAttemptRecord attempt, TransitionEvaluationEvidence evidence)
     {
@@ -2714,7 +3002,24 @@ public sealed record DefinitionDetails(DefinitionSummary Definition, string Init
 public sealed record MachineInstanceDetails(string Id, string DefinitionId, string DefinitionVersion, string CurrentState,
     long Revision, IReadOnlyDictionary<string, FactValue> Facts, DateTimeOffset CreatedAt, DateTimeOffset UpdatedAt);
 public sealed record SubmissionResult(InputAttemptRecord Attempt, MachineInstanceDetails Instance,
-    TransitionHistoryRecord? Transition, bool ConcurrencyConflict);
+    TransitionHistoryRecord? Transition, bool ConcurrencyConflict,
+    IReadOnlyList<ConcernTransitionHistoryRecord>? ConcernTransitions = null);
+public sealed record ConcernStateDetails(
+    string ConcernId,
+    string CurrentState,
+    long Revision,
+    DateTimeOffset UpdatedAt,
+    string? LastTransitionId,
+    string? LastAttemptId);
+public sealed record ConcernIntegrityFinding(string Code, string ConcernId, string Explanation);
+public sealed record ConcernInspection(
+    string InstanceId,
+    string DefinitionId,
+    string DefinitionVersion,
+    string ParentState,
+    long ParentRevision,
+    IReadOnlyList<ConcernStateDetails> Concerns,
+    IReadOnlyList<ConcernIntegrityFinding> IntegrityFindings);
 public sealed record InboundProcessingResult(InboundMessageRecord Message, SubmissionResult? Submission);
 public sealed record EffectIntentResult(EffectOperationRecord Operation, bool AlreadyRequested);
 public sealed record TimerProcessingResult(TimerRecord Timer, SubmissionResult? Submission, bool AlreadyProcessed);

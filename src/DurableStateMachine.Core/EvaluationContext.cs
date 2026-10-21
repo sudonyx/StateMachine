@@ -44,7 +44,9 @@ public sealed class TransitionEvaluationContext
         IReadOnlyDictionary<string, string> attemptFactProvenance,
         IReadOnlyDictionary<string, FactValue> resolvedFacts,
         IReadOnlyDictionary<string, FactKnowledgeState> unresolvedFacts,
-        ExternalDecisionEvidence? decisionEvidence)
+        ExternalDecisionEvidence? decisionEvidence,
+        IReadOnlyDictionary<string, string> concernStates,
+        string? parentState)
     {
         InstanceFacts = instanceFacts;
         AttemptFacts = attemptFacts;
@@ -52,6 +54,8 @@ public sealed class TransitionEvaluationContext
         ResolvedFacts = resolvedFacts;
         UnresolvedFacts = unresolvedFacts;
         DecisionEvidence = decisionEvidence;
+        ConcernStates = concernStates;
+        ParentState = parentState;
     }
 
     public IReadOnlyDictionary<string, FactValue> InstanceFacts { get; }
@@ -60,12 +64,16 @@ public sealed class TransitionEvaluationContext
     public IReadOnlyDictionary<string, FactValue> ResolvedFacts { get; }
     public IReadOnlyDictionary<string, FactKnowledgeState> UnresolvedFacts { get; }
     public ExternalDecisionEvidence? DecisionEvidence { get; }
+    public IReadOnlyDictionary<string, string> ConcernStates { get; }
+    public string? ParentState { get; }
 
     public static TransitionEvaluationContext Create(
         IReadOnlyDictionary<string, FactValue> instanceFacts,
         IReadOnlyDictionary<string, FactValue>? attemptFacts = null,
         ExternalDecisionEvidence? decisionEvidence = null,
-        IReadOnlyDictionary<string, string>? attemptFactProvenance = null)
+        IReadOnlyDictionary<string, string>? attemptFactProvenance = null,
+        IReadOnlyDictionary<string, string>? concernStates = null,
+        string? parentState = null)
     {
         ArgumentNullException.ThrowIfNull(instanceFacts);
         var durable = CopyFacts(instanceFacts, nameof(instanceFacts));
@@ -106,7 +114,13 @@ public sealed class TransitionEvaluationContext
             provenance,
             new ReadOnlyDictionary<string, FactValue>(resolved),
             new ReadOnlyDictionary<string, FactKnowledgeState>(unresolved),
-            evidenceSnapshot);
+            evidenceSnapshot,
+            new ReadOnlyDictionary<string, string>(
+                new SortedDictionary<string, string>(
+                    (concernStates ?? new Dictionary<string, string>())
+                    .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
+                    StringComparer.Ordinal)),
+            parentState);
     }
 
     public static TransitionEvaluationContext FromResolvedFacts(IReadOnlyDictionary<string, FactValue> facts) =>
@@ -264,4 +278,6 @@ public sealed record TransitionEvaluationEvidence(
     string? SelectedTransitionId,
     string ReasonCode,
     string PreviousState,
-    string? ResultingState);
+    string? ResultingState,
+    IReadOnlyDictionary<string, string>? ConcernStates = null,
+    string? ParentState = null);

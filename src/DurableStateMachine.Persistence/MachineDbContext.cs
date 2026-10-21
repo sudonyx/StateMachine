@@ -15,6 +15,8 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
     public DbSet<EffectAttemptRecord> EffectAttempts => Set<EffectAttemptRecord>();
     public DbSet<TimerRecord> Timers => Set<TimerRecord>();
     public DbSet<MigrationRecord> Migrations => Set<MigrationRecord>();
+    public DbSet<ConcernStateRecord> ConcernStates => Set<ConcernStateRecord>();
+    public DbSet<ConcernTransitionHistoryRecord> ConcernTransitionHistory => Set<ConcernTransitionHistoryRecord>();
 
     public async Task EnsureGate4SchemaAsync(CancellationToken cancellationToken = default)
     {
@@ -486,6 +488,86 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
         }
     }
 
+    public Task EnsureGate12SchemaAsync(CancellationToken cancellationToken = default) =>
+        Database.ExecuteSqlRawAsync("""
+            CREATE TABLE IF NOT EXISTS ConcernStates (
+                InstanceId TEXT NOT NULL,
+                ConcernId TEXT NOT NULL,
+                DefinitionId TEXT NOT NULL,
+                DefinitionVersion TEXT NOT NULL,
+                CurrentState TEXT NOT NULL,
+                Revision INTEGER NOT NULL,
+                UpdatedAt INTEGER NOT NULL,
+                CONSTRAINT PK_ConcernStates PRIMARY KEY (InstanceId, ConcernId)
+            );
+            CREATE TABLE IF NOT EXISTS ConcernTransitionHistory (
+                Id TEXT NOT NULL CONSTRAINT PK_ConcernTransitionHistory PRIMARY KEY,
+                InstanceId TEXT NOT NULL,
+                ConcernId TEXT NOT NULL,
+                AttemptId TEXT NOT NULL,
+                DefinitionId TEXT NOT NULL,
+                DefinitionVersion TEXT NOT NULL,
+                TransitionId TEXT NOT NULL,
+                PreviousState TEXT NOT NULL,
+                NewState TEXT NOT NULL,
+                Event TEXT NOT NULL,
+                RevisionBefore INTEGER NOT NULL,
+                RevisionAfter INTEGER NOT NULL,
+                ConcernRevisionBefore INTEGER NOT NULL,
+                ConcernRevisionAfter INTEGER NOT NULL,
+                OccurredAt INTEGER NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS UX_ConcernTransitionHistory_Instance_Concern_Revision
+                ON ConcernTransitionHistory (InstanceId, ConcernId, ConcernRevisionAfter);
+            DROP INDEX IF EXISTS UX_ConcernTransitionHistory_Attempt;
+            CREATE UNIQUE INDEX IF NOT EXISTS UX_ConcernTransitionHistory_Attempt_Concern
+                ON ConcernTransitionHistory (AttemptId, ConcernId);
+            CREATE INDEX IF NOT EXISTS IX_ConcernTransitionHistory_Instance_Revision
+                ON ConcernTransitionHistory (InstanceId, RevisionAfter, Id);
+            """, cancellationToken);
+
+    public async Task EnsureGate12AttemptColumnsAsync(CancellationToken cancellationToken = default)
+    {
+        var connection = Database.GetDbConnection();
+        var closeWhenDone = connection.State != System.Data.ConnectionState.Open;
+        if (closeWhenDone)
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+        try
+        {
+            var columns = new HashSet<string>(StringComparer.Ordinal);
+            await using (var inspect = connection.CreateCommand())
+            {
+                inspect.CommandText = "PRAGMA table_info('InputAttempts')";
+                await using var reader = await inspect.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    columns.Add(reader.GetString(1));
+                }
+            }
+            if (!columns.Contains(nameof(InputAttemptRecord.Dimension)))
+            {
+                await using var addDimension = connection.CreateCommand();
+                addDimension.CommandText = "ALTER TABLE InputAttempts ADD COLUMN Dimension TEXT NOT NULL DEFAULT 'Parent'";
+                await addDimension.ExecuteNonQueryAsync(cancellationToken);
+            }
+            if (!columns.Contains(nameof(InputAttemptRecord.ConcernId)))
+            {
+                await using var addConcern = connection.CreateCommand();
+                addConcern.CommandText = "ALTER TABLE InputAttempts ADD COLUMN ConcernId TEXT NULL";
+                await addConcern.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+        finally
+        {
+            if (closeWhenDone)
+            {
+                await connection.CloseAsync();
+            }
+        }
+    }
+
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         modelBuilder.Entity<DefinitionRecord>().HasKey(record => new { record.Id, record.Version });
@@ -523,6 +605,16 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
             .IsUnique().HasDatabaseName("UX_Migrations_InstanceId_MigrationId");
         modelBuilder.Entity<MigrationRecord>()
             .HasIndex(record => new { record.InstanceId, record.SourceRevision, record.CommittedAt, record.Id });
+        modelBuilder.Entity<ConcernStateRecord>().HasKey(record => new { record.InstanceId, record.ConcernId });
+        modelBuilder.Entity<ConcernTransitionHistoryRecord>().HasKey(record => record.Id);
+        modelBuilder.Entity<ConcernTransitionHistoryRecord>()
+            .HasIndex(record => new { record.InstanceId, record.ConcernId, record.ConcernRevisionAfter })
+            .IsUnique().HasDatabaseName("UX_ConcernTransitionHistory_Instance_Concern_Revision");
+        modelBuilder.Entity<ConcernTransitionHistoryRecord>()
+            .HasIndex(record => new { record.AttemptId, record.ConcernId })
+            .IsUnique().HasDatabaseName("UX_ConcernTransitionHistory_Attempt_Concern");
+        modelBuilder.Entity<ConcernTransitionHistoryRecord>()
+            .HasIndex(record => new { record.InstanceId, record.RevisionAfter, record.Id });
         modelBuilder.Entity<TimerRecord>()
             .HasIndex(record => new { record.InstanceId, record.TimerDeclarationId, record.OriginTransitionHistoryId })
             .IsUnique();
@@ -578,6 +670,10 @@ public sealed class MachineDbContext(DbContextOptions<MachineDbContext> options)
                 value => value.HasValue ? new DateTimeOffset(value.Value, TimeSpan.Zero) : null);
         modelBuilder.Entity<MigrationRecord>().Property(record => record.CommittedAt)
             .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        modelBuilder.Entity<ConcernStateRecord>().Property(record => record.UpdatedAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
+        modelBuilder.Entity<ConcernTransitionHistoryRecord>().Property(record => record.OccurredAt)
+            .HasConversion(value => value.UtcTicks, value => new DateTimeOffset(value, TimeSpan.Zero));
     }
 }
 
@@ -620,6 +716,8 @@ public sealed class InputAttemptRecord
     public required string GuardFindingsJson { get; set; }
     public required string EvaluationEvidenceJson { get; set; }
     public required string EvaluationEvidenceDigest { get; set; }
+    public string Dimension { get; set; } = "Parent";
+    public string? ConcernId { get; set; }
 }
 
 public sealed class TransitionHistoryRecord
@@ -827,4 +925,34 @@ public sealed class MigrationRecord
     public required string Outcome { get; set; }
     public required string Explanation { get; set; }
     public DateTimeOffset CommittedAt { get; set; }
+}
+
+public sealed class ConcernStateRecord
+{
+    public required string InstanceId { get; set; }
+    public required string ConcernId { get; set; }
+    public required string DefinitionId { get; set; }
+    public required string DefinitionVersion { get; set; }
+    public required string CurrentState { get; set; }
+    public long Revision { get; set; }
+    public DateTimeOffset UpdatedAt { get; set; }
+}
+
+public sealed class ConcernTransitionHistoryRecord
+{
+    public required string Id { get; set; }
+    public required string InstanceId { get; set; }
+    public required string ConcernId { get; set; }
+    public required string AttemptId { get; set; }
+    public required string DefinitionId { get; set; }
+    public required string DefinitionVersion { get; set; }
+    public required string TransitionId { get; set; }
+    public required string PreviousState { get; set; }
+    public required string NewState { get; set; }
+    public required string Event { get; set; }
+    public long RevisionBefore { get; set; }
+    public long RevisionAfter { get; set; }
+    public long ConcernRevisionBefore { get; set; }
+    public long ConcernRevisionAfter { get; set; }
+    public DateTimeOffset OccurredAt { get; set; }
 }

@@ -102,6 +102,39 @@ The API currently resolves only the registered `orion-4-to-5-early-draft@1` cont
 
 Replay starts from the first committed epoch's exact retained definition and verifies each migration boundary and digest before checking transitions in that epoch. Timers are checked against their original definition identity and persisted deadlines. See [gate-11-design.md](./gate-11-design.md) and [gate-11-amendment-traceability.md](./gate-11-amendment-traceability.md).
 
+## Gate 12 concern inspection and replay
+
+For a language 1.3 instance, durable concern states are inspected independently
+from the parent lifecycle:
+
+- `GET /api/instances/{id}/concerns` returns the bound definition identity,
+  parent state/revision, each concern's current state and concern revision, and
+  projection-integrity findings.
+- `GET /api/instances/{id}/concerns/history` lists accepted concern transitions
+  with their attempt, parent revision and per-concern revision before/after.
+- `GET /api/instances/{id}/concerns/replay` reconstructs each concern from its
+  immutable definition and linked accepted attempt/evaluation evidence, then
+  checks the current projection. It is read-only and does not re-evaluate live
+  inputs or repeat side effects.
+
+Concern input mappings use the same `/commands` and trusted `/observations`
+routes as parent inputs. A concern input increments only that concern's
+revision; the instance's parent state and revision remain unchanged. Accepted
+concern attempts are marked `dimension: "Concern"` and include `concernId`.
+Parent replay verifies parent transitions separately and does not treat a
+concern-only accepted attempt as missing parent history.
+
+The language 1.3 `cancellationEvent` contract is applied within the existing
+parent input transaction. When the cancellation parent transition is accepted,
+each active concern is transitioned to its declared terminal cancellation
+state, and the parent and concern histories share the accepted attempt. If the
+parent is already terminal, new concern activity is refused. Expected
+operations and unresolved remote outcomes remain inspectable; cancellation
+does not claim that a remote effect was reversed or failed. See
+[state-machine-language-v1.md](./state-machine-language-v1.md),
+[gate-12-design.md](./gate-12-design.md) and
+[orion-definition-v6.md](./orion-definition-v6.md).
+
 ## Durable timers
 
 Timed definitions schedule timers atomically with an accepted triggering transition. Timer due times are persisted UTC instants; they are not recalculated when the API restarts or when a newer definition version is registered.

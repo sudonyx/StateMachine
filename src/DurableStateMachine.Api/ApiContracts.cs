@@ -84,7 +84,8 @@ public sealed record InputProcessingResponse(
     InboundMessageResponse Message,
     AttemptResponse? Attempt,
     InstanceResponse Instance,
-    TransitionResponse? Transition);
+    TransitionResponse? Transition,
+    IReadOnlyList<ConcernTransitionResponse>? ConcernTransitions = null);
 
 public sealed record DecisionEvidenceRequest(
     string DecisionSystemIdentity,
@@ -109,10 +110,35 @@ public sealed record DefinitionResponse(string Id, string Version, string Langua
 public sealed record AttemptResponse(string Id, string InstanceId, string Event, DateTimeOffset ReceivedAt, string Status,
     string? TransitionId, string PreviousState, string? TargetState, long RevisionBefore, long RevisionAfter,
     string ReasonCode, string Explanation, IReadOnlyList<GuardFinding> GuardFindings,
-    TransitionEvaluationEvidence? EvaluationEvidence, string EvaluationEvidenceDigest);
+    TransitionEvaluationEvidence? EvaluationEvidence, string EvaluationEvidenceDigest,
+    string Dimension = "Parent", string? ConcernId = null);
 public sealed record TransitionResponse(string Id, string InstanceId, string AttemptId, string TransitionId,
     string DefinitionId, string DefinitionVersion, string PreviousState, string NewState, string Event,
     long RevisionBefore, long RevisionAfter, DateTimeOffset OccurredAt);
+public sealed record ConcernTransitionResponse(
+    string Id,
+    string InstanceId,
+    string ConcernId,
+    string AttemptId,
+    string TransitionId,
+    string DefinitionId,
+    string DefinitionVersion,
+    string PreviousState,
+    string NewState,
+    string Event,
+    long RevisionBefore,
+    long RevisionAfter,
+    long ConcernRevisionBefore,
+    long ConcernRevisionAfter,
+    DateTimeOffset OccurredAt);
+public sealed record ConcernInspectionResponse(
+    string InstanceId,
+    string DefinitionId,
+    string DefinitionVersion,
+    string ParentState,
+    long ParentRevision,
+    IReadOnlyList<ConcernStateDetails> Concerns,
+    IReadOnlyList<ConcernIntegrityFinding> IntegrityFindings);
 public sealed record EventSubmissionResponse(AttemptResponse Attempt, InstanceResponse Instance, TransitionResponse? Transition);
 public sealed record TimerResponse(
     string Id,
@@ -181,13 +207,23 @@ public static class ApiContractMapping
         return new AttemptResponse(attempt.Id, attempt.InstanceId, attempt.Event, attempt.ReceivedAt, attempt.Status,
             attempt.TransitionId, attempt.PreviousState, attempt.TargetState, attempt.RevisionBefore,
             attempt.RevisionAfter, attempt.ReasonCode, attempt.Explanation, findings, evidence,
-            attempt.EvaluationEvidenceDigest);
+            attempt.EvaluationEvidenceDigest, attempt.Dimension, attempt.ConcernId);
     }
 
     public static TransitionResponse ToResponse(this TransitionHistoryRecord history) =>
         new(history.Id, history.InstanceId, history.AttemptId, history.TransitionId, history.DefinitionId,
             history.DefinitionVersion, history.PreviousState, history.NewState, history.Event,
             history.RevisionBefore, history.RevisionAfter, history.OccurredAt);
+
+    public static ConcernTransitionResponse ToResponse(this ConcernTransitionHistoryRecord history) =>
+        new(history.Id, history.InstanceId, history.ConcernId, history.AttemptId, history.TransitionId,
+            history.DefinitionId, history.DefinitionVersion, history.PreviousState, history.NewState,
+            history.Event, history.RevisionBefore, history.RevisionAfter, history.ConcernRevisionBefore,
+            history.ConcernRevisionAfter, history.OccurredAt);
+
+    public static ConcernInspectionResponse ToResponse(this ConcernInspection inspection) =>
+        new(inspection.InstanceId, inspection.DefinitionId, inspection.DefinitionVersion,
+            inspection.ParentState, inspection.ParentRevision, inspection.Concerns, inspection.IntegrityFindings);
 
     public static TimerResponse ToResponse(this TimerRecord timer) =>
         new(timer.Id, timer.InstanceId, timer.DefinitionId, timer.DefinitionVersion,

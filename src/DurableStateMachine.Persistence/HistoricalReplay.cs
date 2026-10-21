@@ -247,7 +247,8 @@ public static class HistoricalReplay
                 "A committed migration does not occur at a reconstructed revision boundary.", [$"migration:{migration.Id}"]));
         }
 
-        foreach (var attempt in attempts.Where(item => item.Status == EvaluationStatus.Accepted.ToString()))
+        foreach (var attempt in attempts.Where(item =>
+                     item.Status == EvaluationStatus.Accepted.ToString() && item.Dimension != "Concern"))
         {
             if (!historiesByAttempt.TryGetValue(attempt.Id, out var linked) || linked.Length == 0)
             {
@@ -488,7 +489,9 @@ public static class HistoricalReplay
                 evidence.InstanceFacts,
                 evidence.AttemptFacts,
                 evidence.DecisionEvidence,
-                evidence.AttemptFactProvenance);
+                evidence.AttemptFactProvenance,
+                evidence.ConcernStates,
+                evidence.ParentState);
             var reproduced = TransitionEvaluator.Evaluate(definition, history.PreviousState, history.Event, context);
             var storedFindings = JsonSerializer.Deserialize<GuardFinding[]>(attempt.GuardFindingsJson, StoredJsonOptions) ?? [];
             if (reproduced.Status != EvaluationStatus.Accepted ||
