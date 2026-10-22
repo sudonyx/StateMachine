@@ -144,6 +144,31 @@ public sealed class Gate7HarnessTests
     }
 
     [Fact]
+    public async Task Missing_harness_remote_evidence_is_reported_without_losing_local_effect_record()
+    {
+        using var runtime = await TestRuntime.StartAsync(HarnessResponse.RemoteEvidenceUnavailable);
+        var instanceId = await runtime.CreateAssessmentReadyInstanceAsync();
+        using var effectResponse = await runtime.StartOfferAsync(instanceId, "remote-evidence-unavailable");
+        Assert.Equal(HttpStatusCode.OK, effectResponse.StatusCode);
+        var effect = await effectResponse.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("OutcomeUnknown", effect.GetProperty("status").GetString());
+        Assert.NotEqual(JsonValueKind.Null, effect.GetProperty("harnessExecutionId").ValueKind);
+
+        var inspection = await runtime.Client.GetFromJsonAsync<JsonElement>(
+            $"/api/instances/{instanceId}/effects/remote-evidence-unavailable/inspection");
+        Assert.Equal("Unavailable", inspection.GetProperty("remoteEvidenceStatus").GetString());
+        Assert.True(inspection.GetProperty("correlationAvailable").GetBoolean());
+        Assert.Equal(effect.GetProperty("harnessExecutionId").GetString(),
+            inspection.GetProperty("remoteExecutionReference").GetString());
+        Assert.Equal(4, inspection.GetProperty("unavailableReferences").GetArrayLength());
+        Assert.Equal("OutcomeUnknown",
+            inspection.GetProperty("operation").GetProperty("status").GetString());
+        Assert.Equal("AssessmentReady",
+            (await runtime.GetInstanceAsync(instanceId)).GetProperty("currentState").GetString());
+        Assert.Equal(1, runtime.Handler.ExecutionPostCount);
+    }
+
+    [Fact]
     public async Task Verified_harness_result_is_durable_before_gate5_acceptance_and_resumes_once()
     {
         using var runtime = await TestRuntime.StartAsync(HarnessResponse.Success);
@@ -232,6 +257,47 @@ public sealed class Gate7HarnessTests
         Assert.Equal("Refused", finalStaged.GetProperty("status").GetString());
         Assert.Contains("\"documentId\":\"offer-document\"",
             finalStaged.GetProperty("evidenceJson").GetString());
+        Assert.Equal(1, runtime.Handler.ExecutionPostCount);
+    }
+
+    [Fact]
+    public async Task Cancellation_during_harness_execution_preserves_and_refuses_the_late_result()
+    {
+        using var runtime = await TestRuntime.StartAsync(
+            HarnessResponse.Success,
+            holdExecutionResponse: true);
+        var instanceId = await runtime.CreateAssessmentReadyInstanceAsync();
+        const string operationId = "cancel-during-harness-execution";
+        var effectRequest = runtime.StartOfferAsync(instanceId, operationId);
+
+        await runtime.Handler.WaitForExecutionRequestAsync(TimeSpan.FromSeconds(10));
+        var pending = await runtime.GetEffectAsync(instanceId, operationId);
+        Assert.Equal("OutcomeUnknown", pending.GetProperty("status").GetString());
+        Assert.Equal(operationId, pending.GetProperty("operationId").GetString());
+
+        using (var cancelled = await runtime.Client.PostAsJsonAsync(
+            $"/api/instances/{instanceId}/commands", new
+            {
+                messageId = "cancel-while-harness-pending",
+                type = "CancelApplication",
+                expectedRevision = 1
+            }))
+        {
+            Assert.Equal(HttpStatusCode.OK, cancelled.StatusCode);
+        }
+        Assert.Equal("Cancelled", (await runtime.GetInstanceAsync(instanceId))
+            .GetProperty("currentState").GetString());
+
+        runtime.Handler.ReleaseExecutionResponse();
+        using var lateResult = await effectRequest.WaitAsync(TimeSpan.FromSeconds(10));
+        Assert.Equal(HttpStatusCode.OK, lateResult.StatusCode);
+        Assert.Equal("Cancelled", (await runtime.GetInstanceAsync(instanceId))
+            .GetProperty("currentState").GetString());
+        var staged = Assert.Single(await runtime.Client.GetFromJsonAsync<JsonElement[]>(
+            $"/api/instances/{instanceId}/staged-observations") ?? []);
+        Assert.Equal("Refused", staged.GetProperty("status").GetString());
+        Assert.Contains("\"documentId\":\"offer-document\"",
+            staged.GetProperty("evidenceJson").GetString());
         Assert.Equal(1, runtime.Handler.ExecutionPostCount);
     }
 
@@ -433,6 +499,7 @@ public sealed class Gate7HarnessTests
     {
         Success,
         SuccessObjectBody,
+        RemoteEvidenceUnavailable,
         Rejected,
         UnsupportedOperation,
         LosePostResponse
@@ -484,10 +551,21 @@ public sealed class Gate7HarnessTests
 
     private sealed class TestHarnessHandler(
         HarnessResponse responseMode,
-        JsonElement? priorExecutionRequest = null) : HttpMessageHandler
+        JsonElement? priorExecutionRequest = null,
+        bool holdExecutionResponse = false) : HttpMessageHandler
     {
+        private readonly TaskCompletionSource<bool> _executionRequestReceived =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _releaseExecutionResponse =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         public JsonElement? ExecutionRequest { get; private set; } = priorExecutionRequest;
         public int ExecutionPostCount { get; private set; }
+
+        public Task WaitForExecutionRequestAsync(TimeSpan timeout) =>
+            _executionRequestReceived.Task.WaitAsync(timeout);
+
+        public void ReleaseExecutionResponse() => _releaseExecutionResponse.TrySetResult(true);
 
         protected override async Task<HttpResponseMessage> SendAsync(
             HttpRequestMessage request,
@@ -520,13 +598,19 @@ public sealed class Gate7HarnessTests
                 using var body = await JsonDocument.ParseAsync(
                     await request.Content!.ReadAsStreamAsync(cancellationToken), cancellationToken: cancellationToken);
                 ExecutionRequest = body.RootElement.Clone();
+                if (holdExecutionResponse)
+                {
+                    _executionRequestReceived.TrySetResult(true);
+                    await _releaseExecutionResponse.Task.WaitAsync(cancellationToken);
+                }
                 if (responseMode == HarnessResponse.LosePostResponse)
                 {
                     throw new HttpRequestException("Connection closed before the invocation response arrived.");
                 }
 
                 var idempotencyKey = ExecutionRequest!.Value.GetProperty("idempotencyKey").GetString()!;
-                var isSuccess = responseMode is HarnessResponse.Success or HarnessResponse.SuccessObjectBody;
+                var isSuccess = responseMode is HarnessResponse.Success or
+                    HarnessResponse.SuccessObjectBody or HarnessResponse.RemoteEvidenceUnavailable;
                 var execution = isSuccess
                     ? SuccessExecution(idempotencyKey)
                     : RejectedExecution(
@@ -540,6 +624,9 @@ public sealed class Gate7HarnessTests
                     HarnessResponse.SuccessObjectBody => """
                       {"statusCode":200,"contentType":"application/json","body":{"outcome":"Succeeded","effectId":"offer-document-1","evidence":{"documentId":"offer-document","offerDigest":"sha256:test"},"occurredAt":"2026-10-16T13:00:00Z"},"truncated":false}
                       """,
+                    HarnessResponse.RemoteEvidenceUnavailable => """
+                      {"statusCode":200,"contentType":"application/json","body":"{\"outcome\":\"Succeeded\",\"effectId\":\"offer-document-1\",\"evidence\":{\"documentId\":\"offer-document\",\"offerDigest\":\"sha256:test\"},\"occurredAt\":\"2026-10-16T13:00:00Z\"}","truncated":false}
+                      """,
                     _ => "null"
                 };
                 return Json(HttpStatusCode.Created,
@@ -547,8 +634,11 @@ public sealed class Gate7HarnessTests
             }
             if (path.EndsWith("/inspection", StringComparison.Ordinal))
             {
+                if (responseMode == HarnessResponse.RemoteEvidenceUnavailable)
+                    throw new HttpRequestException("Controlled Harness inspection outage.");
                 var idempotencyKey = ExecutionRequest!.Value.GetProperty("idempotencyKey").GetString()!;
-                var isSuccess = responseMode is HarnessResponse.Success or HarnessResponse.SuccessObjectBody;
+                var isSuccess = responseMode is HarnessResponse.Success or
+                    HarnessResponse.SuccessObjectBody or HarnessResponse.RemoteEvidenceUnavailable;
                 var execution = isSuccess
                     ? SuccessExecution(idempotencyKey)
                     : RejectedExecution(
@@ -588,14 +678,20 @@ public sealed class Gate7HarnessTests
             }
             if (path.EndsWith("/attempts", StringComparison.Ordinal))
             {
+                if (responseMode == HarnessResponse.RemoteEvidenceUnavailable)
+                    throw new HttpRequestException("Controlled Harness attempts outage.");
                 return Json(HttpStatusCode.OK, """[{"id":"harness-attempt-1"}]""");
             }
             if (path.EndsWith("/evidence", StringComparison.Ordinal))
             {
+                if (responseMode == HarnessResponse.RemoteEvidenceUnavailable)
+                    throw new HttpRequestException("Controlled Harness evidence outage.");
                 return Json(HttpStatusCode.OK, """[{"id":"harness-evidence-1"}]""");
             }
             if (path.EndsWith("/replay", StringComparison.Ordinal) && request.Method == HttpMethod.Post)
             {
+                if (responseMode == HarnessResponse.RemoteEvidenceUnavailable)
+                    throw new HttpRequestException("Controlled Harness replay outage.");
                 return Json(HttpStatusCode.OK,
                     """{"executionId":"harness-execution","replayDecision":0,"providerCalled":false,"reason":"No new execution performed."}""");
             }
@@ -655,11 +751,13 @@ public sealed class Gate7HarnessTests
         private readonly string _directory;
         private readonly IReadOnlyDictionary<string, string?> _previousEnvironment;
         private readonly HarnessResponse _responseMode;
+        private readonly bool _holdExecutionResponse;
         private WebApplicationFactory<Program> _factory = null!;
 
-        private TestRuntime(HarnessResponse responseMode)
+        private TestRuntime(HarnessResponse responseMode, bool holdExecutionResponse)
         {
             _responseMode = responseMode;
+            _holdExecutionResponse = holdExecutionResponse;
             _directory = Path.Combine(Path.GetTempPath(), $"dsm-gate7-{Guid.NewGuid():N}");
             Directory.CreateDirectory(_directory);
             var providerId = "11111111-1111-1111-1111-111111111111";
@@ -687,8 +785,10 @@ public sealed class Gate7HarnessTests
             CreateFactory();
         }
 
-        public static Task<TestRuntime> StartAsync(HarnessResponse responseMode) =>
-            Task.FromResult(new TestRuntime(responseMode));
+        public static Task<TestRuntime> StartAsync(
+            HarnessResponse responseMode,
+            bool holdExecutionResponse = false) =>
+            Task.FromResult(new TestRuntime(responseMode, holdExecutionResponse));
 
         public HttpClient Client { get; private set; } = null!;
         public TestHarnessHandler Handler { get; private set; } = null!;
@@ -784,7 +884,10 @@ public sealed class Gate7HarnessTests
 
         private void CreateFactory()
         {
-            Handler = new TestHarnessHandler(_responseMode, Handler?.ExecutionRequest);
+            Handler = new TestHarnessHandler(
+                _responseMode,
+                Handler?.ExecutionRequest,
+                _holdExecutionResponse);
             _factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
                 builder.ConfigureTestServices(services =>
                     services.AddHttpClient<HarnessExecutionClient>()

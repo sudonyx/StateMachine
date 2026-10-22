@@ -1,0 +1,397 @@
+{
+  "languageVersion": "1.3",
+  "id": "orion-equipment-lease",
+  "version": "6.1",
+  "initialState": "Draft",
+  "cancellationEvent": "Cancel",
+  "states": [
+    { "id": "Draft" },
+    { "id": "UnderAssessment" },
+    { "id": "Approved" },
+    { "id": "OfferReady" },
+    { "id": "AwaitingOfferAcceptance" },
+    { "id": "Rejected", "terminal": true },
+    { "id": "Cancelled", "terminal": true },
+    { "id": "OfferDeclined", "terminal": true },
+    { "id": "OfferExpired", "terminal": true }
+  ],
+  "events": [
+    "Submit",
+    "AssessmentResult",
+    "Reject",
+    "GenerateOffer",
+    "ReleaseOffer",
+    "CustomerNotified",
+    "DeclineOffer",
+    "ExpireOffer",
+    "Cancel"
+  ],
+  "inputPolicy": {
+    "commands": [
+      { "name": "SubmitApplication", "event": "Submit" },
+      { "name": "ReleaseOffer", "event": "ReleaseOffer" },
+      { "name": "DeclineOffer", "event": "DeclineOffer" },
+      { "name": "CancelApplication", "event": "Cancel" },
+      { "name": "RequestAssetReservation", "event": "RequestReservation", "concern": "assetAvailability" },
+      { "name": "RetryAssetReservation", "event": "RetryReservation", "concern": "assetAvailability" }
+    ],
+    "observations": [
+      {
+        "name": "DocumentsVerified",
+        "event": "DocumentsComplete",
+        "concern": "documentCompleteness",
+        "requiredEvidence": ["documentSetDigest"]
+      },
+      {
+        "name": "DocumentsIncomplete",
+        "event": "DocumentsIncomplete",
+        "concern": "documentCompleteness",
+        "requiredEvidence": ["verificationDigest"]
+      },
+      {
+        "name": "DocumentsInvalidated",
+        "event": "DocumentsInvalid",
+        "concern": "documentCompleteness",
+        "requiredEvidence": ["verificationDigest", "invalidReason"]
+      },
+      {
+        "name": "EquipmentReserved",
+        "event": "ReservationConfirmed",
+        "concern": "assetAvailability",
+        "requiredEvidence": ["reservationId", "assetId"]
+      },
+      {
+        "name": "EquipmentUnavailable",
+        "event": "AssetUnavailable",
+        "concern": "assetAvailability",
+        "requiredEvidence": ["assetId", "availabilityResult"]
+      },
+      {
+        "name": "OfferDocumentGenerated",
+        "event": "GenerateOffer",
+        "requiredEvidence": ["documentId", "offerDigest"]
+      },
+      {
+        "name": "EligibilityAssessmentResult",
+        "event": "AssessmentResult",
+        "requiredEvidence": ["decisionEvaluationId", "inputFactSetDigest", "policyVersionIdentities", "outcomeState"]
+      },
+      {
+        "name": "CustomerNotified",
+        "event": "CustomerNotified",
+        "requiredEvidence": ["deliveryId", "messageDigest"]
+      }
+    ]
+  },
+  "transitions": [
+    {
+      "id": "submit-application",
+      "source": "Draft",
+      "event": "Submit",
+      "target": "UnderAssessment",
+      "description": "Submission begins assessment while the independently recorded document concern may still be incomplete."
+    },
+    {
+      "id": "eligible-assessment-result",
+      "source": "UnderAssessment",
+      "event": "AssessmentResult",
+      "target": "Approved",
+      "description": "Only a bound eligible result after complete documents advances the application.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "concernState", "concern": "documentCompleteness", "state": "Complete" },
+          { "op": "eq", "fact": "checksComplete", "value": true },
+          { "op": "eq", "fact": "eligibilityDecision", "value": "Eligible" }
+        ]
+      }
+    },
+    {
+      "id": "referral-assessment-result",
+      "source": "UnderAssessment",
+      "event": "AssessmentResult",
+      "target": "UnderAssessment",
+      "description": "A referral is recorded without automatic approval or rejection.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "concernState", "concern": "documentCompleteness", "state": "Complete" },
+          { "op": "eq", "fact": "eligibilityDecision", "value": "Referral" }
+        ]
+      }
+    },
+    {
+      "id": "unresolved-assessment-result",
+      "source": "UnderAssessment",
+      "event": "AssessmentResult",
+      "target": "UnderAssessment",
+      "description": "An unresolved result is recorded without inventing a business outcome.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "concernState", "concern": "documentCompleteness", "state": "Complete" },
+          { "op": "eq", "fact": "eligibilityDecision", "value": "Unresolved" }
+        ]
+      }
+    },
+    {
+      "id": "reject-assessment",
+      "source": "UnderAssessment",
+      "event": "AssessmentResult",
+      "target": "Rejected",
+      "description": "A bound mandatory assessment rejection is terminal.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "concernState", "concern": "documentCompleteness", "state": "Complete" },
+          { "op": "eq", "fact": "eligibilityDecision", "value": "MandatoryRejection" }
+        ]
+      }
+    },
+    {
+      "id": "generate-offer-document",
+      "source": "Approved",
+      "event": "GenerateOffer",
+      "target": "OfferReady",
+      "description": "A verified offer document may be prepared independently of equipment reservation.",
+      "guard": {
+        "op": "concernState",
+        "concern": "documentCompleteness",
+        "state": "Complete"
+      }
+    },
+    {
+      "id": "release-offer-after-coordination",
+      "source": "OfferReady",
+      "event": "ReleaseOffer",
+      "target": "AwaitingOfferAcceptance",
+      "description": "The offer cannot be released until mandatory documents remain complete and the equipment reservation is confirmed.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "concernState", "concern": "documentCompleteness", "state": "Complete" },
+          { "op": "concernState", "concern": "assetAvailability", "state": "Reserved" }
+        ]
+      }
+    },
+    {
+      "id": "offer-customer-notified",
+      "source": "AwaitingOfferAcceptance",
+      "event": "CustomerNotified",
+      "target": "AwaitingOfferAcceptance",
+      "description": "A trusted Harness-backed customer notification is recorded without changing the offer lifecycle."
+    },
+    {
+      "id": "decline-offer",
+      "source": "AwaitingOfferAcceptance",
+      "event": "DeclineOffer",
+      "target": "OfferDeclined",
+      "description": "The customer declines an outstanding offer."
+    },
+    {
+      "id": "expire-offer",
+      "source": "AwaitingOfferAcceptance",
+      "event": "ExpireOffer",
+      "target": "OfferExpired",
+      "description": "The offer has expired."
+    },
+    {
+      "id": "cancel-draft",
+      "source": "Draft",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "Cancel before submission."
+    },
+    {
+      "id": "cancel-assessment",
+      "source": "UnderAssessment",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "Cancel while assessment or evidence work is active."
+    },
+    {
+      "id": "cancel-approved",
+      "source": "Approved",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "Cancel after approval and before offer delivery."
+    },
+    {
+      "id": "cancel-offer-ready",
+      "source": "OfferReady",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "Cancel after document generation and before offer release."
+    },
+    {
+      "id": "cancel-awaiting-acceptance",
+      "source": "AwaitingOfferAcceptance",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "Cancel before acceptance; completed provider effects are not implicitly reversed."
+    }
+  ],
+  "concerns": [
+    {
+      "id": "documentCompleteness",
+      "initialState": "Pending",
+      "states": [
+        { "id": "Pending" },
+        { "id": "Incomplete" },
+        { "id": "Complete" },
+        { "id": "Invalid" },
+        { "id": "Cancelled", "terminal": true }
+      ],
+      "events": ["DocumentsComplete", "DocumentsIncomplete", "DocumentsInvalid", "Cancel"],
+      "transitions": [
+        {
+          "id": "documents-confirmed-complete",
+          "source": "Pending",
+          "event": "DocumentsComplete",
+          "target": "Complete",
+          "description": "A trusted verification observation confirms mandatory evidence."
+        },
+        {
+          "id": "documents-confirmed-incomplete",
+          "source": "Pending",
+          "event": "DocumentsIncomplete",
+          "target": "Incomplete"
+        },
+        {
+          "id": "incomplete-documents-completed",
+          "source": "Incomplete",
+          "event": "DocumentsComplete",
+          "target": "Complete"
+        },
+        {
+          "id": "incomplete-documents-invalid",
+          "source": "Incomplete",
+          "event": "DocumentsInvalid",
+          "target": "Invalid"
+        },
+        {
+          "id": "complete-documents-invalidated",
+          "source": "Complete",
+          "event": "DocumentsInvalid",
+          "target": "Invalid"
+        },
+        {
+          "id": "replacement-documents-verified",
+          "source": "Invalid",
+          "event": "DocumentsComplete",
+          "target": "Complete"
+        },
+        {
+          "id": "cancel-documents-pending",
+          "source": "Pending",
+          "event": "Cancel",
+          "target": "Cancelled"
+        },
+        {
+          "id": "cancel-documents-incomplete",
+          "source": "Incomplete",
+          "event": "Cancel",
+          "target": "Cancelled"
+        },
+        {
+          "id": "cancel-documents-complete",
+          "source": "Complete",
+          "event": "Cancel",
+          "target": "Cancelled"
+        },
+        {
+          "id": "cancel-documents-invalid",
+          "source": "Invalid",
+          "event": "Cancel",
+          "target": "Cancelled"
+        }
+      ]
+    },
+    {
+      "id": "assetAvailability",
+      "initialState": "NotRequested",
+      "states": [
+        { "id": "NotRequested" },
+        { "id": "Pending" },
+        { "id": "Reserved" },
+        { "id": "Unavailable" },
+        { "id": "Cancelled", "terminal": true }
+      ],
+      "events": ["RequestReservation", "RetryReservation", "ReservationConfirmed", "AssetUnavailable", "Cancel"],
+      "transitions": [
+        {
+          "id": "request-equipment-reservation",
+          "source": "NotRequested",
+          "event": "RequestReservation",
+          "target": "Pending",
+          "description": "Requesting is not evidence of a confirmed reservation.",
+          "guard": { "op": "parentState", "state": "Approved" }
+        },
+        {
+          "id": "confirm-equipment-reservation",
+          "source": "Pending",
+          "event": "ReservationConfirmed",
+          "target": "Reserved",
+          "description": "Accept only the verified result correlated to the pending reservation operation.",
+          "guard": {
+            "op": "or",
+            "args": [
+              { "op": "parentState", "state": "Approved" },
+              { "op": "parentState", "state": "OfferReady" }
+            ]
+          }
+        },
+        {
+          "id": "equipment-unavailable",
+          "source": "Pending",
+          "event": "AssetUnavailable",
+          "target": "Unavailable",
+          "guard": {
+            "op": "or",
+            "args": [
+              { "op": "parentState", "state": "Approved" },
+              { "op": "parentState", "state": "OfferReady" }
+            ]
+          }
+        },
+        {
+          "id": "retry-equipment-reservation",
+          "source": "Unavailable",
+          "event": "RetryReservation",
+          "target": "Pending",
+          "guard": {
+            "op": "or",
+            "args": [
+              { "op": "parentState", "state": "Approved" },
+              { "op": "parentState", "state": "OfferReady" }
+            ]
+          }
+        },
+        {
+          "id": "cancel-asset-not-requested",
+          "source": "NotRequested",
+          "event": "Cancel",
+          "target": "Cancelled"
+        },
+        {
+          "id": "cancel-asset-pending",
+          "source": "Pending",
+          "event": "Cancel",
+          "target": "Cancelled"
+        },
+        {
+          "id": "cancel-asset-reserved",
+          "source": "Reserved",
+          "event": "Cancel",
+          "target": "Cancelled"
+        },
+        {
+          "id": "cancel-asset-unavailable",
+          "source": "Unavailable",
+          "event": "Cancel",
+          "target": "Cancelled"
+        }
+      ]
+    }
+  ]
+}

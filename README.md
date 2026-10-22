@@ -201,3 +201,34 @@ Start both services first. The client persists the keyed request before sending 
 Definitions are immutable by `(id, version)`; new versions coexist. Instances remain bound to the exact version used at creation, with their instance facts fixed for their lifetime. Explicit per-attempt facts are immutable evaluation-only inputs and never mutate those facts. Each event attempt (including rejected, ambiguous and unresolved evaluations) is stored separately from accepted transition history, together with a complete evaluation-evidence snapshot. Accepted state, revision, attempt, evidence and transition history commit in one SQLite transaction. Per-host instance gates reduce local contention; Gate 9 SQLite write transactions and revision constraints arbitrate independent hosts sharing a database.
 
 The Meridian client remains a demonstration adapter, not a durable external-activity subsystem. Meridian's idempotency key plus a saved local request envelope support deliberate same-key/same-request retries, but there is no atomic transaction spanning Meridian and local SQLite and the key does not deduplicate state-machine events. Gate 7 supports only the three independently hosted synthetic providers and the documented Generic Harness API; production provider credentials/secret management, background scheduling, automatic workflow retry orchestration, full replay, production authentication, a general distributed lock service and hierarchical/parallel statecharts remain unsupported. SQLite concurrency is limited to hosts sharing a database file with valid locking; no network-filesystem or database-independent distributed guarantee is claimed. The trusted-ingestion credential is a controlled training boundary; it does not prove provider identity or evidence authenticity. See [gate-3-design.md](./docs/gate-3-design.md), [gate-4-design.md](./docs/gate-4-design.md), [gate-5-design.md](./docs/gate-5-design.md), [gate-7-design.md](./docs/gate-7-design.md) and [gate-9-design.md](./docs/gate-9-design.md) for transaction, evidence and authority limits.
+
+## Gate 13 Orion composition
+
+Gate 13 composes this API, the independently hosted Orion Decision API, and the
+existing Generic Harness without moving decision rules or provider execution
+into the state-machine runtime. Start and configure the Generic Harness and
+synthetic providers as described in [gate-7-integration.md](./docs/gate-7-integration.md).
+Run the State Machine on port 5001 with its own SQLite database and exact
+Harness capability bindings, and run the Decision API on port 5268 with a
+separate Orion decision-history directory. The Orion policy pack is isolated
+under the Decision API's `training-data/orion-policy/`; it is not part of
+Meridian's shared policy catalog.
+
+Run the live HTTP scenario from the repository root after all services are
+ready:
+
+```powershell
+.\scripts\gate13-demo.ps1 -TrustedKey "<local-training-key>" `
+  -OutputPath "$env:TEMP\gate13-evidence.json"
+```
+
+The runner registers immutable Orion 6.1, submits a workflow request, obtains a
+bound layered decision over HTTP, and sends reservation, offer-document and
+notification effects through the State Machine's Generic Harness adapter. It
+then checks both systems' historical replay and State Machine history before
+exporting the evidence chain. Use unique local database paths and keep the
+trusted key out of source control. The runner does not replace controlled
+failure-injection tests with live service failures. The protocol, responsibility
+matrix, configuration, limitations and failure-test mapping are documented in
+[gate-13-design.md](./docs/gate-13-design.md), [gate-13-integration-audit.md](./docs/gate-13-integration-audit.md),
+and [gate-13-test-results.md](./docs/gate-13-test-results.md).

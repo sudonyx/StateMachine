@@ -374,22 +374,35 @@ public sealed class HarnessEffectCoordinator(
             {
                 operation = await GetResponseAsync(instanceId, operationId, cancellationToken),
                 correlationAvailable = false,
+                remoteEvidenceStatus = "Unavailable",
+                remoteExecutionReference = (string?)null,
+                unavailableReferences = new[]
+                {
+                    new
+                    {
+                        reference = "Harness execution identity",
+                        reason = "The invocation response did not establish an execution ID; the published API has no lookup-by-idempotency-key route."
+                    }
+                },
                 explanation = "The invocation response did not establish a harness execution ID. The published API has no lookup-by-idempotency-key route; inspection and automatic re-invocation are unavailable."
             }, JsonOptions);
         }
 
-        var inspection = await harness.GetInspectionAsync(operation.HarnessExecutionId, cancellationToken);
-        var attempts = await harness.GetAttemptsAsync(operation.HarnessExecutionId, cancellationToken);
-        var evidence = await harness.GetEvidenceAsync(operation.HarnessExecutionId, cancellationToken);
-        var replay = await harness.EvaluateReplaySafetyAsync(operation.HarnessExecutionId, cancellationToken);
+        var remoteEvidence = await ReadRemoteEvidenceAsync(
+            operation.HarnessExecutionId,
+            cancellationToken);
+
         return JsonSerializer.SerializeToElement(new
         {
             operation = await GetResponseAsync(instanceId, operationId, cancellationToken),
             correlationAvailable = true,
-            inspection,
-            attempts,
-            evidence,
-            replaySafetyEvaluation = replay
+            remoteExecutionReference = operation.HarnessExecutionId,
+            remoteEvidenceStatus = remoteEvidence.Status,
+            unavailableReferences = remoteEvidence.UnavailableReferences,
+            inspection = remoteEvidence.Inspection,
+            attempts = remoteEvidence.Attempts,
+            evidence = remoteEvidence.Evidence,
+            replaySafetyEvaluation = remoteEvidence.ReplaySafetyEvaluation
         }, JsonOptions);
     }
 
@@ -524,10 +537,26 @@ public sealed class HarnessEffectCoordinator(
     {
         var executionId = operation.HarnessExecutionId
             ?? throw new InvalidOperationException("Cannot inspect a harness execution without its identity.");
-        var inspection = await harness.GetInspectionAsync(executionId, cancellationToken);
-        var attempts = await harness.GetAttemptsAsync(executionId, cancellationToken);
-        var evidence = await harness.GetEvidenceAsync(executionId, cancellationToken);
-        var replay = await harness.EvaluateReplaySafetyAsync(executionId, cancellationToken);
+        var remoteEvidence = await ReadRemoteEvidenceAsync(executionId, cancellationToken);
+        if (remoteEvidence.UnavailableReferences.Count > 0)
+        {
+            attempt.HarnessAttemptIdsJson = SerializeIdentifiers(remoteEvidence.Attempts ?? []);
+            attempt.HarnessEvidenceIdsJson = SerializeIdentifiers(remoteEvidence.Evidence ?? []);
+            operation.Status = "OutcomeUnknown";
+            operation.OutcomeConfidence = "RemoteOutcomeUnknown";
+            attempt.ProviderOutcome = "Unknown";
+            attempt.OutcomeConfidence = "RemoteOutcomeUnknown";
+            attempt.LocalPersistenceOutcome = "Persisted";
+            attempt.Error = "The Harness execution identity was received, but one or more remote evidence references are unavailable: " +
+                string.Join(", ", remoteEvidence.UnavailableReferences.Select(item => item.Reference));
+            await db.SaveChangesAsync(cancellationToken);
+            return;
+        }
+
+        var inspection = remoteEvidence.Inspection!.Value;
+        var attempts = remoteEvidence.Attempts!;
+        var evidence = remoteEvidence.Evidence!;
+        var replay = remoteEvidence.ReplaySafetyEvaluation!.Value;
         if (!replay.TryGetProperty("providerCalled", out var providerCalled) ||
             providerCalled.ValueKind != JsonValueKind.False)
         {
@@ -665,6 +694,91 @@ public sealed class HarnessEffectCoordinator(
                 cancellationToken);
         }
     }
+
+    private async Task<RemoteHarnessEvidence> ReadRemoteEvidenceAsync(
+        string executionId,
+        CancellationToken cancellationToken)
+    {
+        var unavailable = new List<UnavailableHarnessEvidenceReference>();
+        var encodedId = Uri.EscapeDataString(executionId);
+        var inspection = await ReadRemoteJsonAsync(
+            $"executions/{encodedId}/inspection",
+            () => harness.GetInspectionAsync(executionId, cancellationToken),
+            unavailable,
+            cancellationToken);
+        var attempts = await ReadRemoteListAsync(
+            $"executions/{encodedId}/attempts",
+            () => harness.GetAttemptsAsync(executionId, cancellationToken),
+            unavailable,
+            cancellationToken);
+        var evidence = await ReadRemoteListAsync(
+            $"executions/{encodedId}/evidence",
+            () => harness.GetEvidenceAsync(executionId, cancellationToken),
+            unavailable,
+            cancellationToken);
+        var replay = await ReadRemoteJsonAsync(
+            $"executions/{encodedId}/replay",
+            () => harness.EvaluateReplaySafetyAsync(executionId, cancellationToken),
+            unavailable,
+            cancellationToken);
+        return new RemoteHarnessEvidence(inspection, attempts, evidence, replay, unavailable);
+    }
+
+    private static async Task<JsonElement?> ReadRemoteJsonAsync(
+        string reference,
+        Func<Task<JsonElement>> read,
+        List<UnavailableHarnessEvidenceReference> unavailable,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await read();
+        }
+        catch (HttpRequestException exception)
+        {
+            unavailable.Add(new UnavailableHarnessEvidenceReference(reference, exception.Message));
+        }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            unavailable.Add(new UnavailableHarnessEvidenceReference(reference, exception.Message));
+        }
+        return null;
+    }
+
+    private static async Task<IReadOnlyList<JsonElement>?> ReadRemoteListAsync(
+        string reference,
+        Func<Task<IReadOnlyList<JsonElement>>> read,
+        List<UnavailableHarnessEvidenceReference> unavailable,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            return await read();
+        }
+        catch (HttpRequestException exception)
+        {
+            unavailable.Add(new UnavailableHarnessEvidenceReference(reference, exception.Message));
+        }
+        catch (OperationCanceledException exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            unavailable.Add(new UnavailableHarnessEvidenceReference(reference, exception.Message));
+        }
+        return null;
+    }
+
+    private sealed record RemoteHarnessEvidence(
+        JsonElement? Inspection,
+        IReadOnlyList<JsonElement>? Attempts,
+        IReadOnlyList<JsonElement>? Evidence,
+        JsonElement? ReplaySafetyEvaluation,
+        IReadOnlyList<UnavailableHarnessEvidenceReference> UnavailableReferences)
+    {
+        public string Status => UnavailableReferences.Count == 0
+            ? "Retrieved"
+            : UnavailableReferences.Count == 4 ? "Unavailable" : "Partial";
+    }
+
+    private sealed record UnavailableHarnessEvidenceReference(string Reference, string Reason);
 
     private async Task AcceptObservationAsync(
         EffectOperationRecord operation,
