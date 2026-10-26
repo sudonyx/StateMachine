@@ -1,0 +1,229 @@
+openapi: 3.1.0
+info:
+  title: Asteria Synthetic Deployment Platform
+  version: 1.0.0
+  description: Fictional provider API. Deployment is a mutating operation; HTTP admission
+    does not establish deployment success. No state-machine, harness or policy implementation
+    is prescribed.
+servers:
+- url: http://localhost:5271
+  description: Illustrative synthetic provider address
+paths:
+  /deployments:
+    post:
+      operationId: requestDeployment
+      summary: Request a synthetic deployment
+      description: A 202 only means accepted for processing. The provider guarantees
+        at most one logical deployment per exact idempotencyKey and canonical request;
+        conflicts return 409. Network loss after remote admission can leave the caller
+        uncertain. Do not infer failure from timeout.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeploymentRequest'
+      responses:
+        '202':
+          description: Request accepted, not necessarily deployed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentStatus'
+        '200':
+          description: Replay of same idempotency key and canonical request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentStatus'
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Key reused with conflicting canonical request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Business-invalid target
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Throttled; remote admission not established by status alone
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Unavailable; remote admission not established by status alone
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /deployments/{deploymentId}:
+    get:
+      operationId: getDeploymentStatus
+      summary: Read deployment status by returned deployment ID
+      parameters:
+      - name: deploymentId
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Known deployment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentStatus'
+        '404':
+          description: ID not found (not proof a different request never ran)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Temporarily unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /deployments/by-idempotency-key/{idempotencyKey}:
+    get:
+      operationId: lookupDeploymentByIdempotencyKey
+      summary: Read exact admitted operation by known key
+      description: Read-only reconciliation aid. 404 does not independently prove
+        no remote execution occurred in the presence of unavailable or incomplete
+        evidence.
+      parameters:
+      - name: idempotencyKey
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Recorded operation with this exact key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentStatus'
+        '404':
+          description: No accessible record for this exact key
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Lookup unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  schemas:
+    DeploymentRequest:
+      type: object
+      additionalProperties: false
+      required:
+      - releaseId
+      - assessmentGeneration
+      - materialDigest
+      - product
+      - targetVersion
+      - environment
+      - idempotencyKey
+      properties:
+        releaseId:
+          type: string
+          minLength: 1
+        assessmentGeneration:
+          type: integer
+          minimum: 1
+        materialDigest:
+          type: string
+          minLength: 1
+        product:
+          type: string
+          minLength: 1
+        targetVersion:
+          type: string
+          minLength: 1
+        environment:
+          type: string
+          enum:
+          - development
+          - staging
+          - production
+        idempotencyKey:
+          type: string
+          minLength: 1
+      description: Same key with a changed canonical request must conflict.
+    DeploymentStatus:
+      type: object
+      additionalProperties: false
+      required:
+      - deploymentId
+      - idempotencyKey
+      - releaseId
+      - assessmentGeneration
+      - materialDigest
+      - product
+      - targetVersion
+      - environment
+      - status
+      - lastUpdatedAt
+      properties:
+        deploymentId:
+          type: string
+        idempotencyKey:
+          type: string
+        releaseId:
+          type: string
+        assessmentGeneration:
+          type: integer
+          minimum: 1
+        materialDigest:
+          type: string
+        product:
+          type: string
+        targetVersion:
+          type: string
+        environment:
+          type: string
+        status:
+          type: string
+          enum:
+          - Pending
+          - Running
+          - Succeeded
+          - Failed
+        lastUpdatedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+        evidenceId:
+          type: string
+        failureReason:
+          type: string
+    Error:
+      type: object
+      required:
+      - code
+      - message
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        operationId:
+          type: string

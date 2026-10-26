@@ -10,6 +10,7 @@ public sealed class DefinitionLoaderTests
         var orion = TestSupport.LoadWorkflow("orion-v1.json");
         var timedOrion = TestSupport.LoadWorkflow("orion-v4.json");
         var concernOrion = TestSupport.LoadWorkflow("orion-v6.json");
+        var asteria = TestSupport.LoadWorkflow("asteria-release-governance-v1.json");
         var documents = TestSupport.LoadWorkflow("document-review-v1.json");
 
         Assert.Equal("orion-equipment-lease", orion.Id);
@@ -21,6 +22,15 @@ public sealed class DefinitionLoaderTests
         Assert.Equal(2, concernOrion.Concerns.Count);
         Assert.Equal("Pending", concernOrion.Concerns["documentCompleteness"].InitialState);
         Assert.Equal(12, concernOrion.Transitions.Count);
+        Assert.Equal("asteria-release-governance", asteria.Id);
+        Assert.Equal("1.0", asteria.Version);
+        Assert.Equal("1.3", asteria.LanguageVersion);
+        Assert.Equal(10, asteria.States.Count);
+        Assert.Equal(6, asteria.Concerns.Count);
+        Assert.Null(asteria.CancellationEvent);
+        Assert.DoesNotContain(asteria.Transitions, transition =>
+            transition.Target is "PreparingForDeployment" or "ReadyForDeployment" or
+                "DeploymentInProgress" or "PostDeploymentVerification" or "Completed");
         Assert.Equal("4.0", timedOrion.Version);
         Assert.Equal(TimeSpan.FromDays(7), timedOrion.Timers.Single(timer => timer.Id == "offer-expiry").Duration);
         Assert.Equal(TimeSpan.FromDays(6), timedOrion.Timers.Single(timer => timer.Id == "offer-reminder").Duration);

@@ -1,0 +1,113 @@
+openapi: 3.1.0
+info:
+  title: Asteria Synthetic Application Health Verification
+  version: 1.0.0
+  description: Fictional read-only verification capability. A passing result must
+    be correlated to the exact deployment, version and environment. This API does
+    not change deployment state.
+servers:
+- url: http://localhost:5272
+  description: Illustrative synthetic provider address
+paths:
+  /health-verifications:
+    get:
+      operationId: verifyDeployedApplicationHealth
+      summary: Inspect application health for an exact deployment
+      description: Read-only synthetic capability; repeated calls do not mutate deployments.
+        HTTP 200 is not synonymous with Passed. A mismatch in returned deploymentId,
+        observedVersion or environment is not valid evidence for a different release.
+      parameters:
+      - name: deploymentId
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: targetVersion
+        in: query
+        required: true
+        schema:
+          type: string
+      - name: environment
+        in: query
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Verification result (Passed, Failed or Indeterminate)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthVerificationResult'
+        '400':
+          description: Invalid query
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Deployment not available for verification
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          description: Rate limited
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: Health service unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+components:
+  schemas:
+    HealthVerificationResult:
+      type: object
+      additionalProperties: false
+      required:
+      - deploymentId
+      - observedVersion
+      - environment
+      - result
+      - checkedAt
+      - evidenceId
+      properties:
+        deploymentId:
+          type: string
+        observedVersion:
+          type: string
+        environment:
+          type: string
+          enum:
+          - development
+          - staging
+          - production
+        result:
+          type: string
+          enum:
+          - Passed
+          - Failed
+          - Indeterminate
+        checkedAt:
+          type: string
+          format: date-time
+        evidenceId:
+          type: string
+        details:
+          type: string
+    Error:
+      type: object
+      required:
+      - code
+      - message
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+        operationId:
+          type: string

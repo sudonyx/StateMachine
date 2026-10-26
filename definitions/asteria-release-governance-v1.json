@@ -1,0 +1,270 @@
+{
+  "languageVersion": "1.3",
+  "id": "asteria-release-governance",
+  "version": "1.0",
+  "initialState": "Draft",
+  "states": [
+    { "id": "Draft" },
+    { "id": "UnderAssessment" },
+    { "id": "PreparingForDeployment" },
+    { "id": "Reassessing" },
+    { "id": "ReadyForDeployment" },
+    { "id": "DeploymentInProgress" },
+    { "id": "PostDeploymentVerification" },
+    { "id": "Completed", "terminal": true },
+    { "id": "Prohibited", "terminal": true },
+    { "id": "Cancelled", "terminal": true }
+  ],
+  "events": ["Submit", "Cancel"],
+  "inputPolicy": {
+    "commands": [
+      { "name": "SubmitRelease", "event": "Submit" },
+      { "name": "CancelRelease", "event": "Cancel" },
+      {
+        "name": "RequestFunctionalVerification",
+        "event": "RequestFunctionalVerification",
+        "concern": "FunctionalVerification"
+      },
+      {
+        "name": "RequestSecurityVerification",
+        "event": "RequestSecurityVerification",
+        "concern": "SecurityVerification"
+      },
+      {
+        "name": "RequestReleaseReview",
+        "event": "RequestApproval",
+        "concern": "ReleaseReviewApproval"
+      },
+      {
+        "name": "RequestEmergencyApproval",
+        "event": "RequestApproval",
+        "concern": "EmergencyApproval"
+      },
+      {
+        "name": "PrepareDeploymentRequest",
+        "event": "PrepareRequest",
+        "concern": "DeploymentExecution"
+      },
+      {
+        "name": "RequestCancellation",
+        "event": "RequestCancellation",
+        "concern": "CancellationIntent"
+      }
+    ],
+    "observations": []
+  },
+  "transitions": [
+    {
+      "id": "submit-complete-draft",
+      "source": "Draft",
+      "event": "Submit",
+      "target": "UnderAssessment",
+      "description": "Record a local submission request only when its expressible scalar, range, and vocabulary checks pass.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "ne", "fact": "releaseId", "value": "" },
+          { "op": "gte", "fact": "assessmentGeneration", "value": 1 },
+          { "op": "ne", "fact": "materialDigest", "value": "" },
+          { "op": "ne", "fact": "product", "value": "" },
+          { "op": "ne", "fact": "targetVersion", "value": "" },
+          {
+            "op": "or",
+            "args": [
+              { "op": "eq", "fact": "environment", "value": "development" },
+              { "op": "eq", "fact": "environment", "value": "staging" },
+              { "op": "eq", "fact": "environment", "value": "production" },
+              { "op": "eq", "fact": "environment", "value": "unmanaged-production" }
+            ]
+          },
+          {
+            "op": "or",
+            "args": [
+              { "op": "eq", "fact": "releaseCategory", "value": "Standard" },
+              { "op": "eq", "fact": "releaseCategory", "value": "Emergency" }
+            ]
+          },
+          {
+            "op": "or",
+            "args": [
+              { "op": "eq", "fact": "changeSize", "value": "Small" },
+              { "op": "eq", "fact": "changeSize", "value": "Medium" },
+              { "op": "eq", "fact": "changeSize", "value": "Large" }
+            ]
+          },
+          {
+            "op": "or",
+            "args": [
+              { "op": "eq", "fact": "authenticationChange", "value": true },
+              { "op": "eq", "fact": "authenticationChange", "value": false }
+            ]
+          },
+          {
+            "op": "or",
+            "args": [
+              { "op": "eq", "fact": "customerDataImpact", "value": true },
+              { "op": "eq", "fact": "customerDataImpact", "value": false }
+            ]
+          },
+          { "op": "ne", "fact": "releaseSummary", "value": "" },
+          { "op": "ne", "fact": "plannedDeploymentAt", "value": "" },
+          { "op": "ne", "fact": "releaseOwner", "value": "" }
+        ]
+      }
+    },
+    {
+      "id": "cancel-draft",
+      "source": "Draft",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "Accept explicit pre-deployment cancellation only when deployment has not been prepared.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "concernState", "concern": "CancellationIntent", "state": "Requested" },
+          { "op": "concernState", "concern": "DeploymentExecution", "state": "NotRequested" }
+        ]
+      }
+    },
+    {
+      "id": "cancel-under-assessment",
+      "source": "UnderAssessment",
+      "event": "Cancel",
+      "target": "Cancelled",
+      "description": "Accept explicit pre-deployment cancellation only when deployment has not been prepared.",
+      "guard": {
+        "op": "and",
+        "args": [
+          { "op": "concernState", "concern": "CancellationIntent", "state": "Requested" },
+          { "op": "concernState", "concern": "DeploymentExecution", "state": "NotRequested" }
+        ]
+      }
+    }
+  ],
+  "concerns": [
+    {
+      "id": "FunctionalVerification",
+      "initialState": "NotRequested",
+      "states": [
+        { "id": "NotRequested" },
+        { "id": "Requested" },
+        { "id": "Passed", "terminal": true },
+        { "id": "Failed", "terminal": true },
+        { "id": "Indeterminate" },
+        { "id": "Superseded" }
+      ],
+      "events": ["RequestFunctionalVerification"],
+      "transitions": [
+        {
+          "id": "request-functional-verification",
+          "source": "NotRequested",
+          "event": "RequestFunctionalVerification",
+          "target": "Requested"
+        }
+      ]
+    },
+    {
+      "id": "SecurityVerification",
+      "initialState": "NotRequested",
+      "states": [
+        { "id": "NotRequested" },
+        { "id": "Requested" },
+        { "id": "Passed", "terminal": true },
+        { "id": "Failed", "terminal": true },
+        { "id": "Indeterminate" },
+        { "id": "Superseded" }
+      ],
+      "events": ["RequestSecurityVerification"],
+      "transitions": [
+        {
+          "id": "request-security-verification",
+          "source": "NotRequested",
+          "event": "RequestSecurityVerification",
+          "target": "Requested"
+        }
+      ]
+    },
+    {
+      "id": "ReleaseReviewApproval",
+      "initialState": "NotRequested",
+      "states": [
+        { "id": "NotRequested" },
+        { "id": "Requested" },
+        { "id": "Approved", "terminal": true },
+        { "id": "Rejected", "terminal": true },
+        { "id": "Unresolved" }
+      ],
+      "events": ["RequestApproval"],
+      "transitions": [
+        {
+          "id": "request-release-review",
+          "source": "NotRequested",
+          "event": "RequestApproval",
+          "target": "Requested"
+        }
+      ]
+    },
+    {
+      "id": "EmergencyApproval",
+      "initialState": "NotRequested",
+      "states": [
+        { "id": "NotRequested" },
+        { "id": "Requested" },
+        { "id": "Approved", "terminal": true },
+        { "id": "Rejected", "terminal": true },
+        { "id": "Unresolved" }
+      ],
+      "events": ["RequestApproval"],
+      "transitions": [
+        {
+          "id": "request-emergency-approval",
+          "source": "NotRequested",
+          "event": "RequestApproval",
+          "target": "Requested"
+        }
+      ]
+    },
+    {
+      "id": "DeploymentExecution",
+      "initialState": "NotRequested",
+      "states": [
+        { "id": "NotRequested" },
+        { "id": "RequestPrepared" },
+        { "id": "OutcomeUnknown" },
+        { "id": "Succeeded", "terminal": true },
+        { "id": "Failed", "terminal": true }
+      ],
+      "events": ["PrepareRequest"],
+      "transitions": [
+        {
+          "id": "prepare-deployment-request",
+          "source": "NotRequested",
+          "event": "PrepareRequest",
+          "target": "RequestPrepared",
+          "description": "Record local request preparation only after the parent explicitly reaches ready-for-deployment.",
+          "guard": {
+            "op": "parentState",
+            "state": "ReadyForDeployment"
+          }
+        }
+      ]
+    },
+    {
+      "id": "CancellationIntent",
+      "initialState": "NotRequested",
+      "states": [
+        { "id": "NotRequested" },
+        { "id": "Requested", "terminal": true }
+      ],
+      "events": ["RequestCancellation"],
+      "transitions": [
+        {
+          "id": "record-cancellation-intent",
+          "source": "NotRequested",
+          "event": "RequestCancellation",
+          "target": "Requested"
+        }
+      ]
+    }
+  ]
+}
