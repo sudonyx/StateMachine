@@ -20,6 +20,7 @@ dotnet test DurableStateMachine.slnx
 - `clients/DurableStateMachine.Cli/` — generic command-line HTTP client.
 - `clients/DurableStateMachine.OrionClient/` — Orion scenario using the HTTP contract only.
 - `clients/DurableStateMachine.MeridianClient/` — independent live HTTP demonstration of a Meridian decision bound to a generic workflow event.
+- `clients/DurableStateMachine.AsteriaClient/` — Asteria-only release registry and coordinator for initial assessments through the published Decision API contract.
 - `tests/DurableStateMachine.Tests/` — Gate 2 regression tests and SQLite-backed HTTP integration tests.
 - `tools/OrionGate9Corpus/` — deterministic Gate 9 corpus generation, validation and API runner.
 - `test-data/` — fixed 5,000-delivery Orion adversarial corpus.
@@ -195,6 +196,63 @@ dotnet run --project clients\DurableStateMachine.MeridianClient -- --assessment-
 ```
 
 Start both services first. The client persists the keyed request before sending and reuses it on later invocations; preserve the envelope file to retry an uncertain outcome. Use a new file and operation/key for an intentional reassessment. Add `--verify-conflict --decision-only` to test the service's same-key/changed-request conflict without submitting a workflow event. See [gate-4-meridian-integration.md](./docs/gate-4-meridian-integration.md) for the supported key semantics, live verification and limits, and [gate-4-design.md](./docs/gate-4-design.md) for evidence and binding semantics. Controlled HTTP contract tests do not count as live service verification.
+
+## Gate 14 Asteria initial assessment
+
+Milestone 3B adds an Asteria-specific SQLite release registry/coordinator and
+the separately versioned
+[Asteria release-governance V2 definition](./definitions/asteria-release-governance-v2.json).
+It derives the canonical release-material digest locally, submits only the
+published Decision API request fields, records the API response/evidence, and
+correlates it through a genuine State Machine expected operation. The workflow
+remains unable to reach deployment or `Completed`; assessment obligations
+are not completed checks or approvals.
+
+Start the real Asteria Decision API with AST-POL-001 V1 available on port
+5267. In a separate PowerShell terminal, start the State Machine API with an
+isolated database:
+
+```powershell
+$env:ASPNETCORE_URLS = "http://localhost:5270"
+$env:DURABLE_STATE_MACHINE_DB = "$env:TEMP\asteria-state-machine.db"
+$env:DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY = "asteria-local-demo-key"
+dotnet run --project src\DurableStateMachine.Api
+```
+
+In another terminal at the repository root, point the coordinator at both
+services and use a separate registry database. `prepare` commits/inspects the
+workflow submission and parent revision; running `resume` as another process
+then exercises recovery while it registers the expected operation, calls the
+Decision API and submits the observation. The trusted-ingestion key must be
+exactly the value the State Machine API was started with (any local value
+works, but it must match); a mismatch fails expected-operation registration
+with HTTP 403. The coordinator can safely be re-run with `resume` after
+correcting it:
+
+```powershell
+$env:DURABLE_STATE_MACHINE_API_URL = "http://localhost:5270"
+$env:DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY = "asteria-local-demo-key"
+$env:ASTERIA_DECISION_API_URL = "http://localhost:5267"
+$env:ASTERIA_RELEASE_REGISTRY_PATH = "$env:TEMP\asteria-release-registry.db"
+$releaseId = "AST-REL-G14-M3B-$([guid]::NewGuid().ToString('N'))"
+dotnet run --project clients\DurableStateMachine.AsteriaClient -- prepare $releaseId `
+  .\training-data\asteria\cases\asteria-initial-assessment-demo.json
+dotnet run --project clients\DurableStateMachine.AsteriaClient -- resume $releaseId
+```
+
+The demo fixture is synthetic. Inspect the resulting workflow through the
+generic CLI or State Machine API; its accepted state depends on the registered
+policy result. `prepare` and `resume` must use the same registry database and
+exact release ID. A persisted applicable-policy result is recovered using
+the same Decision API idempotency key and request. A no-applicable-policy
+response is stored locally as `Unresolved` with no fabricated evaluation ID
+or selected policy version, because the Decision API does not persist or
+reserve its idempotency key for that branch. The coordinator cannot provide a
+cross-service transaction; see the
+[Milestone 3B design](./docs/asteria/gate14-milestone3b-design.md),
+[recovery analysis](./docs/asteria/gate14-milestone3b-recovery.md), and
+[test results](./docs/asteria/gate14-milestone3b-test-results.md) for system
+ownership, tested failure windows and limitations.
 
 ## Semantics and limitations
 

@@ -1,0 +1,881 @@
+openapi: 3.1.0
+info:
+  title: Asteria Decision API
+  version: 1.0.0
+  summary: Implemented Asteria AST-POL-001 release assessment contract
+  description: |
+    Contract exported from the implemented Decision API. The API exposes an
+    assessment endpoint, registered policy-version metadata, and exact-version
+    historical replay. There is no Asteria policy-source inspection endpoint.
+    This API determines requirements; it does not verify completed checks,
+    approvals, or deployment authorization.
+servers:
+  - url: /
+paths:
+  /asteria/releases/assessments:
+    post:
+      operationId: EvaluateAsteriaReleaseAssessment
+      summary: Determine release requirements under AST-POL-001
+      description: |
+        Uses the supplied business-effective date and known-at timestamp to
+        select the registered AST-POL-001 version. Required facts omitted from
+        facts are treated as Missing. A request with no applicable policy
+        version returns an unresolved response without a persisted evaluation.
+      parameters:
+        - name: Idempotency-Key
+          in: header
+          required: true
+          description: |
+            Exactly one header value is required. Must be 1-128 ASCII
+            characters, each in A-Z, a-z, 0-9, period, underscore, tilde, or
+            hyphen. Keys are case-sensitive.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 128
+            pattern: "^[A-Za-z0-9._~-]+$"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AsteriaReleaseAssessmentRequest"
+      responses:
+        "200":
+          description: Assessment completed or unresolved.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsteriaReleaseAssessmentResponse"
+        "400":
+          description: Missing/multiple/invalid idempotency header, malformed body, or invalid request/fact values.
+          content:
+            application/problem+json:
+              schema:
+                $ref: "#/components/schemas/ProblemDetails"
+        "409":
+          description: Idempotency key reused for a different request, or matching evaluation is still in progress.
+          headers:
+            Retry-After:
+              description: Present with value 1 for an idempotency operation that is still in progress.
+              schema:
+                type: integer
+                const: 1
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IdempotencyConflict"
+        "500":
+          description: Unhandled server-side evaluation, persistence, or policy-store failure.
+  /asteria/releases/policy-versions:
+    get:
+      operationId: ListAsteriaReleasePolicyVersions
+      summary: List registered AST-POL-001 policy-version metadata
+      description: |
+        Returns the projected metadata fields only; this route does not expose
+        source documents or executable rule documents.
+      responses:
+        "200":
+          description: Registered versions in the AST-POL-001 source.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AsteriaPolicyVersionIdentity"
+        "500":
+          description: Unhandled policy-store failure.
+  /asteria/releases/assessments/{evaluationId}/replay:
+    post:
+      summary: Replay a persisted Asteria assessment
+      description: |
+        Re-evaluates the stored fact snapshot against the exact registered
+        policy-version identity and returns whether the compared stored
+        outcome evidence still matches. This operation reads and evaluates
+        historical data; it does not persist a new evaluation or mutate the
+        stored assessment. No request body or idempotency header is used.
+        The route has no explicit operation name in the implementation.
+      parameters:
+        - name: evaluationId
+          in: path
+          required: true
+          description: Persisted evaluation identifier returned by a successful assessment.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Replay result, including the reproduced assessment and differences.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AsteriaHistoricalReplayResponse"
+        "404":
+          description: No persisted assessment exists for this identifier.
+        "500":
+          description: Unhandled history, registered-version, integrity, or replay-evaluation failure.
+components:
+  schemas:
+    AsteriaReleaseAssessmentRequest:
+      type: object
+      required:
+        - releaseId
+        - assessmentGeneration
+        - materialDigest
+        - businessEffectiveAt
+        - knownAt
+        - facts
+      properties:
+        releaseId:
+          type: string
+          minLength: 1
+          pattern: '\S'
+          description: Caller-supplied release identity; must not be blank.
+        assessmentGeneration:
+          type: integer
+          format: int32
+          minimum: 1
+          description: Caller-supplied positive assessment generation.
+        materialDigest:
+          type: string
+          minLength: 1
+          pattern: '\S'
+          description: Caller-supplied opaque material digest; the API checks only that it is non-blank.
+        businessEffectiveAt:
+          type: string
+          format: date
+          not:
+            const: "0001-01-01"
+          description: Business-effective date used for temporal policy-version selection; the default DateOnly value is rejected.
+        knownAt:
+          type: string
+          format: date-time
+          description: Knowledge cutoff timestamp used for temporal policy-version selection; the default DateTimeOffset value is rejected.
+        facts:
+          type: object
+          description: |
+            Optional supplied facts. Omitted declared fact names are treated
+            as Missing. The binding facts releaseId, assessmentGeneration, and
+            materialDigest are supplied at the top level and are not accepted
+            as keys in this map.
+          propertyNames:
+            enum:
+              - product
+              - targetVersion
+              - environment
+              - releaseCategory
+              - changeSize
+              - authenticationChange
+              - customerDataImpact
+              - releaseSummary
+              - plannedDeploymentAt
+          additionalProperties: false
+          properties:
+            product:
+              $ref: "#/components/schemas/AsteriaStringFactInput"
+            targetVersion:
+              $ref: "#/components/schemas/AsteriaStringFactInput"
+            environment:
+              $ref: "#/components/schemas/AsteriaEnvironmentFactInput"
+            releaseCategory:
+              $ref: "#/components/schemas/AsteriaReleaseCategoryFactInput"
+            changeSize:
+              $ref: "#/components/schemas/AsteriaChangeSizeFactInput"
+            authenticationChange:
+              $ref: "#/components/schemas/AsteriaBooleanFactInput"
+            customerDataImpact:
+              $ref: "#/components/schemas/AsteriaBooleanFactInput"
+            releaseSummary:
+              $ref: "#/components/schemas/AsteriaStringFactInput"
+            plannedDeploymentAt:
+              $ref: "#/components/schemas/AsteriaPlannedDeploymentFactInput"
+    AsteriaNonPresentFactInput:
+      oneOf:
+        - type: object
+          required: [state]
+          properties:
+            state:
+              enum: [Missing, Unknown, Unavailable]
+            value:
+              type: "null"
+    AsteriaStringFactInput:
+      oneOf:
+        - type: object
+          required: [state, value]
+          properties:
+            state:
+              const: Present
+            value:
+              type: string
+              minLength: 1
+              pattern: '\S'
+        - $ref: "#/components/schemas/AsteriaNonPresentFactInput"
+      description: Present string values must contain at least one non-whitespace character.
+    AsteriaEnvironmentFactInput:
+      oneOf:
+        - type: object
+          required: [state, value]
+          properties:
+            state:
+              const: Present
+            value:
+              type: string
+              enum: [development, staging, production, unmanaged-production]
+        - $ref: "#/components/schemas/AsteriaNonPresentFactInput"
+    AsteriaReleaseCategoryFactInput:
+      oneOf:
+        - type: object
+          required: [state, value]
+          properties:
+            state:
+              const: Present
+            value:
+              type: string
+              enum: [Standard, Emergency]
+        - $ref: "#/components/schemas/AsteriaNonPresentFactInput"
+    AsteriaChangeSizeFactInput:
+      oneOf:
+        - type: object
+          required: [state, value]
+          properties:
+            state:
+              const: Present
+            value:
+              type: string
+              enum: [Small, Medium, Large]
+        - $ref: "#/components/schemas/AsteriaNonPresentFactInput"
+    AsteriaBooleanFactInput:
+      oneOf:
+        - type: object
+          required: [state, value]
+          properties:
+            state:
+              const: Present
+            value:
+              type: boolean
+        - $ref: "#/components/schemas/AsteriaNonPresentFactInput"
+    AsteriaPlannedDeploymentFactInput:
+      oneOf:
+        - type: object
+          required: [state, value]
+          properties:
+            state:
+              const: Present
+            value:
+              type: string
+              format: date-time
+        - $ref: "#/components/schemas/AsteriaNonPresentFactInput"
+    AsteriaFactState:
+      type: string
+      enum: [Present, Missing, Unknown, Unavailable]
+    AsteriaReleaseAssessmentResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - evaluationId
+        - binding
+        - outcome
+        - riskClassification
+        - functionalVerification
+        - securityVerification
+        - releaseReviewApproval
+        - emergencyApproval
+        - businessEffectiveAt
+        - knownAt
+        - factDigest
+        - unresolvedFindings
+        - selectedPolicySourceVersions
+        - evidence
+        - deploymentAuthorised
+      properties:
+        evaluationId:
+          type: [string, "null"]
+          format: uuid
+          description: Null when no policy version was selected; otherwise the persisted evaluation identifier.
+        binding:
+          $ref: "#/components/schemas/AsteriaAssessmentBinding"
+        outcome:
+          $ref: "#/components/schemas/AsteriaAssessmentOutcome"
+        riskClassification:
+          $ref: "#/components/schemas/AsteriaRiskClassification"
+        functionalVerification:
+          $ref: "#/components/schemas/AsteriaObligationProjection"
+        securityVerification:
+          $ref: "#/components/schemas/AsteriaObligationProjection"
+        releaseReviewApproval:
+          $ref: "#/components/schemas/AsteriaObligationProjection"
+        emergencyApproval:
+          $ref: "#/components/schemas/AsteriaObligationProjection"
+        businessEffectiveAt:
+          type: string
+          format: date
+        knownAt:
+          type: string
+          format: date-time
+        factDigest:
+          type: [string, "null"]
+          description: SHA-256 digest of the engine's canonical fact snapshot; emitted uppercase hexadecimal when present.
+        unresolvedFindings:
+          type: array
+          items:
+            type: string
+        selectedPolicySourceVersions:
+          type: array
+          items:
+            $ref: "#/components/schemas/AsteriaPolicyVersionIdentity"
+        evidence:
+          anyOf:
+            - $ref: "#/components/schemas/DecisionEvidence"
+            - type: "null"
+          description: Null when no policy version was selected; otherwise original generic decision evidence.
+        deploymentAuthorised:
+          type: boolean
+          const: false
+          description: Always false; an assessment never authorizes deployment.
+    AsteriaAssessmentBinding:
+      type: object
+      additionalProperties: false
+      required: [releaseId, assessmentGeneration, materialDigest]
+      properties:
+        releaseId:
+          type: string
+        assessmentGeneration:
+          type: integer
+          format: int32
+        materialDigest:
+          type: string
+    AsteriaAssessmentOutcome:
+      type: string
+      enum: [Prohibited, Unresolved, RequirementsDetermined, AdditionalReviewRequired]
+    AsteriaRiskClassification:
+      type: string
+      enum: [HighRisk, NotHighRisk, Unresolved]
+    AsteriaObligationStatus:
+      type: string
+      enum: [Required, NotRequired, Unresolved]
+    AsteriaObligationProjection:
+      type: object
+      additionalProperties: false
+      required: [status, clauseReferences]
+      properties:
+        status:
+          $ref: "#/components/schemas/AsteriaObligationStatus"
+        clauseReferences:
+          type: array
+          items:
+            type: string
+    AsteriaPolicyVersionIdentity:
+      type: object
+      additionalProperties: false
+      required:
+        - sourceId
+        - versionId
+        - versionNumber
+        - recordedAt
+        - effectiveFrom
+        - effectiveTo
+        - sourceDigest
+        - ruleDigest
+      properties:
+        sourceId:
+          type: string
+          const: AST-POL-001
+        versionId:
+          type: string
+          format: uuid
+        versionNumber:
+          type: integer
+          format: int32
+        recordedAt:
+          type: string
+          format: date-time
+        effectiveFrom:
+          type: string
+          format: date
+        effectiveTo:
+          type: [string, "null"]
+          format: date
+        sourceDigest:
+          type: string
+        ruleDigest:
+          type: string
+    AsteriaHistoricalReplayResponse:
+      type: object
+      additionalProperties: false
+      required: [assessment, matchesStoredEvidence, differences]
+      properties:
+        assessment:
+          $ref: "#/components/schemas/AsteriaReleaseAssessmentResponse"
+        matchesStoredEvidence:
+          type: boolean
+          description: True when the final decision, composition state, fact digest, and selected version identities match the stored assessment.
+        differences:
+          type: array
+          items:
+            type: string
+    ProblemDetails:
+      type: object
+      description: ASP.NET Problem Details response; only fields included by the runtime are present.
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
+        instance:
+          type: string
+      additionalProperties: true
+    IdempotencyConflict:
+      type: object
+      additionalProperties: false
+      required: [type, title, detail]
+      properties:
+        type:
+          type: string
+          enum: [idempotency_key_reused, idempotency_operation_in_progress]
+        title:
+          type: string
+        detail:
+          type: string
+    DecisionEvidence:
+      type: object
+      additionalProperties: false
+      required:
+        - evaluationId
+        - evaluatedAt
+        - factSet
+        - ruleSources
+        - composition
+        - finalDecision
+        - justification
+        - contributingRules
+        - conflicts
+        - unknownFacts
+        - unavailableFacts
+        - validationSummary
+        - engineMetadata
+        - businessEffectiveAt
+        - knownAt
+        - factAcquisition
+      properties:
+        evaluationId:
+          type: string
+          format: uuid
+        evaluatedAt:
+          type: string
+          format: date-time
+        factSet:
+          $ref: "#/components/schemas/FactSnapshot"
+        ruleSources:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecisionSourceEvidence"
+        composition:
+          $ref: "#/components/schemas/DecisionCompositionEvidence"
+        finalDecision:
+          anyOf:
+            - $ref: "#/components/schemas/LayeredDecision"
+            - type: "null"
+        justification:
+          $ref: "#/components/schemas/DecisionJustification"
+        contributingRules:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecisionRuleRef"
+        conflicts:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecisionConflictEvidence"
+        unknownFacts:
+          type: array
+          items:
+            type: string
+        unavailableFacts:
+          type: array
+          items:
+            type: string
+        validationSummary:
+          $ref: "#/components/schemas/RuleValidationSummary"
+        engineMetadata:
+          $ref: "#/components/schemas/EngineMetadata"
+        businessEffectiveAt:
+          type: [string, "null"]
+          format: date
+        knownAt:
+          type: [string, "null"]
+          format: date-time
+        factAcquisition:
+          type: "null"
+          description: Always null for this Asteria direct-fact assessment route.
+    FactSnapshot:
+      type: object
+      additionalProperties: false
+      required: [entries, digestAlgorithm, digest]
+      properties:
+        entries:
+          type: array
+          items:
+            $ref: "#/components/schemas/FactSnapshotEntry"
+        digestAlgorithm:
+          type: string
+          const: SHA-256
+        digest:
+          type: string
+    FactSnapshotEntry:
+      type: object
+      additionalProperties: false
+      required: [name, type, state, value]
+      properties:
+        name:
+          type: string
+        type:
+          $ref: "#/components/schemas/RuleValueType"
+        state:
+          $ref: "#/components/schemas/FactSnapshotState"
+        value:
+          anyOf:
+            - $ref: "#/components/schemas/RuleValue"
+            - type: "null"
+    FactSnapshotState:
+      type: string
+      enum: [Present, Missing, Unavailable, Unknown]
+    RuleValueType:
+      type: string
+      enum: [String, Integer, Decimal, Boolean, Date, StringList]
+    RuleValue:
+      type: object
+      additionalProperties: false
+      required: [type, stringValue, integerValue, decimalValue, booleanValue, dateValue, stringListValue]
+      properties:
+        type:
+          $ref: "#/components/schemas/RuleValueType"
+        stringValue:
+          type: [string, "null"]
+        integerValue:
+          type: [integer, "null"]
+          format: int64
+        decimalValue:
+          type: [number, "null"]
+        booleanValue:
+          type: [boolean, "null"]
+        dateValue:
+          type: [string, "null"]
+          format: date
+        stringListValue:
+          type: [array, "null"]
+          items:
+            type: string
+    DecisionSourceEvidence:
+      type: object
+      additionalProperties: false
+      required:
+        - sourceId
+        - sourceName
+        - sourceKind
+        - languageVersion
+        - digestAlgorithm
+        - digest
+        - applicability
+        - applicabilityEvidence
+        - rules
+        - policySourceVersionId
+        - versionNumber
+        - recordedAt
+        - effectiveFrom
+        - effectiveTo
+        - policySourceDigest
+        - executableRuleDigest
+      properties:
+        sourceId:
+          type: string
+        sourceName:
+          type: string
+        sourceKind:
+          type: string
+        languageVersion:
+          type: string
+        digestAlgorithm:
+          type: string
+        digest:
+          type: string
+        applicability:
+          $ref: "#/components/schemas/ApplicabilityState"
+        applicabilityEvidence:
+          anyOf:
+            - $ref: "#/components/schemas/ExpressionEvaluation"
+            - type: "null"
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecisionRuleEvidence"
+        policySourceVersionId:
+          type: [string, "null"]
+          format: uuid
+        versionNumber:
+          type: [integer, "null"]
+          format: int32
+        recordedAt:
+          type: [string, "null"]
+          format: date-time
+        effectiveFrom:
+          type: [string, "null"]
+          format: date
+        effectiveTo:
+          type: [string, "null"]
+          format: date
+        policySourceDigest:
+          type: [string, "null"]
+        executableRuleDigest:
+          type: [string, "null"]
+    DecisionRuleEvidence:
+      type: object
+      additionalProperties: false
+      required:
+        - sourceId
+        - sourceName
+        - ruleId
+        - clauseReference
+        - description
+        - requirementSubject
+        - compositionMode
+        - applicability
+        - requirementState
+        - conditionResult
+        - consequence
+        - consequenceContributed
+        - factsConsumed
+        - applicabilityMissingFacts
+        - applicabilityUnavailableFacts
+        - applicabilityUnknownFacts
+        - missingFacts
+        - unavailableFacts
+        - unknownFacts
+        - policySourceVersionId
+        - ruleVersionIdentity
+      properties:
+        sourceId:
+          type: string
+        sourceName:
+          type: string
+        ruleId:
+          type: string
+        clauseReference:
+          type: string
+        description:
+          type: string
+        requirementSubject:
+          type: [string, "null"]
+        compositionMode:
+          $ref: "#/components/schemas/CompositionMode"
+        applicability:
+          $ref: "#/components/schemas/ApplicabilityState"
+        requirementState:
+          $ref: "#/components/schemas/RequirementState"
+        conditionResult:
+          anyOf:
+            - $ref: "#/components/schemas/TruthValue"
+            - type: "null"
+        consequence:
+          anyOf:
+            - $ref: "#/components/schemas/RuleConsequence"
+            - type: "null"
+        consequenceContributed:
+          type: boolean
+        factsConsumed:
+          type: array
+          items:
+            type: string
+        applicabilityMissingFacts:
+          type: array
+          items:
+            type: string
+        applicabilityUnavailableFacts:
+          type: array
+          items:
+            type: string
+        applicabilityUnknownFacts:
+          type: array
+          items:
+            type: string
+        missingFacts:
+          type: array
+          items:
+            type: string
+        unavailableFacts:
+          type: array
+          items:
+            type: string
+        unknownFacts:
+          type: array
+          items:
+            type: string
+        policySourceVersionId:
+          type: [string, "null"]
+          format: uuid
+        ruleVersionIdentity:
+          anyOf:
+            - $ref: "#/components/schemas/RuleVersionIdentity"
+            - type: "null"
+    DecisionRuleRef:
+      type: object
+      additionalProperties: false
+      required: [sourceId, ruleId, clauseReference]
+      properties:
+        sourceId:
+          type: string
+        ruleId:
+          type: string
+        clauseReference:
+          type: string
+    DecisionConflictEvidence:
+      type: object
+      additionalProperties: false
+      required: [subject, conflictType, rules, explanation]
+      properties:
+        subject:
+          type: string
+        conflictType:
+          $ref: "#/components/schemas/ConflictType"
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecisionRuleRef"
+        explanation:
+          type: string
+    DecisionCompositionEvidence:
+      type: object
+      additionalProperties: false
+      required: [effectiveRequirements, replacedOrSuppressedRequirements, conflicts, businessDecision, compositionState]
+      properties:
+        effectiveRequirements:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecisionRuleRef"
+        replacedOrSuppressedRequirements:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecisionRuleRef"
+        conflicts:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecisionConflictEvidence"
+        businessDecision:
+          anyOf:
+            - $ref: "#/components/schemas/LayeredDecision"
+            - type: "null"
+        compositionState:
+          type: string
+    DecisionJustification:
+      type: object
+      additionalProperties: false
+      required: [compositionState, businessDecision, contributingRules, conflicts, unresolvedRules]
+      properties:
+        compositionState:
+          type: string
+        businessDecision:
+          anyOf:
+            - $ref: "#/components/schemas/LayeredDecision"
+            - type: "null"
+        contributingRules:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecisionRuleRef"
+        conflicts:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecisionConflictEvidence"
+        unresolvedRules:
+          type: array
+          items:
+            $ref: "#/components/schemas/DecisionRuleRef"
+    RuleValidationSummary:
+      type: object
+      additionalProperties: false
+      required: [validatedSourceCount, validatedRuleCount, invalidSourceCount, invalidRuleCount, unsupportedSourceCount, unsupportedRuleCount]
+      properties:
+        validatedSourceCount:
+          type: integer
+        validatedRuleCount:
+          type: integer
+        invalidSourceCount:
+          type: integer
+        invalidRuleCount:
+          type: integer
+        unsupportedSourceCount:
+          type: integer
+        unsupportedRuleCount:
+          type: integer
+    EngineMetadata:
+      type: object
+      additionalProperties: false
+      required: [engineName, engineVersion, ruleLanguageVersions]
+      properties:
+        engineName:
+          type: string
+        engineVersion:
+          type: string
+        ruleLanguageVersions:
+          type: array
+          items:
+            type: string
+    ExpressionEvaluation:
+      type: object
+      additionalProperties: false
+      required: [result, missingFacts, unavailableFacts, unknownFacts, diagnostics, factsConsumed]
+      properties:
+        result:
+          $ref: "#/components/schemas/TruthValue"
+        missingFacts:
+          type: array
+          items:
+            type: string
+        unavailableFacts:
+          type: array
+          items:
+            type: string
+        unknownFacts:
+          type: array
+          items:
+            type: string
+        diagnostics:
+          type: array
+          items:
+            type: string
+        factsConsumed:
+          type: array
+          items:
+            type: string
+    RuleVersionIdentity:
+      type: object
+      additionalProperties: false
+      required: [policySourceVersionId, ruleId]
+      properties:
+        policySourceVersionId:
+          type: string
+          format: uuid
+        ruleId:
+          type: string
+    ApplicabilityState:
+      type: string
+      enum: [Applicable, NotApplicable, Unknown]
+    RequirementState:
+      type: string
+      enum: [Satisfied, Breached, Unresolved, NotEvaluated]
+    TruthValue:
+      type: string
+      enum: [False, True, Unknown]
+    RuleConsequence:
+      type: string
+      enum: [Review, Blocked]
+    CompositionMode:
+      type: string
+      enum: [Independent, Narrowing, Replacement, Exception, Permission, Prohibition]
+    ConflictType:
+      type: string
+      enum: [ContradictoryRequirements, UnauthorisedWeakening, EqualStandingConflict]
+    LayeredDecision:
+      type: string
+      enum: [Proceed, Review, Blocked]

@@ -24,6 +24,7 @@
     <ProjectReference Include="..\..\src\DurableStateMachine.Api\DurableStateMachine.Api.csproj" />
     <ProjectReference Include="..\..\src\DurableStateMachine.Persistence\DurableStateMachine.Persistence.csproj" />
     <ProjectReference Include="..\..\clients\DurableStateMachine.MeridianClient\DurableStateMachine.MeridianClient.csproj" />
+    <ProjectReference Include="..\..\clients\DurableStateMachine.AsteriaClient\DurableStateMachine.AsteriaClient.csproj" />
     <ProjectReference Include="..\..\tools\OrionGate9Corpus\OrionGate9Corpus.csproj" />
   </ItemGroup>
 
