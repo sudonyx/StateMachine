@@ -1,0 +1,1695 @@
+{
+    "languageVersion":  "1.3",
+    "id":  "asteria-release-governance",
+    "version":  "5.0",
+    "initialState":  "Draft",
+    "states":  [
+                   {
+                       "id":  "Draft"
+                   },
+                   {
+                       "id":  "UnderAssessment"
+                   },
+                   {
+                       "id":  "RequirementsIdentified"
+                   },
+                   {
+                       "id":  "ReviewObligationsIdentified"
+                   },
+                   {
+                       "id":  "AssessmentUnresolved"
+                   },
+                   {
+                       "id":  "Prohibited",
+                       "terminal":  true
+                   },
+                   {
+                       "id":  "Cancelled",
+                       "terminal":  true
+                   },
+                   {
+                       "id":  "Superseded",
+                       "terminal":  true
+                   },
+                   {
+                       "id":  "ReadyForDeployment"
+                   },
+                   {
+                       "id":  "DeploymentInProgress"
+                   },
+                   {
+                       "id":  "DeploymentFailed"
+                   },
+                   {
+                       "id":  "DeploymentUnknown"
+                   },
+                   {
+                       "id":  "PostDeploymentVerification"
+                   },
+                   {
+                       "id":  "HealthFailed"
+                   },
+                   {
+                       "id":  "HealthUnresolved"
+                   },
+                   {
+                       "id":  "Completed",
+                       "terminal":  true
+                   }
+               ],
+    "events":  [
+                   "Submit",
+                   "Cancel",
+                   "AsteriaAssessmentObserved",
+                   "SupersedeAssessment",
+                   "AsteriaObligationApplicabilityObserved",
+                   "AsteriaVerificationResultObserved",
+                   "AsteriaApprovalResultObserved",
+                   "ReadinessConfirmed",
+                   "AsteriaDeploymentStarted",
+                   "AsteriaDeploymentResultObserved",
+                   "AsteriaHealthVerificationStarted",
+                   "AsteriaHealthVerificationResultObserved"
+               ],
+    "inputPolicy":  {
+                        "commands":  [
+                                         {
+                                             "name":  "CancelRelease",
+                                             "event":  "Cancel"
+                                         },
+                                         {
+                                             "name":  "RequestFunctionalVerification",
+                                             "event":  "RequestFunctionalVerification",
+                                             "concern":  "FunctionalVerification"
+                                         },
+                                         {
+                                             "name":  "RequestSecurityVerification",
+                                             "event":  "RequestSecurityVerification",
+                                             "concern":  "SecurityVerification"
+                                         },
+                                         {
+                                             "name":  "RequestReleaseReview",
+                                             "event":  "RequestApproval",
+                                             "concern":  "ReleaseReviewApproval"
+                                         },
+                                         {
+                                             "name":  "RequestEmergencyApproval",
+                                             "event":  "RequestApproval",
+                                             "concern":  "EmergencyApproval"
+                                         },
+                                         {
+                                             "name":  "RequestCancellation",
+                                             "event":  "RequestCancellation",
+                                             "concern":  "CancellationIntent"
+                                         }
+                                     ],
+                        "observations":  [
+                                             {
+                                                 "name":  "AsteriaAssessmentStarted",
+                                                 "event":  "Submit",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaAssessmentObserved",
+                                                 "event":  "AsteriaAssessmentObserved",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "parentRevision",
+                                                                          "expectedOperationId",
+                                                                          "decisionRequestFingerprint",
+                                                                          "selectedPolicySourceVersions",
+                                                                          "originalResponse",
+                                                                          "policySelectionContext"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "SupersedeAssessment",
+                                                 "event":  "SupersedeAssessment",
+                                                 "requiredEvidence":  [
+                                                                          "amendmentId",
+                                                                          "requestFingerprint",
+                                                                          "expectedBaseGeneration",
+                                                                          "replacementGeneration",
+                                                                          "replacementMaterialDigest"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaFunctionalVerificationApplicability",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "concern":  "FunctionalVerification",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "assessmentEvidenceDigest",
+                                                                          "applicability"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaFunctionalVerificationResult",
+                                                 "event":  "AsteriaVerificationResultObserved",
+                                                 "concern":  "FunctionalVerification",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "activityId",
+                                                                          "expectedOperationId",
+                                                                          "result",
+                                                                          "evidenceDigest",
+                                                                          "providerExecutionId"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaSecurityVerificationApplicability",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "concern":  "SecurityVerification",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "assessmentEvidenceDigest",
+                                                                          "applicability"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaSecurityVerificationResult",
+                                                 "event":  "AsteriaVerificationResultObserved",
+                                                 "concern":  "SecurityVerification",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "activityId",
+                                                                          "expectedOperationId",
+                                                                          "result",
+                                                                          "evidenceDigest",
+                                                                          "providerExecutionId"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaReleaseReviewApprovalApplicability",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "concern":  "ReleaseReviewApproval",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "assessmentEvidenceDigest",
+                                                                          "applicability"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaReleaseReviewApprovalResult",
+                                                 "event":  "AsteriaApprovalResultObserved",
+                                                 "concern":  "ReleaseReviewApproval",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "activityId",
+                                                                          "expectedOperationId",
+                                                                          "result",
+                                                                          "evidenceDigest",
+                                                                          "principalId",
+                                                                          "authorityRegistryVersion",
+                                                                          "decisionAt"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaEmergencyApprovalApplicability",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "concern":  "EmergencyApproval",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "assessmentEvidenceDigest",
+                                                                          "applicability"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaEmergencyApprovalResult",
+                                                 "event":  "AsteriaApprovalResultObserved",
+                                                 "concern":  "EmergencyApproval",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "activityId",
+                                                                          "expectedOperationId",
+                                                                          "result",
+                                                                          "evidenceDigest",
+                                                                          "principalId",
+                                                                          "authorityRegistryVersion",
+                                                                          "decisionAt"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaReadinessConfirmed",
+                                                 "event":  "ReadinessConfirmed",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "assessmentEvidenceDigest",
+                                                                          "allObligationsEvidenceDigest",
+                                                                          "readinessWorkId"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaDeploymentStarted",
+                                                 "event":  "AsteriaDeploymentStarted",
+                                                 "concern":  "Deployment",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "deploymentWorkId",
+                                                                          "expectedOperationId",
+                                                                          "idempotencyKey"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaDeploymentStartAuthorized",
+                                                 "event":  "AsteriaDeploymentStarted",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "deploymentWorkId",
+                                                                          "expectedOperationId",
+                                                                          "idempotencyKey"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaDeploymentResult",
+                                                 "event":  "AsteriaDeploymentResultObserved",
+                                                 "concern":  "Deployment",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "deploymentWorkId",
+                                                                          "expectedOperationId",
+                                                                          "deploymentId",
+                                                                          "result",
+                                                                          "evidenceDigest"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaDeploymentResultConfirmed",
+                                                 "event":  "AsteriaDeploymentResultObserved",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "deploymentWorkId",
+                                                                          "expectedOperationId",
+                                                                          "deploymentId",
+                                                                          "result",
+                                                                          "evidenceDigest"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaHealthVerificationStarted",
+                                                 "event":  "AsteriaHealthVerificationStarted",
+                                                 "concern":  "HealthVerification",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "deploymentId",
+                                                                          "healthWorkId",
+                                                                          "expectedOperationId"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaHealthVerificationResult",
+                                                 "event":  "AsteriaHealthVerificationResultObserved",
+                                                 "concern":  "HealthVerification",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "deploymentId",
+                                                                          "healthWorkId",
+                                                                          "expectedOperationId",
+                                                                          "result",
+                                                                          "evidenceDigest"
+                                                                      ]
+                                             },
+                                             {
+                                                 "name":  "AsteriaHealthResultConfirmed",
+                                                 "event":  "AsteriaHealthVerificationResultObserved",
+                                                 "requiredEvidence":  [
+                                                                          "releaseId",
+                                                                          "assessmentGeneration",
+                                                                          "materialDigest",
+                                                                          "deploymentId",
+                                                                          "healthWorkId",
+                                                                          "expectedOperationId",
+                                                                          "result",
+                                                                          "evidenceDigest"
+                                                                      ]
+                                             }
+                                         ]
+                    },
+    "transitions":  [
+                        {
+                            "id":  "submit-complete-draft",
+                            "source":  "Draft",
+                            "event":  "Submit",
+                            "target":  "UnderAssessment",
+                            "description":  "Record a local submission request only when its expressible scalar, range, and vocabulary checks pass.",
+                            "guard":  {
+                                          "op":  "and",
+                                          "args":  [
+                                                       {
+                                                           "op":  "ne",
+                                                           "fact":  "releaseId",
+                                                           "value":  ""
+                                                       },
+                                                       {
+                                                           "op":  "gte",
+                                                           "fact":  "assessmentGeneration",
+                                                           "value":  1
+                                                       },
+                                                       {
+                                                           "op":  "ne",
+                                                           "fact":  "materialDigest",
+                                                           "value":  ""
+                                                       },
+                                                       {
+                                                           "op":  "ne",
+                                                           "fact":  "product",
+                                                           "value":  ""
+                                                       },
+                                                       {
+                                                           "op":  "ne",
+                                                           "fact":  "targetVersion",
+                                                           "value":  ""
+                                                       },
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "environment",
+                                                                            "value":  "development"
+                                                                        },
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "environment",
+                                                                            "value":  "staging"
+                                                                        },
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "environment",
+                                                                            "value":  "production"
+                                                                        },
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "environment",
+                                                                            "value":  "unmanaged-production"
+                                                                        }
+                                                                    ]
+                                                       },
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "releaseCategory",
+                                                                            "value":  "Standard"
+                                                                        },
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "releaseCategory",
+                                                                            "value":  "Emergency"
+                                                                        }
+                                                                    ]
+                                                       },
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "changeSize",
+                                                                            "value":  "Small"
+                                                                        },
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "changeSize",
+                                                                            "value":  "Medium"
+                                                                        },
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "changeSize",
+                                                                            "value":  "Large"
+                                                                        }
+                                                                    ]
+                                                       },
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "authenticationChange",
+                                                                            "value":  true
+                                                                        },
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "authenticationChange",
+                                                                            "value":  false
+                                                                        }
+                                                                    ]
+                                                       },
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "customerDataImpact",
+                                                                            "value":  true
+                                                                        },
+                                                                        {
+                                                                            "op":  "eq",
+                                                                            "fact":  "customerDataImpact",
+                                                                            "value":  false
+                                                                        }
+                                                                    ]
+                                                       },
+                                                       {
+                                                           "op":  "ne",
+                                                           "fact":  "releaseSummary",
+                                                           "value":  ""
+                                                       },
+                                                       {
+                                                           "op":  "ne",
+                                                           "fact":  "plannedDeploymentAt",
+                                                           "value":  ""
+                                                       },
+                                                       {
+                                                           "op":  "ne",
+                                                           "fact":  "releaseOwner",
+                                                           "value":  ""
+                                                       }
+                                                   ]
+                                      }
+                        },
+                        {
+                            "id":  "asteria-assessment-prohibited",
+                            "source":  "UnderAssessment",
+                            "event":  "AsteriaAssessmentObserved",
+                            "target":  "Prohibited",
+                            "description":  "Preserve a verified policy prohibition without providing an override or deployment path.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "assessmentOutcome",
+                                          "value":  "Prohibited"
+                                      }
+                        },
+                        {
+                            "id":  "asteria-assessment-requirements-identified",
+                            "source":  "UnderAssessment",
+                            "event":  "AsteriaAssessmentObserved",
+                            "target":  "RequirementsIdentified",
+                            "description":  "Record that applicable obligations were identified; this does not mean any obligation was fulfilled.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "assessmentOutcome",
+                                          "value":  "RequirementsDetermined"
+                                      }
+                        },
+                        {
+                            "id":  "asteria-assessment-review-obligations-identified",
+                            "source":  "UnderAssessment",
+                            "event":  "AsteriaAssessmentObserved",
+                            "target":  "ReviewObligationsIdentified",
+                            "description":  "Record that additional review obligations were identified; this does not mean approval was granted.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "assessmentOutcome",
+                                          "value":  "AdditionalReviewRequired"
+                                      }
+                        },
+                        {
+                            "id":  "asteria-assessment-unresolved",
+                            "source":  "UnderAssessment",
+                            "event":  "AsteriaAssessmentObserved",
+                            "target":  "AssessmentUnresolved",
+                            "description":  "Preserve an unresolved assessment without permitting deployment-ready progression.",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "assessmentOutcome",
+                                          "value":  "Unresolved"
+                                      }
+                        },
+                        {
+                            "id":  "supersede-assessment-draft",
+                            "source":  "Draft",
+                            "event":  "SupersedeAssessment",
+                            "target":  "Superseded",
+                            "description":  "Record an evidenced supersession of this pre-deployment assessment."
+                        },
+                        {
+                            "id":  "supersede-assessment-under-assessment",
+                            "source":  "UnderAssessment",
+                            "event":  "SupersedeAssessment",
+                            "target":  "Superseded",
+                            "description":  "Record an evidenced supersession of this pre-deployment assessment."
+                        },
+                        {
+                            "id":  "supersede-assessment-requirements-identified",
+                            "source":  "RequirementsIdentified",
+                            "event":  "SupersedeAssessment",
+                            "target":  "Superseded",
+                            "description":  "Record an evidenced supersession of this pre-deployment assessment."
+                        },
+                        {
+                            "id":  "supersede-assessment-review-obligations-identified",
+                            "source":  "ReviewObligationsIdentified",
+                            "event":  "SupersedeAssessment",
+                            "target":  "Superseded",
+                            "description":  "Record an evidenced supersession of this pre-deployment assessment."
+                        },
+                        {
+                            "id":  "supersede-assessment-assessment-unresolved",
+                            "source":  "AssessmentUnresolved",
+                            "event":  "SupersedeAssessment",
+                            "target":  "Superseded",
+                            "description":  "Record an evidenced supersession of this pre-deployment assessment."
+                        },
+                        {
+                            "id":  "cancel-draft",
+                            "source":  "Draft",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "Accept pre-deployment cancellation only when cancellation intent is durably requested.",
+                            "guard":  {
+                                          "op":  "concernState",
+                                          "concern":  "CancellationIntent",
+                                          "state":  "Requested"
+                                      }
+                        },
+                        {
+                            "id":  "cancel-underAssessment",
+                            "source":  "UnderAssessment",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "Accept pre-deployment cancellation only when cancellation intent is durably requested.",
+                            "guard":  {
+                                          "op":  "concernState",
+                                          "concern":  "CancellationIntent",
+                                          "state":  "Requested"
+                                      }
+                        },
+                        {
+                            "id":  "cancel-requirementsIdentified",
+                            "source":  "RequirementsIdentified",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "Accept pre-deployment cancellation only when cancellation intent is durably requested.",
+                            "guard":  {
+                                          "op":  "concernState",
+                                          "concern":  "CancellationIntent",
+                                          "state":  "Requested"
+                                      }
+                        },
+                        {
+                            "id":  "cancel-reviewObligationsIdentified",
+                            "source":  "ReviewObligationsIdentified",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "Accept pre-deployment cancellation only when cancellation intent is durably requested.",
+                            "guard":  {
+                                          "op":  "concernState",
+                                          "concern":  "CancellationIntent",
+                                          "state":  "Requested"
+                                      }
+                        },
+                        {
+                            "id":  "cancel-assessmentUnresolved",
+                            "source":  "AssessmentUnresolved",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "Accept pre-deployment cancellation only when cancellation intent is durably requested.",
+                            "guard":  {
+                                          "op":  "concernState",
+                                          "concern":  "CancellationIntent",
+                                          "state":  "Requested"
+                                      }
+                        },
+                        {
+                            "id":  "cancel-readyForDeployment",
+                            "source":  "ReadyForDeployment",
+                            "event":  "Cancel",
+                            "target":  "Cancelled",
+                            "description":  "Accept pre-deployment cancellation only when cancellation intent is durably requested.",
+                            "guard":  {
+                                          "op":  "concernState",
+                                          "concern":  "CancellationIntent",
+                                          "state":  "Requested"
+                                      }
+                        },
+                        {
+                            "id":  "ready-for-deployment-from-requirementsIdentified",
+                            "source":  "RequirementsIdentified",
+                            "event":  "ReadinessConfirmed",
+                            "target":  "ReadyForDeployment",
+                            "description":  "Record readiness only after every current-generation obligation is explicitly satisfied.",
+                            "guard":  {
+                                          "op":  "and",
+                                          "args":  [
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "FunctionalVerification",
+                                                                            "state":  "NotRequired"
+                                                                        },
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "FunctionalVerification",
+                                                                            "state":  "Passed"
+                                                                        }
+                                                                    ]
+                                                       },
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "SecurityVerification",
+                                                                            "state":  "NotRequired"
+                                                                        },
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "SecurityVerification",
+                                                                            "state":  "Passed"
+                                                                        }
+                                                                    ]
+                                                       },
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "ReleaseReviewApproval",
+                                                                            "state":  "NotRequired"
+                                                                        },
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "ReleaseReviewApproval",
+                                                                            "state":  "Approved"
+                                                                        }
+                                                                    ]
+                                                       },
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "EmergencyApproval",
+                                                                            "state":  "NotRequired"
+                                                                        },
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "EmergencyApproval",
+                                                                            "state":  "Approved"
+                                                                        }
+                                                                    ]
+                                                       }
+                                                   ]
+                                      }
+                        },
+                        {
+                            "id":  "ready-for-deployment-from-reviewObligationsIdentified",
+                            "source":  "ReviewObligationsIdentified",
+                            "event":  "ReadinessConfirmed",
+                            "target":  "ReadyForDeployment",
+                            "description":  "Record readiness only after every current-generation obligation is explicitly satisfied.",
+                            "guard":  {
+                                          "op":  "and",
+                                          "args":  [
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "FunctionalVerification",
+                                                                            "state":  "NotRequired"
+                                                                        },
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "FunctionalVerification",
+                                                                            "state":  "Passed"
+                                                                        }
+                                                                    ]
+                                                       },
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "SecurityVerification",
+                                                                            "state":  "NotRequired"
+                                                                        },
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "SecurityVerification",
+                                                                            "state":  "Passed"
+                                                                        }
+                                                                    ]
+                                                       },
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "ReleaseReviewApproval",
+                                                                            "state":  "NotRequired"
+                                                                        },
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "ReleaseReviewApproval",
+                                                                            "state":  "Approved"
+                                                                        }
+                                                                    ]
+                                                       },
+                                                       {
+                                                           "op":  "or",
+                                                           "args":  [
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "EmergencyApproval",
+                                                                            "state":  "NotRequired"
+                                                                        },
+                                                                        {
+                                                                            "op":  "concernState",
+                                                                            "concern":  "EmergencyApproval",
+                                                                            "state":  "Approved"
+                                                                        }
+                                                                    ]
+                                                       }
+                                                   ]
+                                      }
+                        },
+                        {
+                            "id":  "supersede-assessment-ready-for-deployment",
+                            "source":  "ReadyForDeployment",
+                            "event":  "SupersedeAssessment",
+                            "target":  "Superseded",
+                            "description":  "Record an evidenced supersession of a ready but not yet deployed assessment."
+                        },
+                        {
+                            "id":  "deployment-start-from-ready",
+                            "source":  "ReadyForDeployment",
+                            "event":  "AsteriaDeploymentStarted",
+                            "target":  "DeploymentInProgress",
+                            "guard":  {
+                                          "op":  "concernState",
+                                          "concern":  "CancellationIntent",
+                                          "state":  "NotRequested"
+                                      }
+                        },
+                        {
+                            "id":  "deployment-succeeded",
+                            "source":  "DeploymentInProgress",
+                            "event":  "AsteriaDeploymentResultObserved",
+                            "target":  "PostDeploymentVerification",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "deploymentResult",
+                                          "value":  "Succeeded"
+                                      }
+                        },
+                        {
+                            "id":  "deployment-failed",
+                            "source":  "DeploymentInProgress",
+                            "event":  "AsteriaDeploymentResultObserved",
+                            "target":  "DeploymentFailed",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "deploymentResult",
+                                          "value":  "Failed"
+                                      }
+                        },
+                        {
+                            "id":  "deployment-indeterminate",
+                            "source":  "DeploymentInProgress",
+                            "event":  "AsteriaDeploymentResultObserved",
+                            "target":  "DeploymentUnknown",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "deploymentResult",
+                                          "value":  "Indeterminate"
+                                      }
+                        },
+                        {
+                            "id":  "health-passed-completes-release",
+                            "source":  "PostDeploymentVerification",
+                            "event":  "AsteriaHealthVerificationResultObserved",
+                            "target":  "Completed",
+                            "guard":  {
+                                          "op":  "and",
+                                          "args":  [
+                                                       {
+                                                           "op":  "eq",
+                                                           "fact":  "healthResult",
+                                                           "value":  "Passed"
+                                                       },
+                                                       {
+                                                           "op":  "concernState",
+                                                           "concern":  "CancellationIntent",
+                                                           "state":  "NotRequested"
+                                                       }
+                                                   ]
+                                      }
+                        },
+                        {
+                            "id":  "health-failed-blocks-release",
+                            "source":  "PostDeploymentVerification",
+                            "event":  "AsteriaHealthVerificationResultObserved",
+                            "target":  "HealthFailed",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "healthResult",
+                                          "value":  "Failed"
+                                      }
+                        },
+                        {
+                            "id":  "health-indeterminate-blocks-release",
+                            "source":  "PostDeploymentVerification",
+                            "event":  "AsteriaHealthVerificationResultObserved",
+                            "target":  "HealthUnresolved",
+                            "guard":  {
+                                          "op":  "eq",
+                                          "fact":  "healthResult",
+                                          "value":  "Indeterminate"
+                                      }
+                        },
+                        {
+                            "id":  "supersede-assessment-DeploymentInProgress",
+                            "source":  "DeploymentInProgress",
+                            "event":  "SupersedeAssessment",
+                            "target":  "Superseded"
+                        },
+                        {
+                            "id":  "supersede-assessment-DeploymentFailed",
+                            "source":  "DeploymentFailed",
+                            "event":  "SupersedeAssessment",
+                            "target":  "Superseded"
+                        },
+                        {
+                            "id":  "supersede-assessment-DeploymentUnknown",
+                            "source":  "DeploymentUnknown",
+                            "event":  "SupersedeAssessment",
+                            "target":  "Superseded"
+                        },
+                        {
+                            "id":  "supersede-assessment-PostDeploymentVerification",
+                            "source":  "PostDeploymentVerification",
+                            "event":  "SupersedeAssessment",
+                            "target":  "Superseded"
+                        },
+                        {
+                            "id":  "supersede-assessment-HealthFailed",
+                            "source":  "HealthFailed",
+                            "event":  "SupersedeAssessment",
+                            "target":  "Superseded"
+                        },
+                        {
+                            "id":  "supersede-assessment-HealthUnresolved",
+                            "source":  "HealthUnresolved",
+                            "event":  "SupersedeAssessment",
+                            "target":  "Superseded"
+                        }
+                    ],
+    "concerns":  [
+                     {
+                         "id":  "FunctionalVerification",
+                         "initialState":  "ApplicabilityPending",
+                         "states":  [
+                                        {
+                                            "id":  "ApplicabilityPending"
+                                        },
+                                        {
+                                            "id":  "Required"
+                                        },
+                                        {
+                                            "id":  "NotRequired",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "ApplicabilityUnresolved",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Requested"
+                                        },
+                                        {
+                                            "id":  "Passed",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Failed",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Indeterminate",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Cancelled",
+                                            "terminal":  true
+                                        }
+                                    ],
+                         "events":  [
+                                        "RequestFunctionalVerification",
+                                        "AsteriaObligationApplicabilityObserved",
+                                        "AsteriaVerificationResultObserved",
+                                        "Cancel"
+                                    ],
+                         "transitions":  [
+                                             {
+                                                 "id":  "FunctionalVerification-applicability-required",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "target":  "Required",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "applicability",
+                                                               "value":  "Required"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "FunctionalVerification-applicability-notrequired",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "target":  "NotRequired",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "applicability",
+                                                               "value":  "NotRequired"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "FunctionalVerification-applicability-unresolved",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "target":  "ApplicabilityUnresolved",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "applicability",
+                                                               "value":  "Unresolved"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "FunctionalVerification-request",
+                                                 "source":  "Required",
+                                                 "event":  "RequestFunctionalVerification",
+                                                 "target":  "Requested"
+                                             },
+                                             {
+                                                 "id":  "FunctionalVerification-result-passed",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaVerificationResultObserved",
+                                                 "target":  "Passed",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "verificationResult",
+                                                               "value":  "Passed"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "FunctionalVerification-result-failed",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaVerificationResultObserved",
+                                                 "target":  "Failed",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "verificationResult",
+                                                               "value":  "Failed"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "FunctionalVerification-result-indeterminate",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaVerificationResultObserved",
+                                                 "target":  "Indeterminate",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "verificationResult",
+                                                               "value":  "Indeterminate"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "FunctionalVerification-cancel-applicabilityPending",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             },
+                                             {
+                                                 "id":  "FunctionalVerification-cancel-required",
+                                                 "source":  "Required",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             },
+                                             {
+                                                 "id":  "FunctionalVerification-cancel-requested",
+                                                 "source":  "Requested",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             }
+                                         ]
+                     },
+                     {
+                         "id":  "SecurityVerification",
+                         "initialState":  "ApplicabilityPending",
+                         "states":  [
+                                        {
+                                            "id":  "ApplicabilityPending"
+                                        },
+                                        {
+                                            "id":  "Required"
+                                        },
+                                        {
+                                            "id":  "NotRequired",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "ApplicabilityUnresolved",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Requested"
+                                        },
+                                        {
+                                            "id":  "Passed",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Failed",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Indeterminate",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Cancelled",
+                                            "terminal":  true
+                                        }
+                                    ],
+                         "events":  [
+                                        "RequestSecurityVerification",
+                                        "AsteriaObligationApplicabilityObserved",
+                                        "AsteriaVerificationResultObserved",
+                                        "Cancel"
+                                    ],
+                         "transitions":  [
+                                             {
+                                                 "id":  "SecurityVerification-applicability-required",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "target":  "Required",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "applicability",
+                                                               "value":  "Required"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "SecurityVerification-applicability-notrequired",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "target":  "NotRequired",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "applicability",
+                                                               "value":  "NotRequired"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "SecurityVerification-applicability-unresolved",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "target":  "ApplicabilityUnresolved",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "applicability",
+                                                               "value":  "Unresolved"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "SecurityVerification-request",
+                                                 "source":  "Required",
+                                                 "event":  "RequestSecurityVerification",
+                                                 "target":  "Requested"
+                                             },
+                                             {
+                                                 "id":  "SecurityVerification-result-passed",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaVerificationResultObserved",
+                                                 "target":  "Passed",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "verificationResult",
+                                                               "value":  "Passed"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "SecurityVerification-result-failed",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaVerificationResultObserved",
+                                                 "target":  "Failed",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "verificationResult",
+                                                               "value":  "Failed"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "SecurityVerification-result-indeterminate",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaVerificationResultObserved",
+                                                 "target":  "Indeterminate",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "verificationResult",
+                                                               "value":  "Indeterminate"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "SecurityVerification-cancel-applicabilityPending",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             },
+                                             {
+                                                 "id":  "SecurityVerification-cancel-required",
+                                                 "source":  "Required",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             },
+                                             {
+                                                 "id":  "SecurityVerification-cancel-requested",
+                                                 "source":  "Requested",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             }
+                                         ]
+                     },
+                     {
+                         "id":  "ReleaseReviewApproval",
+                         "initialState":  "ApplicabilityPending",
+                         "states":  [
+                                        {
+                                            "id":  "ApplicabilityPending"
+                                        },
+                                        {
+                                            "id":  "Required"
+                                        },
+                                        {
+                                            "id":  "NotRequired",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "ApplicabilityUnresolved",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Requested"
+                                        },
+                                        {
+                                            "id":  "Approved",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Rejected",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Unresolved",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Cancelled",
+                                            "terminal":  true
+                                        }
+                                    ],
+                         "events":  [
+                                        "RequestApproval",
+                                        "AsteriaObligationApplicabilityObserved",
+                                        "AsteriaApprovalResultObserved",
+                                        "Cancel"
+                                    ],
+                         "transitions":  [
+                                             {
+                                                 "id":  "ReleaseReviewApproval-applicability-required",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "target":  "Required",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "applicability",
+                                                               "value":  "Required"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "ReleaseReviewApproval-applicability-notrequired",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "target":  "NotRequired",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "applicability",
+                                                               "value":  "NotRequired"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "ReleaseReviewApproval-applicability-unresolved",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "target":  "ApplicabilityUnresolved",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "applicability",
+                                                               "value":  "Unresolved"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "ReleaseReviewApproval-request",
+                                                 "source":  "Required",
+                                                 "event":  "RequestApproval",
+                                                 "target":  "Requested"
+                                             },
+                                             {
+                                                 "id":  "ReleaseReviewApproval-result-approved",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaApprovalResultObserved",
+                                                 "target":  "Approved",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "approvalDecision",
+                                                               "value":  "Approved"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "ReleaseReviewApproval-result-rejected",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaApprovalResultObserved",
+                                                 "target":  "Rejected",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "approvalDecision",
+                                                               "value":  "Rejected"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "ReleaseReviewApproval-result-unresolved",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaApprovalResultObserved",
+                                                 "target":  "Unresolved",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "approvalDecision",
+                                                               "value":  "Unresolved"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "ReleaseReviewApproval-cancel-applicabilityPending",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             },
+                                             {
+                                                 "id":  "ReleaseReviewApproval-cancel-required",
+                                                 "source":  "Required",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             },
+                                             {
+                                                 "id":  "ReleaseReviewApproval-cancel-requested",
+                                                 "source":  "Requested",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             }
+                                         ]
+                     },
+                     {
+                         "id":  "EmergencyApproval",
+                         "initialState":  "ApplicabilityPending",
+                         "states":  [
+                                        {
+                                            "id":  "ApplicabilityPending"
+                                        },
+                                        {
+                                            "id":  "Required"
+                                        },
+                                        {
+                                            "id":  "NotRequired",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "ApplicabilityUnresolved",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Requested"
+                                        },
+                                        {
+                                            "id":  "Approved",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Rejected",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Unresolved",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Cancelled",
+                                            "terminal":  true
+                                        }
+                                    ],
+                         "events":  [
+                                        "RequestApproval",
+                                        "AsteriaObligationApplicabilityObserved",
+                                        "AsteriaApprovalResultObserved",
+                                        "Cancel"
+                                    ],
+                         "transitions":  [
+                                             {
+                                                 "id":  "EmergencyApproval-applicability-required",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "target":  "Required",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "applicability",
+                                                               "value":  "Required"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "EmergencyApproval-applicability-notrequired",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "target":  "NotRequired",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "applicability",
+                                                               "value":  "NotRequired"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "EmergencyApproval-applicability-unresolved",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "AsteriaObligationApplicabilityObserved",
+                                                 "target":  "ApplicabilityUnresolved",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "applicability",
+                                                               "value":  "Unresolved"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "EmergencyApproval-request",
+                                                 "source":  "Required",
+                                                 "event":  "RequestApproval",
+                                                 "target":  "Requested"
+                                             },
+                                             {
+                                                 "id":  "EmergencyApproval-result-approved",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaApprovalResultObserved",
+                                                 "target":  "Approved",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "approvalDecision",
+                                                               "value":  "Approved"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "EmergencyApproval-result-rejected",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaApprovalResultObserved",
+                                                 "target":  "Rejected",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "approvalDecision",
+                                                               "value":  "Rejected"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "EmergencyApproval-result-unresolved",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaApprovalResultObserved",
+                                                 "target":  "Unresolved",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "approvalDecision",
+                                                               "value":  "Unresolved"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "EmergencyApproval-cancel-applicabilityPending",
+                                                 "source":  "ApplicabilityPending",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             },
+                                             {
+                                                 "id":  "EmergencyApproval-cancel-required",
+                                                 "source":  "Required",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             },
+                                             {
+                                                 "id":  "EmergencyApproval-cancel-requested",
+                                                 "source":  "Requested",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             }
+                                         ]
+                     },
+                     {
+                         "id":  "CancellationIntent",
+                         "initialState":  "NotRequested",
+                         "states":  [
+                                        {
+                                            "id":  "NotRequested"
+                                        },
+                                        {
+                                            "id":  "Requested",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Cancelled",
+                                            "terminal":  true
+                                        }
+                                    ],
+                         "events":  [
+                                        "RequestCancellation",
+                                        "Cancel"
+                                    ],
+                         "transitions":  [
+                                             {
+                                                 "id":  "record-cancellation-intent",
+                                                 "source":  "NotRequested",
+                                                 "event":  "RequestCancellation",
+                                                 "target":  "Requested"
+                                             },
+                                             {
+                                                 "id":  "cancellation-intent-cancel",
+                                                 "source":  "NotRequested",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             }
+                                         ]
+                     },
+                     {
+                         "id":  "Deployment",
+                         "initialState":  "NotRequested",
+                         "states":  [
+                                        {
+                                            "id":  "NotRequested"
+                                        },
+                                        {
+                                            "id":  "Running"
+                                        },
+                                        {
+                                            "id":  "Succeeded",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Failed",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Indeterminate",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Cancelled",
+                                            "terminal":  true
+                                        }
+                                    ],
+                         "events":  [
+                                        "AsteriaDeploymentStarted",
+                                        "AsteriaDeploymentResultObserved",
+                                        "Cancel"
+                                    ],
+                         "transitions":  [
+                                             {
+                                                 "id":  "deployment-concern-started",
+                                                 "source":  "NotRequested",
+                                                 "event":  "AsteriaDeploymentStarted",
+                                                 "target":  "Running"
+                                             },
+                                             {
+                                                 "id":  "deployment-concern-succeeded",
+                                                 "source":  "Running",
+                                                 "event":  "AsteriaDeploymentResultObserved",
+                                                 "target":  "Succeeded",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "deploymentResult",
+                                                               "value":  "Succeeded"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "deployment-concern-failed",
+                                                 "source":  "Running",
+                                                 "event":  "AsteriaDeploymentResultObserved",
+                                                 "target":  "Failed",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "deploymentResult",
+                                                               "value":  "Failed"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "deployment-concern-indeterminate",
+                                                 "source":  "Running",
+                                                 "event":  "AsteriaDeploymentResultObserved",
+                                                 "target":  "Indeterminate",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "deploymentResult",
+                                                               "value":  "Indeterminate"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "deployment-cancel-not-requested",
+                                                 "source":  "NotRequested",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             },
+                                             {
+                                                 "id":  "deployment-cancel-running",
+                                                 "source":  "Running",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             }
+                                         ]
+                     },
+                     {
+                         "id":  "HealthVerification",
+                         "initialState":  "NotRequested",
+                         "states":  [
+                                        {
+                                            "id":  "NotRequested"
+                                        },
+                                        {
+                                            "id":  "Requested"
+                                        },
+                                        {
+                                            "id":  "Passed",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Failed",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Indeterminate",
+                                            "terminal":  true
+                                        },
+                                        {
+                                            "id":  "Cancelled",
+                                            "terminal":  true
+                                        }
+                                    ],
+                         "events":  [
+                                        "AsteriaHealthVerificationStarted",
+                                        "AsteriaHealthVerificationResultObserved",
+                                        "Cancel"
+                                    ],
+                         "transitions":  [
+                                             {
+                                                 "id":  "health-concern-requested",
+                                                 "source":  "NotRequested",
+                                                 "event":  "AsteriaHealthVerificationStarted",
+                                                 "target":  "Requested"
+                                             },
+                                             {
+                                                 "id":  "health-concern-passed",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaHealthVerificationResultObserved",
+                                                 "target":  "Passed",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "healthResult",
+                                                               "value":  "Passed"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "health-concern-failed",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaHealthVerificationResultObserved",
+                                                 "target":  "Failed",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "healthResult",
+                                                               "value":  "Failed"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "health-concern-indeterminate",
+                                                 "source":  "Requested",
+                                                 "event":  "AsteriaHealthVerificationResultObserved",
+                                                 "target":  "Indeterminate",
+                                                 "guard":  {
+                                                               "op":  "eq",
+                                                               "fact":  "healthResult",
+                                                               "value":  "Indeterminate"
+                                                           }
+                                             },
+                                             {
+                                                 "id":  "health-cancel-not-requested",
+                                                 "source":  "NotRequested",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             },
+                                             {
+                                                 "id":  "health-cancel-requested",
+                                                 "source":  "Requested",
+                                                 "event":  "Cancel",
+                                                 "target":  "Cancelled"
+                                             }
+                                         ]
+                     }
+                 ],
+    "cancellationEvent":  "Cancel"
+}

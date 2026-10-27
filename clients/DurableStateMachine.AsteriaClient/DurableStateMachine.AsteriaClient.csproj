@@ -8,6 +8,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.12" />
   </ItemGroup>
 
@@ -24,6 +28,12 @@
              CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\definitions\asteria-release-governance-v3.json"
              Link="definitions\asteria-release-governance-v3.json"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\definitions\asteria-release-governance-v4.json"
+             Link="definitions\asteria-release-governance-v4.json"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\definitions\asteria-release-governance-v5.json"
+             Link="definitions\asteria-release-governance-v5.json"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

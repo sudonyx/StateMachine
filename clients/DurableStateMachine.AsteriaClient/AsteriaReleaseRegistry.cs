@@ -532,15 +532,17 @@ public sealed class AsteriaReleaseRegistry : IAsyncDisposable
             throw new InvalidOperationException(
                 $"Release '{releaseId}' admission is suspended in state '{current.RegistryState}'.");
         }
-        if (current.DefinitionVersion != "3.0")
+        if (current.DefinitionVersion is not ("3.0" or "4.0" or "5.0") ||
+            current.DefinitionId != definitionId ||
+            current.DefinitionVersion != definitionVersion)
         {
             throw new InvalidOperationException(
-                $"Generation {expectedBaseGeneration} uses immutable definition {current.DefinitionId}@{current.DefinitionVersion}, which has no supersession transition.");
+                $"Generation {expectedBaseGeneration} uses immutable definition {current.DefinitionId}@{current.DefinitionVersion}, which cannot be amended using {definitionId}@{definitionVersion}.");
         }
         var eligibleStates = new HashSet<string>(StringComparer.Ordinal)
         {
             "Draft", "UnderAssessment", "RequirementsIdentified",
-            "ReviewObligationsIdentified", "AssessmentUnresolved"
+            "ReviewObligationsIdentified", "AssessmentUnresolved", "ReadyForDeployment"
         };
         if (!eligibleStates.Contains(observedOldState))
         {

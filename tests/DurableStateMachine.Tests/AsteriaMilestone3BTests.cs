@@ -4,10 +4,13 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using DurableStateMachine.Api;
 using DurableStateMachine.AsteriaClient;
 using DurableStateMachine.Core;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Data.Sqlite;
 
 namespace DurableStateMachine.Tests;
@@ -49,6 +52,185 @@ public sealed class AsteriaMilestone3BTests
             registry.CreateReleaseAsync("AST-REGISTRY-001", changed, Now));
         await Assert.ThrowsAsync<ArgumentException>(() =>
             registry.CreateReleaseAsync("AST-REGISTRY-002", Material with { Environment = "unknown" }, Now));
+    }
+
+    [Fact]
+    public async Task Activity_ledger_persists_validated_acceptance_across_restart_and_retries()
+    {
+        var path = NewDatabasePath();
+        await using var registry = new AsteriaReleaseRegistry(path);
+        var release = await registry.CreateReleaseAsync("AST-ACTIVITY-001", Material, Now);
+        var reservation = CreateActivityReservation(release, "functional");
+
+        await using (var ledger = new AsteriaActivityLedger(path))
+        {
+            var reserved = await ledger.ReserveAsync(reservation, Now);
+            var repeatedReservation = await ledger.ReserveAsync(reservation, Now.AddMinutes(1));
+            Assert.Equal(reserved.WorkId, repeatedReservation.WorkId);
+            Assert.Equal("Reserved", repeatedReservation.Status);
+            Assert.Equal(AsteriaActivityLedger.Fingerprint(reservation.OriginalRequestJson), reserved.RequestFingerprint);
+
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                ledger.MarkObservationSubmittedAsync(reserved.WorkId, "receipt-activity-1", Now));
+
+            _ = await ledger.MarkExpectedOperationRegisteredAsync(reserved.WorkId, Now);
+            _ = await ledger.MarkDispatchPendingAsync(reserved.WorkId, Now);
+            var dispatchStarted = await ledger.MarkDispatchStartedAsync(reserved.WorkId, Now);
+            Assert.True(dispatchStarted.ShouldDispatch);
+            Assert.Equal("Dispatched", dispatchStarted.Activity.Status);
+            var dispatched = await ledger.RecordHarnessExecutionAsync(
+                reserved.WorkId,
+                "harness-execution-1",
+                reservation.ProviderIdentity!,
+                reservation.ApiDescriptionVersionId!,
+                reservation.OperationKey!,
+                Now);
+            var repeatedDispatch = await ledger.RecordHarnessExecutionAsync(
+                reserved.WorkId,
+                "harness-execution-1",
+                reservation.ProviderIdentity!,
+                reservation.ApiDescriptionVersionId!,
+                reservation.OperationKey!,
+                Now.AddMinutes(1));
+            Assert.Equal("Dispatched", dispatched.Status);
+            Assert.Equal(dispatched.HarnessExecutionId, repeatedDispatch.HarnessExecutionId);
+
+            const string response = """{"status":"passed"}""";
+            var persistedResponse = await ledger.RecordOriginalResponseAsync(reserved.WorkId, response, Now);
+            var repeatedResponse = await ledger.RecordOriginalResponseAsync(reserved.WorkId, response, Now.AddMinutes(1));
+            Assert.Equal("ResponsePersisted", persistedResponse.Status);
+            Assert.Equal(persistedResponse.ResponseDigest, repeatedResponse.ResponseDigest);
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                ledger.RecordValidatedOutcomeAsync(
+                    reserved.WorkId,
+                    "Approved",
+                    AsteriaActivityLedger.Fingerprint("evidence"),
+                    Now));
+            await Assert.ThrowsAsync<ArgumentException>(() =>
+                ledger.RecordValidatedOutcomeAsync(reserved.WorkId, "Passed", "not-a-digest", Now));
+
+            var validated = await ledger.RecordValidatedOutcomeAsync(
+                reserved.WorkId,
+                "Passed",
+                AsteriaActivityLedger.Fingerprint("validated evidence"),
+                Now);
+            var repeatedValidation = await ledger.RecordValidatedOutcomeAsync(
+                reserved.WorkId,
+                "Passed",
+                AsteriaActivityLedger.Fingerprint("validated evidence"),
+                Now.AddMinutes(1));
+            Assert.Equal(validated.ValidatedOutcome, repeatedValidation.ValidatedOutcome);
+
+            var submitted = await ledger.MarkObservationSubmittedAsync(
+                reserved.WorkId, "receipt-activity-1", Now);
+            var repeatedSubmission = await ledger.MarkObservationSubmittedAsync(
+                reserved.WorkId, "receipt-activity-1", Now.AddMinutes(1));
+            Assert.Equal("ObservationSubmitted", submitted.Status);
+            Assert.Equal(submitted.ObservationReceiptId, repeatedSubmission.ObservationReceiptId);
+
+            var accepted = await ledger.MarkAcceptedAsync(
+                reserved.WorkId, "receipt-activity-1", "attempt-accepted-1", "history-accepted-1", Now);
+            var repeatedAcceptance = await ledger.MarkAcceptedAsync(
+                reserved.WorkId, "receipt-activity-1", "attempt-accepted-1", "history-accepted-1", Now.AddMinutes(1));
+            Assert.Equal("Accepted", accepted.Status);
+            Assert.Equal(accepted.AcceptedHistoryId, repeatedAcceptance.AcceptedHistoryId);
+        }
+
+        await using var restartedLedger = new AsteriaActivityLedger(path);
+        var restored = await restartedLedger.GetAsync(reservation.WorkId);
+        Assert.NotNull(restored);
+        Assert.Equal("Accepted", restored.Status);
+        Assert.Equal("Passed", restored.ValidatedOutcome);
+        Assert.Equal("harness-execution-1", restored.HarnessExecutionId);
+        Assert.Equal("history-accepted-1", restored.AcceptedHistoryId);
+    }
+
+    [Fact]
+    public async Task Activity_ledger_preserves_unknown_outcome_and_rejects_conflicts_and_dangling_generation()
+    {
+        var path = NewDatabasePath();
+        await using var registry = new AsteriaReleaseRegistry(path);
+        var release = await registry.CreateReleaseAsync("AST-ACTIVITY-002", Material, Now);
+        var reservation = CreateActivityReservation(release, "security");
+        AsteriaActivitySnapshot reserved;
+        await using (var ledger = new AsteriaActivityLedger(path))
+        {
+            reserved = await ledger.ReserveAsync(reservation, Now);
+            _ = await ledger.MarkExpectedOperationRegisteredAsync(reserved.WorkId, Now);
+            _ = await ledger.MarkDispatchPendingAsync(reserved.WorkId, Now);
+            _ = await ledger.MarkDispatchStartedAsync(reserved.WorkId, Now);
+        }
+
+        await using var restartedLedger = new AsteriaActivityLedger(path);
+        var afterRestart = (await restartedLedger.GetAsync(reserved.WorkId))!;
+        Assert.Equal("Dispatched", afterRestart.Status);
+        Assert.Null(afterRestart.HarnessExecutionId);
+        var unknown = await restartedLedger.MarkOutcomeUnknownAsync(
+            reserved.WorkId, "Harness response was lost after dispatch.", Now);
+        var repeatedUnknown = await restartedLedger.MarkOutcomeUnknownAsync(
+            reserved.WorkId, "Harness response was lost after dispatch.", Now.AddMinutes(1));
+        Assert.Equal("OutcomeUnknown", unknown.Status);
+        Assert.Equal(unknown.RecoveryDetail, repeatedUnknown.RecoveryDetail);
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            restartedLedger.RecordOriginalResponseAsync(reserved.WorkId, """{"status":"passed"}""", Now));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            restartedLedger.ReserveAsync(
+                reservation with { OriginalRequestJson = """{"provider":"changed"}""" },
+                Now.AddMinutes(2)));
+        Assert.Equal("OutcomeUnknown", (await restartedLedger.GetAsync(reserved.WorkId))!.Status);
+
+        var invalidGeneration = reservation with
+        {
+            WorkId = "work-invalid-generation",
+            ActivityId = "activity-invalid-generation",
+            Generation = 2,
+            ActivityType = "SecurityVerificationRetry",
+            AttemptId = "attempt-invalid-generation",
+            ExpectedOperationId = "operation-invalid-generation",
+            SubmissionId = "submission-invalid-generation",
+            IdempotencyKey = "idempotency-invalid-generation"
+        };
+        await Assert.ThrowsAsync<SqliteException>(() => restartedLedger.ReserveAsync(invalidGeneration, Now));
+    }
+
+    [Fact]
+    public async Task Activity_ledger_concurrent_exact_reservations_share_one_durable_work_item()
+    {
+        var path = NewDatabasePath();
+        try
+        {
+            await using var registry = new AsteriaReleaseRegistry(path);
+            var release = await registry.CreateReleaseAsync("AST-ACTIVITY-CONCURRENT-001", Material, Now);
+            await using var ledger = new AsteriaActivityLedger(path);
+            var reservation = CreateActivityReservation(release, "functional-concurrent");
+
+            var results = await Task.WhenAll(Enumerable.Range(0, 8)
+                .Select(_ => ledger.ReserveAsync(reservation, Now)));
+
+            Assert.All(results, result => Assert.Equal(reservation.WorkId, result.WorkId));
+            Assert.Single(await ledger.ListGenerationAsync(release.ReleaseId, release.AssessmentGeneration));
+            _ = await ledger.MarkExpectedOperationRegisteredAsync(reservation.WorkId, Now);
+            _ = await ledger.MarkDispatchPendingAsync(reservation.WorkId, Now);
+
+            var dispatchClaims = await Task.WhenAll(Enumerable.Range(0, 8)
+                .Select(_ => ledger.MarkDispatchStartedAsync(reservation.WorkId, Now)));
+
+            Assert.Single(dispatchClaims, claim => claim.ShouldDispatch);
+            Assert.All(dispatchClaims, claim => Assert.Equal("Dispatched", claim.Activity.Status));
+        }
+        finally
+        {
+            SqliteConnection.ClearAllPools();
+            foreach (var suffix in new[] { string.Empty, "-shm", "-wal" })
+            {
+                var filePath = path + suffix;
+                if (File.Exists(filePath))
+                {
+                    File.Delete(filePath);
+                }
+            }
+        }
     }
 
     [Fact]
@@ -146,6 +328,860 @@ public sealed class AsteriaMilestone3BTests
             "ReadyForDeployment" or "DeploymentInProgress" or "Completed");
         Assert.Single(handler.Requests);
         Assert.Equal(completed.Work.DecisionIdempotencyKey, handler.Requests[0].IdempotencyKey);
+    }
+
+    [Fact]
+    public async Task V4_assessment_records_four_generation_bound_applicability_concerns()
+    {
+        using var stateHost = new StateMachineTestHost();
+        await using var registry = new AsteriaReleaseRegistry(NewDatabasePath());
+        var release = await registry.CreateReleaseAsync(
+            "AST-V4-APPLICABILITY-001",
+            Material,
+            Now,
+            "asteria-release-governance",
+            "4.0");
+        var handler = new DecisionApiHandler(
+            snapshot => CreatePersistedResponse(snapshot, "AdditionalReviewRequired"));
+        using var decisionHttp = new HttpClient(handler) { BaseAddress = new Uri("http://decision.test/") };
+        var definitionJson = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "definitions", "asteria-release-governance-v4.json"));
+        var coordinator = new AsteriaAssessmentCoordinator(
+            registry,
+            new AsteriaStateMachineClient(stateHost.Client, TrustedKey),
+            new AsteriaDecisionApiClient(decisionHttp),
+            definitionJson,
+            TimeProvider.System);
+
+        var assessed = await coordinator.ResumeAsync(release.ReleaseId);
+        var instance = await stateHost.Client.GetFromJsonAsync<JsonElement>(
+            $"/api/instances/{assessed.WorkflowInstanceId}");
+        var concerns = await stateHost.Client.GetFromJsonAsync<JsonElement>(
+            $"/api/instances/{assessed.WorkflowInstanceId}/concerns");
+        var operations = await stateHost.Client.GetFromJsonAsync<JsonElement[]>(
+            $"/api/instances/{assessed.WorkflowInstanceId}/expected-operations")
+            ?? throw new InvalidDataException("Expected operations were not returned.");
+
+        Assert.Equal("4.0", instance.GetProperty("definitionVersion").GetString());
+        Assert.Equal("ReviewObligationsIdentified", instance.GetProperty("currentState").GetString());
+        Assert.Equal(2, instance.GetProperty("revision").GetInt64());
+        Assert.Equal("Required", ConcernState(concerns, "FunctionalVerification"));
+        Assert.Equal("Required", ConcernState(concerns, "SecurityVerification"));
+        Assert.Equal("Required", ConcernState(concerns, "ReleaseReviewApproval"));
+        Assert.Equal("NotRequired", ConcernState(concerns, "EmergencyApproval"));
+
+        var applicabilityOperations = operations
+            .Where(item => item.GetProperty("observationType").GetString() is
+                "AsteriaFunctionalVerificationApplicability" or
+                "AsteriaSecurityVerificationApplicability" or
+                "AsteriaReleaseReviewApprovalApplicability" or
+                "AsteriaEmergencyApprovalApplicability")
+            .ToArray();
+        Assert.Equal(4, applicabilityOperations.Length);
+        Assert.All(applicabilityOperations, operation =>
+        {
+            Assert.Equal("Resolved", operation.GetProperty("status").GetString());
+            Assert.Equal(1, operation.GetProperty("expectedRevision").GetInt64());
+        });
+        Assert.Equal(2, concerns.GetProperty("parentRevision").GetInt64());
+
+        var amendmentCoordinator = new AsteriaAmendmentCoordinator(
+            registry,
+            new AsteriaStateMachineClient(stateHost.Client, TrustedKey),
+            definitionJson,
+            TimeProvider.System);
+        var amendment = await amendmentCoordinator.AmendAsync(
+            release.ReleaseId,
+            "AST-V4-APPLICABILITY-AMEND-001",
+            1,
+            Material with { TargetVersion = "4.3.1" });
+        var oldGeneration = await stateHost.Client.GetFromJsonAsync<JsonElement>(
+            $"/api/instances/{assessed.WorkflowInstanceId}");
+        var newGeneration = await registry.GetReleaseAsync(release.ReleaseId)
+            ?? throw new InvalidDataException("Replacement generation was not activated.");
+        var newInstance = await stateHost.Client.GetFromJsonAsync<JsonElement>(
+            $"/api/instances/{newGeneration.WorkflowInstanceId}");
+        Assert.Equal("NewGenerationActivated", amendment.Phase);
+        Assert.Equal("Superseded", oldGeneration.GetProperty("currentState").GetString());
+        Assert.Equal("4.0", newGeneration.DefinitionVersion);
+        Assert.Equal(2, newGeneration.AssessmentGeneration);
+        Assert.Equal("Draft", newInstance.GetProperty("currentState").GetString());
+
+        static string? ConcernState(JsonElement projection, string concernId) =>
+            projection.GetProperty("concerns").EnumerateArray()
+                .Single(item => item.GetProperty("concernId").GetString() == concernId)
+                .GetProperty("currentState").GetString();
+    }
+
+    [Fact]
+    public async Task V4_no_policy_marks_all_applicabilities_unresolved_without_completion()
+    {
+        using var stateHost = new StateMachineTestHost();
+        await using var registry = new AsteriaReleaseRegistry(NewDatabasePath());
+        var release = await registry.CreateReleaseAsync(
+            "AST-V4-UNRESOLVED-001",
+            Material,
+            Now,
+            "asteria-release-governance",
+            "4.0");
+        using var decisionHttp = new HttpClient(new DecisionApiHandler(CreateNoPolicyResponse))
+        {
+            BaseAddress = new Uri("http://decision.test/")
+        };
+        var definitionJson = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "definitions", "asteria-release-governance-v4.json"));
+        var coordinator = new AsteriaAssessmentCoordinator(
+            registry,
+            new AsteriaStateMachineClient(stateHost.Client, TrustedKey),
+            new AsteriaDecisionApiClient(decisionHttp),
+            definitionJson,
+            TimeProvider.System);
+
+        var assessed = await coordinator.ResumeAsync(release.ReleaseId);
+        var instance = await stateHost.Client.GetFromJsonAsync<JsonElement>(
+            $"/api/instances/{assessed.WorkflowInstanceId}");
+        var concerns = await stateHost.Client.GetFromJsonAsync<JsonElement>(
+            $"/api/instances/{assessed.WorkflowInstanceId}/concerns");
+
+        Assert.Null(assessed.Work.EvaluationId);
+        Assert.Equal("AssessmentUnresolved", instance.GetProperty("currentState").GetString());
+        Assert.Equal("ApplicabilityUnresolved", ConcernState(concerns, "FunctionalVerification"));
+        Assert.Equal("ApplicabilityUnresolved", ConcernState(concerns, "SecurityVerification"));
+        Assert.Equal("ApplicabilityUnresolved", ConcernState(concerns, "ReleaseReviewApproval"));
+        Assert.Equal("ApplicabilityUnresolved", ConcernState(concerns, "EmergencyApproval"));
+
+        static string? ConcernState(JsonElement projection, string concernId) =>
+            projection.GetProperty("concerns").EnumerateArray()
+                .Single(item => item.GetProperty("concernId").GetString() == concernId)
+                .GetProperty("currentState").GetString();
+    }
+
+    [Fact]
+    public async Task V4_readiness_guard_refuses_incomplete_obligations_and_public_command()
+    {
+        using var stateHost = new StateMachineTestHost();
+        await using var registry = new AsteriaReleaseRegistry(NewDatabasePath());
+        var release = await registry.CreateReleaseAsync(
+            "AST-V4-READINESS-BLOCKED-001",
+            Material,
+            Now,
+            "asteria-release-governance",
+            "4.0");
+        using var decisionHttp = new HttpClient(new DecisionApiHandler(
+            snapshot => CreatePersistedResponse(snapshot, "AdditionalReviewRequired")))
+        {
+            BaseAddress = new Uri("http://decision.test/")
+        };
+        var definitionJson = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "definitions", "asteria-release-governance-v4.json"));
+        var coordinator = new AsteriaAssessmentCoordinator(
+            registry,
+            new AsteriaStateMachineClient(stateHost.Client, TrustedKey),
+            new AsteriaDecisionApiClient(decisionHttp),
+            definitionJson,
+            TimeProvider.System);
+        var assessed = await coordinator.ResumeAsync(release.ReleaseId);
+        var instanceUrl = $"/api/instances/{assessed.WorkflowInstanceId}";
+        var instance = await stateHost.Client.GetFromJsonAsync<JsonElement>(instanceUrl);
+        var revision = instance.GetProperty("revision").GetInt64();
+
+        using var publicCommand = await stateHost.Client.PostAsJsonAsync(
+            $"{instanceUrl}/commands",
+            new { messageId = "asteria-public-readiness", type = "AsteriaReadinessConfirmed", expectedRevision = revision });
+        using var publicResult = JsonDocument.Parse(await publicCommand.Content.ReadAsStringAsync());
+        Assert.Equal(
+            "Unexpected",
+            publicResult.RootElement.GetProperty("message").GetProperty("status").GetString());
+        Assert.Equal(
+            "unexpected-command",
+            publicResult.RootElement.GetProperty("message").GetProperty("reasonCode").GetString());
+
+        const string operationId = "asteria-readiness-incomplete-operation";
+        const string messageId = "asteria-readiness-incomplete-message";
+        string[] requiredEvidence =
+        [
+            "releaseId",
+            "assessmentGeneration",
+            "materialDigest",
+            "assessmentEvidenceDigest",
+            "allObligationsEvidenceDigest",
+            "readinessWorkId"
+        ];
+        using var registrationRequest = new HttpRequestMessage(
+            HttpMethod.Post, $"{instanceUrl}/expected-operations");
+        registrationRequest.Headers.Add("X-State-Machine-Trusted-Ingestion-Key", TrustedKey);
+        registrationRequest.Content = JsonContent.Create(new
+        {
+            operationId,
+            observationType = "AsteriaReadinessConfirmed",
+            sourceIdentity = "AsteriaAssessmentCoordinator",
+            expectedRevision = revision,
+            requiredEvidence
+        });
+        using var registration = await stateHost.Client.SendAsync(registrationRequest);
+        Assert.Equal(HttpStatusCode.Created, registration.StatusCode);
+
+        using var readinessRequest = new HttpRequestMessage(
+            HttpMethod.Post, $"{instanceUrl}/observations");
+        readinessRequest.Headers.Add("X-State-Machine-Trusted-Ingestion-Key", TrustedKey);
+        readinessRequest.Content = JsonContent.Create(new
+        {
+            messageId,
+            deliveryId = messageId,
+            operationId,
+            observationId = "asteria-readiness-incomplete-observation",
+            type = "AsteriaReadinessConfirmed",
+            expectedRevision = revision,
+            correlationId = operationId,
+            source = "AsteriaAssessmentCoordinator",
+            payload = new { },
+            facts = new { },
+            evidence = new
+            {
+                releaseId = assessed.ReleaseId,
+                assessmentGeneration = assessed.AssessmentGeneration,
+                materialDigest = assessed.MaterialDigest,
+                assessmentEvidenceDigest = "assessment",
+                allObligationsEvidenceDigest = "incomplete",
+                readinessWorkId = "readiness-incomplete"
+            }
+        });
+        using var readiness = await stateHost.Client.SendAsync(readinessRequest);
+        using var readinessResult = JsonDocument.Parse(await readiness.Content.ReadAsStringAsync());
+        Assert.Equal(
+            "Rejected",
+            readinessResult.RootElement.GetProperty("message").GetProperty("status").GetString());
+        var finalInstance = await stateHost.Client.GetFromJsonAsync<JsonElement>(instanceUrl);
+        Assert.Equal("ReviewObligationsIdentified", finalInstance.GetProperty("currentState").GetString());
+    }
+
+    [Theory]
+    [InlineData("FunctionalVerification", "verify-functional", "Passed")]
+    [InlineData("FunctionalVerification", "verify-functional", "Failed")]
+    [InlineData("FunctionalVerification", "verify-functional", "Indeterminate")]
+    [InlineData("SecurityVerification", "verify-security", "Passed")]
+    [InlineData("SecurityVerification", "verify-security", "Failed")]
+    [InlineData("SecurityVerification", "verify-security", "Indeterminate")]
+    public async Task V5_verification_uses_distinct_harness_bindings_and_accepts_bound_business_result(
+        string concernId,
+        string operationKey,
+        string businessResult)
+    {
+        using var stateHost = new StateMachineTestHost();
+        var path = NewDatabasePath();
+        await using var registry = new AsteriaReleaseRegistry(path);
+        var release = await registry.CreateReleaseAsync(
+            "AST-V5-VERIFICATION-001", Material, Now, "asteria-release-governance", "5.0");
+        var definitionJson = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "definitions", "asteria-release-governance-v5.json"));
+        using var decisionHttp = new HttpClient(new DecisionApiHandler(
+            snapshot => CreatePersistedResponse(snapshot, "AdditionalReviewRequired")))
+        {
+            BaseAddress = new Uri("http://decision.test/")
+        };
+        var assessment = new AsteriaAssessmentCoordinator(
+            registry,
+            new AsteriaStateMachineClient(stateHost.Client, TrustedKey),
+            new AsteriaDecisionApiClient(decisionHttp),
+            definitionJson,
+            TimeProvider.System);
+        var assessed = await assessment.ResumeAsync(release.ReleaseId);
+
+        var providerId = concernId == "FunctionalVerification"
+            ? "11111111-1111-4111-8111-111111111111"
+            : "33333333-3333-4333-8333-333333333333";
+        var apiDescriptionId = concernId == "FunctionalVerification"
+            ? "22222222-2222-4222-8222-222222222222"
+            : "44444444-4444-4444-8444-444444444444";
+        var handler = new VerificationHarnessHandler(request =>
+        {
+            var body = request.GetProperty("body");
+            return JsonSerializer.Serialize(new
+            {
+                releaseId = body.GetProperty("releaseId").GetString(),
+                assessmentGeneration = body.GetProperty("assessmentGeneration").GetInt32(),
+                materialDigest = body.GetProperty("materialDigest").GetString(),
+                workflowInstanceId = body.GetProperty("workflowInstanceId").GetString(),
+                activityId = body.GetProperty("activityId").GetString(),
+                expectedOperationId = body.GetProperty("expectedOperationId").GetString(),
+                providerId,
+                apiDescriptionVersionId = apiDescriptionId,
+                operationKey,
+                result = businessResult,
+                evidenceId = "controlled-functional-evidence-1"
+            });
+        });
+        using var harnessHttp = new HttpClient(handler) { BaseAddress = new Uri("http://harness.test/") };
+        await using var ledger = new AsteriaActivityLedger(path);
+        var verification = new AsteriaVerificationCoordinator(
+            registry,
+            ledger,
+            new AsteriaStateMachineClient(stateHost.Client, TrustedKey),
+            harnessHttp,
+            definitionJson,
+            new Dictionary<string, AsteriaHarnessOperationBinding>(StringComparer.Ordinal)
+            {
+                [concernId] = new(
+                    $"synthetic-{concernId}", providerId, apiDescriptionId, operationKey)
+            },
+            TimeProvider.System);
+
+        var result = await verification.ExecuteAsync(assessed.ReleaseId, concernId);
+        var instance = await stateHost.Client.GetFromJsonAsync<JsonElement>(
+            $"/api/instances/{assessed.WorkflowInstanceId}");
+        var concerns = await stateHost.Client.GetFromJsonAsync<JsonElement>(
+            $"/api/instances/{assessed.WorkflowInstanceId}/concerns");
+
+        Assert.Equal("Accepted", result.Status);
+        Assert.Equal(businessResult, result.ValidatedOutcome);
+        Assert.NotNull(result.HarnessExecutionId);
+        Assert.NotNull(result.AcceptedAttemptId);
+        Assert.NotNull(result.AcceptedHistoryId);
+        Assert.Equal("ReviewObligationsIdentified", instance.GetProperty("currentState").GetString());
+        Assert.Equal(2, instance.GetProperty("revision").GetInt64());
+        Assert.Equal(businessResult, ConcernState(concerns, concernId));
+        Assert.Equal(3, ConcernRevision(concerns, concernId));
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task V5_verification_never_retries_ambiguous_harness_dispatch()
+    {
+        using var stateHost = new StateMachineTestHost();
+        var path = NewDatabasePath();
+        await using var registry = new AsteriaReleaseRegistry(path);
+        var release = await registry.CreateReleaseAsync(
+            "AST-V5-VERIFICATION-UNKNOWN-001", Material, Now, "asteria-release-governance", "5.0");
+        var definitionJson = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "definitions", "asteria-release-governance-v5.json"));
+        using var decisionHttp = new HttpClient(new DecisionApiHandler(
+            snapshot => CreatePersistedResponse(snapshot, "AdditionalReviewRequired")))
+        {
+            BaseAddress = new Uri("http://decision.test/")
+        };
+        var assessment = new AsteriaAssessmentCoordinator(
+            registry,
+            new AsteriaStateMachineClient(stateHost.Client, TrustedKey),
+            new AsteriaDecisionApiClient(decisionHttp),
+            definitionJson,
+            TimeProvider.System);
+        var assessed = await assessment.ResumeAsync(release.ReleaseId);
+        var handler = new VerificationHarnessHandler(
+            _ => throw new HttpRequestException("Controlled lost dispatch acknowledgement."));
+        using var harnessHttp = new HttpClient(handler) { BaseAddress = new Uri("http://harness.test/") };
+        await using var ledger = new AsteriaActivityLedger(path);
+        var verification = new AsteriaVerificationCoordinator(
+            registry,
+            ledger,
+            new AsteriaStateMachineClient(stateHost.Client, TrustedKey),
+            harnessHttp,
+            definitionJson,
+            new Dictionary<string, AsteriaHarnessOperationBinding>(StringComparer.Ordinal)
+            {
+                ["FunctionalVerification"] = new(
+                    "synthetic-functional-provider",
+                    "11111111-1111-4111-8111-111111111111",
+                    "22222222-2222-4222-8222-222222222222",
+                    "verify-functional")
+            },
+            TimeProvider.System);
+
+        await Assert.ThrowsAsync<HttpRequestException>(() =>
+            verification.ExecuteAsync(assessed.ReleaseId, "FunctionalVerification"));
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            verification.ExecuteAsync(assessed.ReleaseId, "FunctionalVerification"));
+        var activity = Assert.Single(await ledger.ListGenerationAsync(assessed.ReleaseId, 1));
+
+        Assert.Equal("OutcomeUnknown", activity.Status);
+        Assert.Null(activity.ValidatedOutcome);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task Approval_gateway_authenticates_roles_and_preserves_immutable_decisions()
+    {
+        using var stateHost = new StateMachineTestHost();
+        var path = NewDatabasePath();
+        await using var releaseRegistry = new AsteriaReleaseRegistry(path);
+        var release = await releaseRegistry.CreateReleaseAsync(
+            "AST-V5-APPROVAL-001", Material, Now, "asteria-release-governance", "5.0");
+        var definitionJson = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "definitions", "asteria-release-governance-v5.json"));
+        using var decisionHttp = new HttpClient(new DecisionApiHandler(
+            snapshot => CreatePersistedResponse(snapshot, "AdditionalReviewRequired")))
+        {
+            BaseAddress = new Uri("http://decision.test/")
+        };
+        var assessment = new AsteriaAssessmentCoordinator(
+            releaseRegistry,
+            new AsteriaStateMachineClient(stateHost.Client, TrustedKey),
+            new AsteriaDecisionApiClient(decisionHttp),
+            definitionJson,
+            TimeProvider.System);
+        var assessed = await assessment.ResumeAsync(release.ReleaseId);
+
+        await using var activityLedger = new AsteriaActivityLedger(path);
+        await activityLedger.InitializeAsync();
+        var approvalRegistry = new AsteriaApprovalRegistry(path);
+        await approvalRegistry.InitializeAsync();
+        const string reviewerToken = "synthetic-reviewer-token-with-more-than-32-characters";
+        const string emergencyToken = "synthetic-emergency-token-with-more-than-32-characters";
+        var credentialRegistry = new AsteriaApprovalCredentialRegistry(
+            "synthetic-authority-v1",
+            [
+                new("reviewer-1", "ReleaseReviewer", reviewerToken),
+                new("emergency-authoriser-1", "EmergencyReleaseAuthoriser", emergencyToken)
+            ]);
+        var stateMachine = new AsteriaStateMachineClient(stateHost.Client, TrustedKey);
+        var gateway = new AsteriaApprovalGateway(
+            releaseRegistry,
+            activityLedger,
+            approvalRegistry,
+            credentialRegistry,
+            stateMachine,
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["5.0"] = definitionJson });
+
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        await using var app = builder.Build();
+        gateway.MapEndpoints(app);
+        await app.StartAsync();
+        var gatewayHttp = app.GetTestClient();
+
+        using var unauthenticated = await gatewayHttp.PostAsJsonAsync(
+            "/approvals",
+            new { releaseId = assessed.ReleaseId });
+        Assert.Equal(HttpStatusCode.Unauthorized, unauthenticated.StatusCode);
+
+        var spoofedRequest = new HttpRequestMessage(HttpMethod.Post, "/approvals")
+        {
+            Content = JsonContent.Create(new
+            {
+                releaseId = assessed.ReleaseId,
+                assessmentGeneration = assessed.AssessmentGeneration,
+                materialDigest = assessed.MaterialDigest,
+                concernId = "ReleaseReviewApproval",
+                submissionId = "spoofed-submission",
+                idempotencyKey = "spoofed-idempotency",
+                decision = "Approved",
+                evidenceReference = "controlled-review",
+                principalId = "spoofed-principal",
+                role = "ReleaseReviewer"
+            })
+        };
+        spoofedRequest.Headers.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", reviewerToken);
+        using var spoofed = await gatewayHttp.SendAsync(spoofedRequest);
+        Assert.Equal(HttpStatusCode.BadRequest, spoofed.StatusCode);
+
+        var wrongRoleRequest = new AsteriaApprovalSubmission(
+            assessed.ReleaseId,
+            assessed.AssessmentGeneration,
+            assessed.MaterialDigest,
+            "EmergencyApproval",
+            "wrong-role-submission",
+            "wrong-role-idempotency",
+            "Approved",
+            "controlled-emergency-review");
+        using var wrongRole = new HttpRequestMessage(HttpMethod.Post, "/approvals")
+        {
+            Content = JsonContent.Create(wrongRoleRequest)
+        };
+        wrongRole.Headers.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", reviewerToken);
+        using var forbidden = await gatewayHttp.SendAsync(wrongRole);
+        Assert.Equal(HttpStatusCode.Forbidden, forbidden.StatusCode);
+
+        var submission = new AsteriaApprovalSubmission(
+            assessed.ReleaseId,
+            assessed.AssessmentGeneration,
+            assessed.MaterialDigest,
+            "ReleaseReviewApproval",
+            "review-submission-1",
+            "review-idempotency-1",
+            "Approved",
+            "controlled-review-evidence-1");
+        using var approvalRequest = new HttpRequestMessage(HttpMethod.Post, "/approvals")
+        {
+            Content = JsonContent.Create(submission)
+        };
+        approvalRequest.Headers.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", reviewerToken);
+        using var approved = await gatewayHttp.SendAsync(approvalRequest);
+        Assert.Equal(HttpStatusCode.OK, approved.StatusCode);
+        var accepted = await approved.Content.ReadFromJsonAsync<AsteriaApprovalResponse>();
+        Assert.NotNull(accepted);
+        Assert.Equal("Accepted", accepted.Activity.Status);
+        Assert.Equal("reviewer-1", accepted.Decision.PrincipalId);
+        Assert.Equal("ReleaseReviewer", accepted.Decision.AuthorityRole);
+        Assert.Equal("synthetic-authority-v1", accepted.Decision.AuthorityRegistryVersion);
+        Assert.Equal("Approved", accepted.Decision.Decision);
+
+        var retry = new AsteriaApprovalSubmission(
+            assessed.ReleaseId,
+            assessed.AssessmentGeneration,
+            assessed.MaterialDigest,
+            "ReleaseReviewApproval",
+            "review-submission-1",
+            "review-idempotency-1",
+            "Approved",
+            "controlled-review-evidence-1");
+        using var retryRequest = new HttpRequestMessage(HttpMethod.Post, "/approvals")
+        {
+            Content = JsonContent.Create(retry)
+        };
+        retryRequest.Headers.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", reviewerToken);
+        using var retryResponse = await gatewayHttp.SendAsync(retryRequest);
+        Assert.Equal(HttpStatusCode.OK, retryResponse.StatusCode);
+        var repeated = await retryResponse.Content.ReadFromJsonAsync<AsteriaApprovalResponse>();
+        Assert.NotNull(repeated);
+        Assert.Equal(accepted.Decision.DecisionId, repeated.Decision.DecisionId);
+        Assert.Equal(accepted.Decision.DecisionAt, repeated.Decision.DecisionAt);
+
+        var conflict = retry with { Decision = "Rejected" };
+        using var conflictRequest = new HttpRequestMessage(HttpMethod.Post, "/approvals")
+        {
+            Content = JsonContent.Create(conflict)
+        };
+        conflictRequest.Headers.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", reviewerToken);
+        using var conflictResponse = await gatewayHttp.SendAsync(conflictRequest);
+        Assert.Equal(HttpStatusCode.Conflict, conflictResponse.StatusCode);
+
+        var concernStates = await stateMachine.GetConcernStatesAsync(assessed.WorkflowInstanceId);
+        Assert.Equal("Approved", concernStates["ReleaseReviewApproval"].CurrentState);
+        Assert.Equal("NotRequired", concernStates["EmergencyApproval"].CurrentState);
+        Assert.Equal(1, (await activityLedger.ListGenerationAsync(assessed.ReleaseId, 1))
+            .Count(activity => activity.Status == "Accepted"));
+    }
+
+    [Fact]
+    public async Task Readiness_requires_all_current_generation_evidence_and_is_idempotent()
+    {
+        using var stateHost = new StateMachineTestHost();
+        var path = NewDatabasePath();
+        await using var releaseRegistry = new AsteriaReleaseRegistry(path);
+        var release = await releaseRegistry.CreateReleaseAsync(
+            "AST-V5-READINESS-001", Material, Now, "asteria-release-governance", "5.0");
+        await using var activityLedger = new AsteriaActivityLedger(path);
+        await activityLedger.InitializeAsync();
+        await using var deadlineLedger = new AsteriaDeadlineLedger(path);
+        await deadlineLedger.InitializeAsync();
+        var definitionJson = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "definitions", "asteria-release-governance-v5.json"));
+        using var decisionHttp = new HttpClient(new DecisionApiHandler(snapshot =>
+        {
+            var response = JsonNode.Parse(
+                CreatePersistedResponse(snapshot, "AdditionalReviewRequired"))!;
+            response["emergencyApproval"]!["status"] = "Required";
+            return response.ToJsonString();
+        }))
+        {
+            BaseAddress = new Uri("http://decision.test/")
+        };
+        var stateMachine = new AsteriaStateMachineClient(stateHost.Client, TrustedKey);
+        var deadlineCoordinator = new AsteriaDeadlineCoordinator(
+            releaseRegistry,
+            activityLedger,
+            deadlineLedger,
+            stateMachine,
+            new FixedTimeProvider(new DateTimeOffset(2027, 3, 16, 0, 0, 0, TimeSpan.Zero)));
+        var assessment = new AsteriaAssessmentCoordinator(
+            releaseRegistry,
+            stateMachine,
+            new AsteriaDecisionApiClient(decisionHttp),
+            definitionJson,
+            TimeProvider.System,
+            deadlineCoordinator);
+        var assessed = await assessment.ResumeAsync(release.ReleaseId);
+        var verificationDeadline = Assert.Single(await deadlineLedger.ListGenerationAsync(
+            assessed.ReleaseId, assessed.AssessmentGeneration));
+        Assert.Equal("VerificationEscalation", verificationDeadline.DeadlineKind);
+        Assert.Equal(Material.PlannedDeploymentAt.AddHours(-48), verificationDeadline.DueAt);
+
+        var bindings = new Dictionary<string, AsteriaHarnessOperationBinding>(StringComparer.Ordinal)
+        {
+            ["FunctionalVerification"] = new(
+                "synthetic-functional-provider",
+                "11111111-1111-4111-8111-111111111111",
+                "22222222-2222-4222-8222-222222222222",
+                "verify-functional"),
+            ["SecurityVerification"] = new(
+                "synthetic-security-provider",
+                "33333333-3333-4333-8333-333333333333",
+                "44444444-4444-4444-8444-444444444444",
+                "verify-security")
+        };
+        var harnessHandler = new VerificationHarnessHandler(request =>
+        {
+            var body = request.GetProperty("body");
+            var security = request.GetProperty("operationKey").GetString() == "verify-security";
+            return JsonSerializer.Serialize(new
+            {
+                releaseId = body.GetProperty("releaseId").GetString(),
+                assessmentGeneration = body.GetProperty("assessmentGeneration").GetInt32(),
+                materialDigest = body.GetProperty("materialDigest").GetString(),
+                workflowInstanceId = body.GetProperty("workflowInstanceId").GetString(),
+                activityId = body.GetProperty("activityId").GetString(),
+                expectedOperationId = body.GetProperty("expectedOperationId").GetString(),
+                providerId = security
+                    ? "33333333-3333-4333-8333-333333333333"
+                    : "11111111-1111-4111-8111-111111111111",
+                apiDescriptionVersionId = security
+                    ? "44444444-4444-4444-8444-444444444444"
+                    : "22222222-2222-4222-8222-222222222222",
+                operationKey = security ? "verify-security" : "verify-functional",
+                result = "Passed",
+                evidenceId = $"controlled-{(security ? "security" : "functional")}-evidence"
+            });
+        });
+        using var harnessHttp = new HttpClient(harnessHandler) { BaseAddress = new Uri("http://harness.test/") };
+        var verification = new AsteriaVerificationCoordinator(
+            releaseRegistry,
+            activityLedger,
+            stateMachine,
+            harnessHttp,
+            definitionJson,
+            bindings,
+            TimeProvider.System);
+        _ = await verification.ExecuteAsync(assessed.ReleaseId, "FunctionalVerification");
+        _ = await verification.ExecuteAsync(assessed.ReleaseId, "SecurityVerification");
+
+        var approvalRegistry = new AsteriaApprovalRegistry(path);
+        await approvalRegistry.InitializeAsync();
+        var credentialRegistry = new AsteriaApprovalCredentialRegistry(
+            "synthetic-authority-v1",
+            [
+                new("reviewer-1", "ReleaseReviewer", "synthetic-reviewer-token-with-more-than-32-characters"),
+                new("emergency-authoriser-1", "EmergencyReleaseAuthoriser", "synthetic-emergency-token-with-more-than-32-characters")
+            ]);
+        Assert.True(credentialRegistry.TryAuthenticate(
+            "synthetic-reviewer-token-with-more-than-32-characters", out var reviewer));
+        Assert.NotNull(reviewer);
+        Assert.True(credentialRegistry.TryAuthenticate(
+            "synthetic-emergency-token-with-more-than-32-characters", out var emergencyAuthoriser));
+        Assert.NotNull(emergencyAuthoriser);
+        var gateway = new AsteriaApprovalGateway(
+            releaseRegistry,
+            activityLedger,
+            approvalRegistry,
+            credentialRegistry,
+            stateMachine,
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["5.0"] = definitionJson });
+        _ = await gateway.SubmitAsync(
+            reviewer,
+            new AsteriaApprovalSubmission(
+                assessed.ReleaseId,
+                assessed.AssessmentGeneration,
+                assessed.MaterialDigest,
+                "ReleaseReviewApproval",
+                "readiness-review-submission",
+                "readiness-review-idempotency",
+                "Approved",
+                "controlled-review-evidence"));
+        _ = await gateway.SubmitAsync(
+            emergencyAuthoriser,
+            new AsteriaApprovalSubmission(
+                assessed.ReleaseId,
+                assessed.AssessmentGeneration,
+                assessed.MaterialDigest,
+                "EmergencyApproval",
+                "readiness-emergency-submission",
+                "readiness-emergency-idempotency",
+                "Approved",
+                "controlled-emergency-evidence"));
+
+        var readiness = new AsteriaReadinessCoordinator(
+            releaseRegistry,
+            activityLedger,
+            approvalRegistry,
+            stateMachine,
+            new Dictionary<string, string>(StringComparer.Ordinal) { ["5.0"] = definitionJson },
+            bindings,
+            TimeProvider.System);
+        var ready = await readiness.ConfirmAsync(assessed.ReleaseId);
+        Assert.Equal("Accepted", ready.Status);
+        Assert.Equal("Ready", ready.ValidatedOutcome);
+        Assert.Equal("ReadyForDeployment", (await stateMachine.GetInstanceAsync(assessed.WorkflowInstanceId))!.CurrentState);
+
+        var repeated = await readiness.ConfirmAsync(assessed.ReleaseId);
+        Assert.Equal(ready.WorkId, repeated.WorkId);
+        Assert.Equal(ready.ObservationReceiptId, repeated.ObservationReceiptId);
+        Assert.Equal(ready.AcceptedHistoryId, repeated.AcceptedHistoryId);
+        Assert.Equal(2, harnessHandler.RequestCount);
+
+        string? deploymentIdempotencyKey = null;
+        var deploymentHarness = new VerificationHarnessHandler(request =>
+        {
+            var operationKey = request.GetProperty("operationKey").GetString();
+            if (operationKey == "requestDeployment")
+            {
+                var body = request.GetProperty("body");
+                deploymentIdempotencyKey = request.GetProperty("idempotencyKey").GetString();
+                return JsonSerializer.Serialize(new
+                {
+                    deploymentId = "controlled-deployment-1",
+                    idempotencyKey = deploymentIdempotencyKey,
+                    releaseId = body.GetProperty("releaseId").GetString(),
+                    assessmentGeneration = body.GetProperty("assessmentGeneration").GetInt32(),
+                    materialDigest = body.GetProperty("materialDigest").GetString(),
+                    product = body.GetProperty("product").GetString(),
+                    targetVersion = body.GetProperty("targetVersion").GetString(),
+                    environment = body.GetProperty("environment").GetString(),
+                    status = "Pending",
+                    lastUpdatedAt = Now.ToString("O")
+                });
+            }
+            if (operationKey == "getDeploymentStatus" || operationKey == "lookupDeploymentByIdempotencyKey")
+            {
+                return JsonSerializer.Serialize(new
+                {
+                    deploymentId = "controlled-deployment-1",
+                    idempotencyKey = deploymentIdempotencyKey,
+                    releaseId = assessed.ReleaseId,
+                    assessmentGeneration = assessed.AssessmentGeneration,
+                    materialDigest = assessed.MaterialDigest,
+                    product = Material.Product,
+                    targetVersion = Material.TargetVersion,
+                    environment = Material.Environment,
+                    status = "Succeeded",
+                    lastUpdatedAt = Now.AddMinutes(2).ToString("O"),
+                    completedAt = Now.AddMinutes(2).ToString("O"),
+                    evidenceId = "controlled-deployment-evidence-1"
+                });
+            }
+            throw new InvalidOperationException($"Unexpected deployment operation '{operationKey}'.");
+        }, HttpStatusCode.Accepted, request =>
+            request.GetProperty("operationKey").GetString() == "requestDeployment"
+                ? HttpStatusCode.Accepted
+                : HttpStatusCode.OK);
+        using var deploymentHarnessHttp = new HttpClient(deploymentHarness)
+        {
+            BaseAddress = new Uri("http://harness.test/")
+        };
+        var deploymentCoordinator = new AsteriaDeploymentCoordinator(
+            releaseRegistry,
+            activityLedger,
+            stateMachine,
+            deploymentHarnessHttp,
+            definitionJson,
+            new AsteriaDeploymentHarnessBindings(
+                new AsteriaHarnessOperationBinding(
+                    "synthetic-deployment-provider",
+                    "55555555-5555-4555-8555-555555555555",
+                    "66666666-6666-4666-8666-666666666666",
+                    "requestDeployment"),
+                new AsteriaHarnessOperationBinding(
+                    "synthetic-deployment-provider",
+                    "55555555-5555-4555-8555-555555555555",
+                    "66666666-6666-4666-8666-666666666666",
+                    "getDeploymentStatus"),
+                new AsteriaHarnessOperationBinding(
+                    "synthetic-deployment-provider",
+                    "55555555-5555-4555-8555-555555555555",
+                    "66666666-6666-4666-8666-666666666666",
+                    "lookupDeploymentByIdempotencyKey")),
+            TimeProvider.System,
+            deadlineCoordinator);
+        var deployed = await deploymentCoordinator.ExecuteAsync(assessed.ReleaseId);
+        Assert.Equal("Succeeded", deployed.Outcome);
+        Assert.Equal("Accepted", deployed.Activity.Status);
+        Assert.Equal("PostDeploymentVerification", (await stateMachine.GetInstanceAsync(assessed.WorkflowInstanceId))!.CurrentState);
+        Assert.Equal(2, deploymentHarness.RequestCount);
+        var deploymentRetry = await deploymentCoordinator.ExecuteAsync(assessed.ReleaseId);
+        Assert.Equal(deployed.Activity.WorkId, deploymentRetry.Activity.WorkId);
+        Assert.Equal(deployed.Activity.ObservationReceiptId, deploymentRetry.Activity.ObservationReceiptId);
+        Assert.Equal(2, deploymentHarness.RequestCount);
+        var investigationDeadline = await deadlineCoordinator.EnsureDeploymentInvestigationAsync(assessed);
+        Assert.Equal("DeploymentInvestigation", investigationDeadline.DeadlineKind);
+        var deploymentStart = Assert.Single(await stateMachine.ListTransitionHistoryAsync(assessed.WorkflowInstanceId),
+            item => item.GetProperty("transitionId").GetString() == "deployment-start-from-ready");
+        Assert.Equal(
+            DateTimeOffset.Parse(deploymentStart.GetProperty("occurredAt").GetString()!).AddMinutes(30),
+            investigationDeadline.DueAt);
+
+        var healthHarness = new VerificationHarnessHandler(request =>
+        {
+            var query = request.GetProperty("queryParameters");
+            return JsonSerializer.Serialize(new
+            {
+                deploymentId = query.GetProperty("deploymentId").GetString(),
+                observedVersion = query.GetProperty("targetVersion").GetString(),
+                environment = query.GetProperty("environment").GetString(),
+                result = "Passed",
+                checkedAt = Now.AddMinutes(3).ToString("O"),
+                evidenceId = "controlled-health-evidence-1"
+            });
+        });
+        using var healthHarnessHttp = new HttpClient(healthHarness)
+        {
+            BaseAddress = new Uri("http://harness.test/")
+        };
+        var healthCoordinator = new AsteriaHealthVerificationCoordinator(
+            releaseRegistry,
+            activityLedger,
+            stateMachine,
+            healthHarnessHttp,
+            definitionJson,
+            new AsteriaHarnessOperationBinding(
+                "synthetic-health-provider",
+                "77777777-7777-4777-8777-777777777777",
+                "88888888-8888-4888-8888-888888888888",
+                "verifyDeployedApplicationHealth"),
+            TimeProvider.System);
+        var health = await healthCoordinator.ExecuteAsync(assessed.ReleaseId);
+        Assert.Equal("Passed", health.Outcome);
+        Assert.Equal("Accepted", health.Activity.Status);
+        Assert.Equal("Completed", (await stateMachine.GetInstanceAsync(assessed.WorkflowInstanceId))!.CurrentState);
+        Assert.Equal("Passed", (await stateMachine.GetConcernStatesAsync(assessed.WorkflowInstanceId))
+            .Single(item => item.Key == "HealthVerification").Value.CurrentState);
+        var healthRetry = await healthCoordinator.ExecuteAsync(assessed.ReleaseId);
+        Assert.Equal(health.Activity.WorkId, healthRetry.Activity.WorkId);
+        Assert.Equal(health.Activity.ObservationReceiptId, healthRetry.Activity.ObservationReceiptId);
+        Assert.Equal(1, healthHarness.RequestCount);
+        var dueDeadlines = await deadlineCoordinator.ProcessDueAsync(assessed.ReleaseId);
+        Assert.Equal(2, dueDeadlines.Count);
+        Assert.Contains(dueDeadlines, item => item.ProcessingOutcome == "NoEscalationRequired");
+        Assert.Contains(dueDeadlines, item => item.ProcessingOutcome == "ResultAlreadyAccepted");
+        Assert.Empty(await deadlineCoordinator.ProcessDueAsync(assessed.ReleaseId));
+    }
+
+    [Fact]
+    public async Task Cancellation_before_dispatch_is_terminal_and_idempotent()
+    {
+        using var stateHost = new StateMachineTestHost();
+        var path = NewDatabasePath();
+        await using var releaseRegistry = new AsteriaReleaseRegistry(path);
+        var release = await releaseRegistry.CreateReleaseAsync(
+            "AST-V5-CANCEL-BEFORE-DISPATCH-001", Material, Now, "asteria-release-governance", "5.0");
+        var definitionJson = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "definitions", "asteria-release-governance-v5.json"));
+        using var decisionHttp = new HttpClient(new DecisionApiHandler(
+            snapshot => CreatePersistedResponse(snapshot, "AdditionalReviewRequired")))
+        {
+            BaseAddress = new Uri("http://decision.test/")
+        };
+        var stateMachine = new AsteriaStateMachineClient(stateHost.Client, TrustedKey);
+        var assessment = await new AsteriaAssessmentCoordinator(
+            releaseRegistry,
+            stateMachine,
+            new AsteriaDecisionApiClient(decisionHttp),
+            definitionJson).ResumeAsync(release.ReleaseId);
+        await using var activityLedger = new AsteriaActivityLedger(path);
+        await activityLedger.InitializeAsync();
+        var cancellation = new AsteriaCancellationCoordinator(
+            releaseRegistry, activityLedger, stateMachine);
+
+        var result = await cancellation.CancelAsync(assessment.ReleaseId);
+
+        Assert.Equal("CancelledBeforeExternalDispatch", result.Disposition);
+        Assert.Equal("Cancelled", result.ParentState);
+        Assert.Equal("Requested", result.CancellationIntentState);
+        var repeated = await cancellation.CancelAsync(assessment.ReleaseId);
+        Assert.Equal(result, repeated);
+        Assert.Empty(await activityLedger.ListGenerationAsync(
+            assessment.ReleaseId, assessment.AssessmentGeneration));
     }
 
     [Fact]
@@ -572,6 +1608,89 @@ public sealed class AsteriaMilestone3BTests
 
     private static string NewDatabasePath() =>
         Path.Combine(Path.GetTempPath(), $"asteria-m3b-{Guid.NewGuid():N}.db");
+
+    private static AsteriaActivityReservation CreateActivityReservation(
+        AsteriaReleaseSnapshot release,
+        string suffix) =>
+        new(
+            $"work-{suffix}",
+            $"activity-{suffix}",
+            release.ReleaseId,
+            release.AssessmentGeneration,
+            release.MaterialDigest,
+            release.WorkflowInstanceId,
+            release.DefinitionId,
+            release.DefinitionVersion,
+            AsteriaActivityLedger.Fingerprint(release.DefinitionVersion),
+            "FunctionalVerification",
+            "Verification",
+            $"attempt-{suffix}",
+            $"operation-{suffix}",
+            release.Work.ParentRevision ?? 1,
+            1,
+            $"submission-{suffix}",
+            $"idempotency-{suffix}",
+            """{"provider":"synthetic"}""",
+            "synthetic-provider",
+            "api-description-v1",
+            "verify",
+            null,
+            null,
+            null);
+
+    private static long ConcernRevision(JsonElement projection, string concernId) =>
+        projection.GetProperty("concerns").EnumerateArray()
+            .Single(item => item.GetProperty("concernId").GetString() == concernId)
+            .GetProperty("revision").GetInt64();
+
+    private static string? ConcernState(JsonElement projection, string concernId) =>
+        projection.GetProperty("concerns").EnumerateArray()
+            .Single(item => item.GetProperty("concernId").GetString() == concernId)
+            .GetProperty("currentState").GetString();
+
+    private sealed class FixedTimeProvider(DateTimeOffset utcNow) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => utcNow;
+    }
+
+    private sealed class VerificationHarnessHandler(
+        Func<JsonElement, string> providerResponseFactory,
+        HttpStatusCode providerStatusCode = HttpStatusCode.OK,
+        Func<JsonElement, HttpStatusCode>? providerStatusCodeFactory = null) : HttpMessageHandler
+    {
+        public int RequestCount { get; private set; }
+
+        protected override async Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            RequestCount++;
+            if (request.Method != HttpMethod.Post ||
+                request.RequestUri?.AbsolutePath != "/executions")
+            {
+                throw new HttpRequestException("Unexpected controlled Generic Harness route.");
+            }
+            using var requestDocument = JsonDocument.Parse(
+                await request.Content!.ReadAsStringAsync(cancellationToken));
+            var requestRoot = requestDocument.RootElement;
+            var providerBody = providerResponseFactory(requestRoot);
+            var statusCode = providerStatusCodeFactory?.Invoke(requestRoot) ?? providerStatusCode;
+            return new HttpResponseMessage(HttpStatusCode.Created)
+            {
+                Content = JsonContent.Create(new
+                {
+                    execution = new { id = Guid.NewGuid().ToString(), state = 2 },
+                    providerResponse = new
+                    {
+                        statusCode = (int)statusCode,
+                        contentType = "application/json",
+                        body = providerBody,
+                        truncated = false
+                    }
+                })
+            };
+        }
+    }
 
     private sealed class DecisionApiHandler(Func<AsteriaReleaseSnapshot, string> responseFactory) : HttpMessageHandler
     {

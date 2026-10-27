@@ -9,7 +9,8 @@ public sealed class AsteriaAssessmentCoordinator(
     AsteriaStateMachineClient stateMachine,
     AsteriaDecisionApiClient decisionApi,
     string definitionJson,
-    TimeProvider? timeProvider = null)
+    TimeProvider? timeProvider = null,
+    AsteriaDeadlineCoordinator? deadlineCoordinator = null)
 {
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private static readonly TimeSpan LeaseDuration = TimeSpan.FromSeconds(30);
@@ -38,7 +39,7 @@ public sealed class AsteriaAssessmentCoordinator(
             await AssertAdmissionAsync(release, leaseToken, phaseToken);
             if (release.Status == "Accepted")
             {
-                return release;
+                return await EnsureEscalationDeadlineAsync(release, phaseToken);
             }
             await stateMachine.EnsureDefinitionAsync(definitionJson, phaseToken);
             await AssertAdmissionAsync(release, leaseToken, phaseToken);
@@ -83,7 +84,7 @@ public sealed class AsteriaAssessmentCoordinator(
             await AssertAdmissionAsync(currentRelease, leaseToken, phaseToken);
             if (currentRelease.Status == "Accepted")
             {
-                return currentRelease;
+                return await EnsureEscalationDeadlineAsync(currentRelease, phaseToken);
             }
 
             await stateMachine.EnsureDefinitionAsync(definitionJson, phaseToken);
@@ -187,14 +188,35 @@ public sealed class AsteriaAssessmentCoordinator(
             }
 
             await AssertAdmissionAsync(currentRelease, leaseToken, phaseToken);
+            if (currentRelease.DefinitionVersion is "4.0" or "5.0")
+            {
+                await stateMachine.ApplyAssessmentApplicabilitiesAsync(
+                    currentRelease,
+                    assessment,
+                    token => AssertAdmissionAsync(currentRelease, leaseToken, token),
+                    phaseToken);
+            }
+            await AssertAdmissionAsync(currentRelease, leaseToken, phaseToken);
             _ = await stateMachine.TryAcceptObservationAsync(currentRelease, assessment, phaseToken);
             await registry.AdvanceStatusAsync(
                 releaseId, "Accepted", _timeProvider.GetUtcNow(), phaseToken);
             await registry.UpdateRecoveryMetadataAsync(
                 releaseId, Metadata("observation-accepted-and-acknowledged", currentRelease.Work.ParentRevision, assessment.Outcome),
                 _timeProvider.GetUtcNow(), phaseToken);
-            return await ReloadAsync(releaseId, phaseToken);
+            return await EnsureEscalationDeadlineAsync(
+                await ReloadAsync(releaseId, phaseToken), phaseToken);
         }, cancellationToken);
+    }
+
+    private async Task<AsteriaReleaseSnapshot> EnsureEscalationDeadlineAsync(
+        AsteriaReleaseSnapshot release,
+        CancellationToken cancellationToken)
+    {
+        if (deadlineCoordinator is not null && release.DefinitionVersion == "5.0")
+        {
+            _ = await deadlineCoordinator.EnsureVerificationEscalationAsync(release, cancellationToken);
+        }
+        return release;
     }
 
     private async Task<T> WithLeaseAsync<T>(

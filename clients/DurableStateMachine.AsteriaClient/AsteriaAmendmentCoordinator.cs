@@ -21,9 +21,9 @@ public sealed class AsteriaAmendmentCoordinator(
         AsteriaReleaseMaterial material,
         CancellationToken cancellationToken = default)
     {
-        if (_definitionIdentity.DefinitionVersion != "3.0")
+        if (_definitionIdentity.DefinitionVersion is not ("3.0" or "4.0" or "5.0"))
         {
-            throw new InvalidDataException("Asteria amendments require the immutable Asteria definition V3.");
+            throw new InvalidDataException("Asteria amendments require an immutable definition with the supported supersession transition.");
         }
 
         var oldGeneration = await registry.GetGenerationAsync(

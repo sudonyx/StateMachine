@@ -1708,12 +1708,14 @@ public sealed class MachineStore(
             else if (inputKind == "Command" &&
                 !definition.InputPolicy.Commands.TryGetValue(inputType, out _))
             {
+                message.Status = "Unexpected";
                 message.ReasonCode = "unexpected-command";
                 message.Explanation = $"Command '{inputType}' is not declared by this machine definition.";
             }
             else if (inputKind == "Observation" &&
                 !definition.InputPolicy.Observations.TryGetValue(inputType, out _))
             {
+                message.Status = "Unexpected";
                 message.ReasonCode = "unexpected-observation";
                 message.Explanation = $"Observation '{inputType}' is not declared by this machine definition.";
             }

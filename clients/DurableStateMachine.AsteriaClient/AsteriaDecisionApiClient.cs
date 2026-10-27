@@ -21,6 +21,12 @@ public sealed record AsteriaValidatedAssessment(
     string BusinessEffectiveAt,
     DateTimeOffset KnownAt);
 
+public sealed record AsteriaObligationApplicabilities(
+    string FunctionalVerification,
+    string SecurityVerification,
+    string ReleaseReviewApproval,
+    string EmergencyApproval);
+
 public sealed class AsteriaDecisionApiClient(HttpClient httpClient)
 {
     public const string DecisionSourceIdentity = "Asteria Decision API";
@@ -296,6 +302,29 @@ public sealed class AsteriaDecisionApiClient(HttpClient httpClient)
             unavailableFacts,
             businessEffectiveAt,
             knownAt);
+    }
+
+    public static AsteriaObligationApplicabilities ReadObligationApplicabilities(
+        AsteriaValidatedAssessment assessment)
+    {
+        ArgumentNullException.ThrowIfNull(assessment);
+        using var document = JsonDocument.Parse(assessment.OriginalResponseJson);
+        var root = document.RootElement;
+        return new AsteriaObligationApplicabilities(
+            ReadStatus(root, "functionalVerification"),
+            ReadStatus(root, "securityVerification"),
+            ReadStatus(root, "releaseReviewApproval"),
+            ReadStatus(root, "emergencyApproval"));
+    }
+
+    private static string ReadStatus(JsonElement root, string name)
+    {
+        var obligation = GetRequired(root, name);
+        if (obligation.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException($"Decision API field '{name}' must be an object.");
+        }
+        return GetString(obligation, "status");
     }
 
     private static Dictionary<string, object> ExpectedFacts(AsteriaReleaseSnapshot release)
