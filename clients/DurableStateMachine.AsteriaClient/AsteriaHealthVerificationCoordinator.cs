@@ -319,7 +319,7 @@ public sealed class AsteriaHealthVerificationCoordinator(
                 cancellationToken);
             var providerResponse = GetObject(root, "providerResponse");
             var statusCode = Integer(providerResponse, "statusCode");
-            var body = String(providerResponse, "body");
+            var body = AsteriaHarnessResponseBody.Read(providerResponse);
             var archive = JsonSerializer.Serialize(new
             {
                 statusCode,

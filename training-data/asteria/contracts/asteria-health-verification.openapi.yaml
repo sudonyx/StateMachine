@@ -6,7 +6,7 @@ info:
     be correlated to the exact deployment, version and environment. This API does
     not change deployment state.
 servers:
-- url: http://localhost:5272
+- url: http://127.0.0.1:5272
   description: Illustrative synthetic provider address
 paths:
   /health-verifications:

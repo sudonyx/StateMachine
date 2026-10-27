@@ -407,10 +407,10 @@ public sealed class AsteriaReadinessCoordinator(
             throw new InvalidDataException($"Accepted Asteria work '{activity.WorkId}' has no matching State Machine receipt.");
         }
         var observationEvidence = GetObject(receipt, "evidence");
-        if (GetString(observationEvidence, "activityId") != activity.ActivityId ||
-            GetString(observationEvidence, "expectedOperationId") != activity.ExpectedOperationId ||
-            GetString(observationEvidence, "result") != activity.ValidatedOutcome ||
-            GetString(observationEvidence, "evidenceDigest") != activity.ValidatedEvidenceDigest)
+        if (        GetString(observationEvidence, "activityId") != activity.ActivityId ||
+        GetString(observationEvidence, "expectedOperationId") != activity.ExpectedOperationId ||
+        GetString(observationEvidence, "result") != activity.ValidatedOutcome ||
+        GetString(observationEvidence, "evidenceDigest") != activity.ValidatedEvidenceDigest)
         {
             throw new InvalidDataException($"Accepted Asteria work '{activity.WorkId}' receipt has conflicting result evidence.");
         }
@@ -439,9 +439,6 @@ public sealed class AsteriaReadinessCoordinator(
                 GetString(result, "workflowInstanceId") != activity.WorkflowInstanceId ||
                 GetString(result, "activityId") != activity.ActivityId ||
                 GetString(result, "expectedOperationId") != activity.ExpectedOperationId ||
-                GetString(result, "providerId") != binding.ProviderId ||
-                GetString(result, "apiDescriptionVersionId") != activity.ApiDescriptionVersionId ||
-                GetString(result, "operationKey") != activity.OperationKey ||
                 GetString(result, "result") != activity.ValidatedOutcome ||
                 string.IsNullOrWhiteSpace(GetString(result, "evidenceId")))
             {

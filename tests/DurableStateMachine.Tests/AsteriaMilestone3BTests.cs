@@ -697,6 +697,108 @@ public sealed class AsteriaMilestone3BTests
         Assert.Equal(1, handler.RequestCount);
     }
 
+    [Theory]
+    [InlineData("malformed-json")]
+    [InlineData("wrong-release")]
+    [InlineData("wrong-generation")]
+    [InlineData("wrong-activity")]
+    [InlineData("unsupported-result")]
+    [InlineData("missing-evidence")]
+    public async Task V5_verification_refuses_malformed_or_mismatched_provider_evidence(string invalidCase)
+    {
+        using var stateHost = new StateMachineTestHost();
+        var path = NewDatabasePath();
+        await using var registry = new AsteriaReleaseRegistry(path);
+        var release = await registry.CreateReleaseAsync(
+            $"AST-V5-VERIFICATION-INVALID-{invalidCase}",
+            Material,
+            Now,
+            "asteria-release-governance",
+            "5.0");
+        var definitionJson = File.ReadAllText(Path.Combine(
+            AppContext.BaseDirectory, "definitions", "asteria-release-governance-v5.json"));
+        using var decisionHttp = new HttpClient(new DecisionApiHandler(
+            snapshot => CreatePersistedResponse(snapshot, "AdditionalReviewRequired")))
+        {
+            BaseAddress = new Uri("http://decision.test/")
+        };
+        var stateMachine = new AsteriaStateMachineClient(stateHost.Client, TrustedKey);
+        var assessment = new AsteriaAssessmentCoordinator(
+            registry,
+            stateMachine,
+            new AsteriaDecisionApiClient(decisionHttp),
+            definitionJson,
+            TimeProvider.System);
+        var assessed = await assessment.ResumeAsync(release.ReleaseId);
+        const string providerId = "11111111-1111-4111-8111-111111111111";
+        const string apiDescriptionId = "22222222-2222-4222-8222-222222222222";
+        var handler = new VerificationHarnessHandler(request =>
+        {
+            var body = request.GetProperty("body");
+            if (invalidCase == "malformed-json")
+            {
+                return "{";
+            }
+            var response = new JsonObject
+            {
+                ["releaseId"] = body.GetProperty("releaseId").GetString(),
+                ["assessmentGeneration"] = body.GetProperty("assessmentGeneration").GetInt32(),
+                ["materialDigest"] = body.GetProperty("materialDigest").GetString(),
+                ["workflowInstanceId"] = body.GetProperty("workflowInstanceId").GetString(),
+                ["activityId"] = body.GetProperty("activityId").GetString(),
+                ["expectedOperationId"] = body.GetProperty("expectedOperationId").GetString(),
+                ["result"] = "Passed",
+                ["evidenceId"] = "controlled-verification-evidence"
+            };
+            switch (invalidCase)
+            {
+                case "wrong-release":
+                    response["releaseId"] = "AST-OTHER-RELEASE";
+                    break;
+                case "wrong-generation":
+                    response["assessmentGeneration"] = 2;
+                    break;
+                case "wrong-activity":
+                    response["activityId"] = Guid.NewGuid().ToString();
+                    break;
+                case "unsupported-result":
+                    response["result"] = "Skipped";
+                    break;
+                case "missing-evidence":
+                    response.Remove("evidenceId");
+                    break;
+            }
+            return response.ToJsonString();
+        });
+        using var harnessHttp = new HttpClient(handler) { BaseAddress = new Uri("http://harness.test/") };
+        await using var ledger = new AsteriaActivityLedger(path);
+        var verification = new AsteriaVerificationCoordinator(
+            registry,
+            ledger,
+            stateMachine,
+            harnessHttp,
+            definitionJson,
+            new Dictionary<string, AsteriaHarnessOperationBinding>(StringComparer.Ordinal)
+            {
+                ["FunctionalVerification"] = new(
+                    "synthetic-functional-provider",
+                    providerId,
+                    apiDescriptionId,
+                    "verify-functional")
+            },
+            TimeProvider.System);
+
+        await Assert.ThrowsAsync<InvalidDataException>(() =>
+            verification.ExecuteAsync(assessed.ReleaseId, "FunctionalVerification"));
+
+        var activity = Assert.Single(await ledger.ListGenerationAsync(assessed.ReleaseId, 1));
+        Assert.Equal("Refused", activity.Status);
+        Assert.Null(activity.ValidatedOutcome);
+        Assert.Equal(1, handler.RequestCount);
+        var concerns = await stateMachine.GetConcernStatesAsync(assessed.WorkflowInstanceId);
+        Assert.Equal("Requested", concerns["FunctionalVerification"].CurrentState);
+    }
+
     [Fact]
     public async Task Approval_gateway_authenticates_roles_and_preserves_immutable_decisions()
     {
@@ -856,8 +958,26 @@ public sealed class AsteriaMilestone3BTests
             .Count(activity => activity.Status == "Accepted"));
     }
 
-    [Fact]
-    public async Task Readiness_requires_all_current_generation_evidence_and_is_idempotent()
+    [Theory]
+    [InlineData(false, "Passed", "none", false, false, false, "Succeeded")]
+    [InlineData(true, "Passed", "none", false, false, false, "Succeeded")]
+    [InlineData(false, "Failed", "none", false, false, false, "Succeeded")]
+    [InlineData(false, "Indeterminate", "none", false, false, false, "Succeeded")]
+    [InlineData(false, "Passed", "wrong-deployment", false, false, false, "Succeeded")]
+    [InlineData(false, "Passed", "wrong-version", false, false, false, "Succeeded")]
+    [InlineData(false, "Passed", "none", true, false, false, "Succeeded")]
+    [InlineData(false, "Passed", "none", false, true, false, "Succeeded")]
+    [InlineData(true, "Passed", "none", false, false, true, "Succeeded")]
+    [InlineData(false, "Passed", "none", false, false, false, "Failed")]
+    [InlineData(false, "Passed", "none", false, false, false, "Pending")]
+    public async Task Readiness_and_post_deployment_results_preserve_current_generation_evidence(
+        bool loseDeploymentAcknowledgement,
+        string healthOutcome,
+        string healthMismatch,
+        bool cancelAfterDeployment,
+        bool cancelAtReadiness,
+        bool restartAfterLostDeploymentAcknowledgement,
+        string deploymentTerminalStatus)
     {
         using var stateHost = new StateMachineTestHost();
         var path = NewDatabasePath();
@@ -899,7 +1019,6 @@ public sealed class AsteriaMilestone3BTests
             assessed.ReleaseId, assessed.AssessmentGeneration));
         Assert.Equal("VerificationEscalation", verificationDeadline.DeadlineKind);
         Assert.Equal(Material.PlannedDeploymentAt.AddHours(-48), verificationDeadline.DueAt);
-
         var bindings = new Dictionary<string, AsteriaHarnessOperationBinding>(StringComparer.Ordinal)
         {
             ["FunctionalVerification"] = new(
@@ -1010,15 +1129,36 @@ public sealed class AsteriaMilestone3BTests
         Assert.Equal(ready.ObservationReceiptId, repeated.ObservationReceiptId);
         Assert.Equal(ready.AcceptedHistoryId, repeated.AcceptedHistoryId);
         Assert.Equal(2, harnessHandler.RequestCount);
+        if (cancelAtReadiness)
+        {
+            var cancellation = new AsteriaCancellationCoordinator(
+                releaseRegistry, activityLedger, stateMachine);
+            var cancelled = await cancellation.CancelAsync(assessed.ReleaseId);
+            Assert.Equal("CancelledBeforeExternalDispatch", cancelled.Disposition);
+            Assert.Equal("Cancelled", cancelled.ParentState);
+            Assert.Equal("Requested", cancelled.CancellationIntentState);
+            Assert.Equal(cancelled, await cancellation.CancelAsync(assessed.ReleaseId));
+            Assert.DoesNotContain(
+                await activityLedger.ListGenerationAsync(assessed.ReleaseId, assessed.AssessmentGeneration),
+                item => item.ConcernId == "Deployment");
+            return;
+        }
 
         string? deploymentIdempotencyKey = null;
+        var deploymentStatusLookups = 0;
+        var deploymentMutationAttempts = 0;
         var deploymentHarness = new VerificationHarnessHandler(request =>
         {
             var operationKey = request.GetProperty("operationKey").GetString();
             if (operationKey == "requestDeployment")
             {
+                deploymentMutationAttempts++;
                 var body = request.GetProperty("body");
                 deploymentIdempotencyKey = request.GetProperty("idempotencyKey").GetString();
+                if (loseDeploymentAcknowledgement)
+                {
+                    throw new HttpRequestException("Controlled lost deployment acknowledgement.");
+                }
                 return JsonSerializer.Serialize(new
                 {
                     deploymentId = "controlled-deployment-1",
@@ -1035,6 +1175,16 @@ public sealed class AsteriaMilestone3BTests
             }
             if (operationKey == "getDeploymentStatus" || operationKey == "lookupDeploymentByIdempotencyKey")
             {
+                var lookupNumber = Interlocked.Increment(ref deploymentStatusLookups);
+                if (restartAfterLostDeploymentAcknowledgement && lookupNumber == 1)
+                {
+                    throw new HttpRequestException("Controlled status lookup outage before coordinator restart.");
+                }
+                var status = deploymentTerminalStatus == "Pending"
+                    ? "Pending"
+                    : lookupNumber == 1
+                        ? "Pending"
+                        : deploymentTerminalStatus;
                 return JsonSerializer.Serialize(new
                 {
                     deploymentId = "controlled-deployment-1",
@@ -1045,10 +1195,10 @@ public sealed class AsteriaMilestone3BTests
                     product = Material.Product,
                     targetVersion = Material.TargetVersion,
                     environment = Material.Environment,
-                    status = "Succeeded",
-                    lastUpdatedAt = Now.AddMinutes(2).ToString("O"),
-                    completedAt = Now.AddMinutes(2).ToString("O"),
-                    evidenceId = "controlled-deployment-evidence-1"
+                    status,
+                    lastUpdatedAt = Now.AddMinutes(deploymentStatusLookups + 1).ToString("O"),
+                    completedAt = status == "Succeeded" ? Now.AddMinutes(2).ToString("O") : null,
+                    evidenceId = status == "Succeeded" ? "controlled-deployment-evidence-1" : null
                 });
             }
             throw new InvalidOperationException($"Unexpected deployment operation '{operationKey}'.");
@@ -1060,39 +1210,122 @@ public sealed class AsteriaMilestone3BTests
         {
             BaseAddress = new Uri("http://harness.test/")
         };
+        var deploymentBindings = new AsteriaDeploymentHarnessBindings(
+            new AsteriaHarnessOperationBinding(
+                "synthetic-deployment-provider",
+                "55555555-5555-4555-8555-555555555555",
+                "66666666-6666-4666-8666-666666666666",
+                "requestDeployment"),
+            new AsteriaHarnessOperationBinding(
+                "synthetic-deployment-provider",
+                "55555555-5555-4555-8555-555555555555",
+                "66666666-6666-4666-8666-666666666666",
+                "getDeploymentStatus"),
+            new AsteriaHarnessOperationBinding(
+                "synthetic-deployment-provider",
+                "55555555-5555-4555-8555-555555555555",
+                "66666666-6666-4666-8666-666666666666",
+                "lookupDeploymentByIdempotencyKey"));
         var deploymentCoordinator = new AsteriaDeploymentCoordinator(
             releaseRegistry,
             activityLedger,
             stateMachine,
             deploymentHarnessHttp,
             definitionJson,
-            new AsteriaDeploymentHarnessBindings(
-                new AsteriaHarnessOperationBinding(
-                    "synthetic-deployment-provider",
-                    "55555555-5555-4555-8555-555555555555",
-                    "66666666-6666-4666-8666-666666666666",
-                    "requestDeployment"),
-                new AsteriaHarnessOperationBinding(
-                    "synthetic-deployment-provider",
-                    "55555555-5555-4555-8555-555555555555",
-                    "66666666-6666-4666-8666-666666666666",
-                    "getDeploymentStatus"),
-                new AsteriaHarnessOperationBinding(
-                    "synthetic-deployment-provider",
-                    "55555555-5555-4555-8555-555555555555",
-                    "66666666-6666-4666-8666-666666666666",
-                    "lookupDeploymentByIdempotencyKey")),
+            deploymentBindings,
             TimeProvider.System,
             deadlineCoordinator);
-        var deployed = await deploymentCoordinator.ExecuteAsync(assessed.ReleaseId);
+        if (deploymentTerminalStatus == "Pending")
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                deploymentCoordinator.ExecuteAsync(assessed.ReleaseId));
+            var unresolved = Assert.Single(
+                await activityLedger.ListGenerationAsync(assessed.ReleaseId, assessed.AssessmentGeneration),
+                item => item.ConcernId == "Deployment");
+            Assert.Equal("OutcomeUnknown", unresolved.Status);
+            Assert.Null(unresolved.ValidatedOutcome);
+            Assert.Equal(1, deploymentMutationAttempts);
+            Assert.Equal(100, deploymentStatusLookups);
+            Assert.Equal(101, deploymentHarness.RequestCount);
+            Assert.Equal(
+                "DeploymentInProgress",
+                (await stateMachine.GetInstanceAsync(assessed.WorkflowInstanceId))!.CurrentState);
+            return;
+        }
+        AsteriaDeploymentResult deployed;
+        if (restartAfterLostDeploymentAcknowledgement)
+        {
+            await Assert.ThrowsAsync<HttpRequestException>(() =>
+                deploymentCoordinator.ExecuteAsync(assessed.ReleaseId));
+            var unknownDeployment = Assert.Single(
+                await activityLedger.ListGenerationAsync(assessed.ReleaseId, assessed.AssessmentGeneration),
+                item => item.ConcernId == "Deployment");
+            Assert.Equal("OutcomeUnknown", unknownDeployment.Status);
+            Assert.Equal(1, deploymentMutationAttempts);
+            var restartedHarness = new VerificationHarnessHandler(request =>
+            {
+                var pathParameters = request.GetProperty("pathParameters");
+                Assert.Equal(
+                    "lookupDeploymentByIdempotencyKey",
+                    request.GetProperty("operationKey").GetString());
+                return JsonSerializer.Serialize(new
+                {
+                    deploymentId = "controlled-deployment-1",
+                    idempotencyKey = pathParameters.GetProperty("idempotencyKey").GetString(),
+                    releaseId = assessed.ReleaseId,
+                    assessmentGeneration = assessed.AssessmentGeneration,
+                    materialDigest = assessed.MaterialDigest,
+                    product = Material.Product,
+                    targetVersion = Material.TargetVersion,
+                    environment = Material.Environment,
+                    status = "Succeeded",
+                    lastUpdatedAt = Now.AddMinutes(2).ToString("O"),
+                    completedAt = Now.AddMinutes(2).ToString("O"),
+                    evidenceId = "controlled-deployment-evidence-after-restart"
+                });
+            });
+            using var restartedHarnessHttp = new HttpClient(restartedHarness)
+            {
+                BaseAddress = new Uri("http://harness.test/")
+            };
+            var restartedCoordinator = new AsteriaDeploymentCoordinator(
+                releaseRegistry,
+                activityLedger,
+                stateMachine,
+                restartedHarnessHttp,
+                definitionJson,
+                deploymentBindings,
+                TimeProvider.System,
+                deadlineCoordinator);
+            deployed = await restartedCoordinator.ExecuteAsync(assessed.ReleaseId);
+            Assert.Equal(1, restartedHarness.RequestCount);
+        }
+        else
+        {
+            deployed = await deploymentCoordinator.ExecuteAsync(assessed.ReleaseId);
+        }
+        if (deploymentTerminalStatus == "Failed")
+        {
+            Assert.Equal("Failed", deployed.Outcome);
+            Assert.Equal("Accepted", deployed.Activity.Status);
+            Assert.Equal(
+                "DeploymentFailed",
+                (await stateMachine.GetInstanceAsync(assessed.WorkflowInstanceId))!.CurrentState);
+            var failedRetry = await deploymentCoordinator.ExecuteAsync(assessed.ReleaseId);
+            Assert.Equal(deployed.Activity.ObservationReceiptId, failedRetry.Activity.ObservationReceiptId);
+            Assert.Equal(3, deploymentHarness.RequestCount);
+            return;
+        }
         Assert.Equal("Succeeded", deployed.Outcome);
         Assert.Equal("Accepted", deployed.Activity.Status);
+        Assert.Equal(1, deploymentMutationAttempts);
+        Assert.Equal(restartAfterLostDeploymentAcknowledgement ? 1 : 2, deploymentStatusLookups);
         Assert.Equal("PostDeploymentVerification", (await stateMachine.GetInstanceAsync(assessed.WorkflowInstanceId))!.CurrentState);
-        Assert.Equal(2, deploymentHarness.RequestCount);
+        Assert.Equal(restartAfterLostDeploymentAcknowledgement ? 2 : 3, deploymentHarness.RequestCount);
         var deploymentRetry = await deploymentCoordinator.ExecuteAsync(assessed.ReleaseId);
         Assert.Equal(deployed.Activity.WorkId, deploymentRetry.Activity.WorkId);
         Assert.Equal(deployed.Activity.ObservationReceiptId, deploymentRetry.Activity.ObservationReceiptId);
-        Assert.Equal(2, deploymentHarness.RequestCount);
+        Assert.Equal(restartAfterLostDeploymentAcknowledgement ? 2 : 3, deploymentHarness.RequestCount);
         var investigationDeadline = await deadlineCoordinator.EnsureDeploymentInvestigationAsync(assessed);
         Assert.Equal("DeploymentInvestigation", investigationDeadline.DeadlineKind);
         var deploymentStart = Assert.Single(await stateMachine.ListTransitionHistoryAsync(assessed.WorkflowInstanceId),
@@ -1106,10 +1339,14 @@ public sealed class AsteriaMilestone3BTests
             var query = request.GetProperty("queryParameters");
             return JsonSerializer.Serialize(new
             {
-                deploymentId = query.GetProperty("deploymentId").GetString(),
-                observedVersion = query.GetProperty("targetVersion").GetString(),
+                deploymentId = healthMismatch == "wrong-deployment"
+                    ? "controlled-other-deployment"
+                    : query.GetProperty("deploymentId").GetString(),
+                observedVersion = healthMismatch == "wrong-version"
+                    ? "9.9.9"
+                    : query.GetProperty("targetVersion").GetString(),
                 environment = query.GetProperty("environment").GetString(),
-                result = "Passed",
+                result = healthOutcome,
                 checkedAt = Now.AddMinutes(3).ToString("O"),
                 evidenceId = "controlled-health-evidence-1"
             });
@@ -1130,11 +1367,55 @@ public sealed class AsteriaMilestone3BTests
                 "88888888-8888-4888-8888-888888888888",
                 "verifyDeployedApplicationHealth"),
             TimeProvider.System);
+        if (cancelAfterDeployment)
+        {
+            var cancellation = new AsteriaCancellationCoordinator(
+                releaseRegistry, activityLedger, stateMachine);
+            var cancelled = await cancellation.CancelAsync(assessed.ReleaseId);
+            Assert.Equal(
+                "CancellationIntentRecorded; external deployment is not cancelled or rolled back.",
+                cancelled.Disposition);
+            Assert.Equal("PostDeploymentVerification", cancelled.ParentState);
+            Assert.Equal("Requested", cancelled.CancellationIntentState);
+            Assert.Equal(cancelled, await cancellation.CancelAsync(assessed.ReleaseId));
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                healthCoordinator.ExecuteAsync(assessed.ReleaseId));
+            Assert.DoesNotContain(
+                await activityLedger.ListGenerationAsync(assessed.ReleaseId, assessed.AssessmentGeneration),
+                item => item.ConcernId == "HealthVerification");
+            Assert.Equal(0, healthHarness.RequestCount);
+            Assert.Equal(
+                "PostDeploymentVerification",
+                (await stateMachine.GetInstanceAsync(assessed.WorkflowInstanceId))!.CurrentState);
+            return;
+        }
+        if (healthMismatch != "none")
+        {
+            await Assert.ThrowsAsync<InvalidDataException>(() =>
+                healthCoordinator.ExecuteAsync(assessed.ReleaseId));
+            var refusedHealth = Assert.Single(
+                await activityLedger.ListGenerationAsync(assessed.ReleaseId, assessed.AssessmentGeneration),
+                item => item.ConcernId == "HealthVerification");
+            Assert.Equal("Refused", refusedHealth.Status);
+            Assert.Equal(
+                "PostDeploymentVerification",
+                (await stateMachine.GetInstanceAsync(assessed.WorkflowInstanceId))!.CurrentState);
+            await Assert.ThrowsAsync<InvalidOperationException>(() =>
+                healthCoordinator.ExecuteAsync(assessed.ReleaseId));
+            Assert.Equal(1, healthHarness.RequestCount);
+            return;
+        }
         var health = await healthCoordinator.ExecuteAsync(assessed.ReleaseId);
-        Assert.Equal("Passed", health.Outcome);
+        Assert.Equal(healthOutcome, health.Outcome);
         Assert.Equal("Accepted", health.Activity.Status);
-        Assert.Equal("Completed", (await stateMachine.GetInstanceAsync(assessed.WorkflowInstanceId))!.CurrentState);
-        Assert.Equal("Passed", (await stateMachine.GetConcernStatesAsync(assessed.WorkflowInstanceId))
+        var expectedFinalState = healthOutcome switch
+        {
+            "Passed" => "Completed",
+            "Failed" => "HealthFailed",
+            _ => "HealthUnresolved"
+        };
+        Assert.Equal(expectedFinalState, (await stateMachine.GetInstanceAsync(assessed.WorkflowInstanceId))!.CurrentState);
+        Assert.Equal(healthOutcome, (await stateMachine.GetConcernStatesAsync(assessed.WorkflowInstanceId))
             .Single(item => item.Key == "HealthVerification").Value.CurrentState);
         var healthRetry = await healthCoordinator.ExecuteAsync(assessed.ReleaseId);
         Assert.Equal(health.Activity.WorkId, healthRetry.Activity.WorkId);
@@ -1679,7 +1960,14 @@ public sealed class AsteriaMilestone3BTests
             {
                 Content = JsonContent.Create(new
                 {
-                    execution = new { id = Guid.NewGuid().ToString(), state = 2 },
+                    execution = new
+                    {
+                        id = Guid.NewGuid().ToString(),
+                        state = 2,
+                        providerId = requestRoot.GetProperty("providerId").GetString(),
+                        apiDescriptionVersionId = requestRoot.GetProperty("apiDescriptionVersionId").GetString(),
+                        operationKey = requestRoot.GetProperty("operationKey").GetString()
+                    },
                     providerResponse = new
                     {
                         statusCode = (int)statusCode,

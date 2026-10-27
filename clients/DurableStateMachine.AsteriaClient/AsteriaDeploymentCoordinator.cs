@@ -49,6 +49,8 @@ public sealed class AsteriaDeploymentCoordinator(
         "evidenceDigest"
     ];
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
+    private const int MaxDeploymentStatusLookups = 100;
+    private static readonly TimeSpan DeploymentStatusPollInterval = TimeSpan.FromMilliseconds(100);
     private readonly TimeProvider _timeProvider = timeProvider ?? TimeProvider.System;
     private readonly string _definitionDigest = AsteriaActivityLedger.Fingerprint(definitionJson);
 
@@ -363,7 +365,7 @@ public sealed class AsteriaDeploymentCoordinator(
             {
                 statusCode = GetInt32(providerResponse, "statusCode"),
                 contentType = GetNullableString(providerResponse, "contentType"),
-                body = GetString(providerResponse, "body"),
+                body = AsteriaHarnessResponseBody.Read(providerResponse),
                 truncated = GetBoolean(providerResponse, "truncated")
             }, JsonOptions);
             activity = await activityLedger.RecordOriginalResponseAsync(
@@ -395,124 +397,142 @@ public sealed class AsteriaDeploymentCoordinator(
             {
                 ["deploymentId"] = admissionDeploymentId
             };
-        using var request = JsonContent.Create(new
+        for (var lookupAttempt = 0; lookupAttempt < MaxDeploymentStatusLookups; lookupAttempt++)
         {
-            providerId = lookupBinding.ProviderId,
-            apiDescriptionVersionId = lookupBinding.ApiDescriptionVersionId,
-            operationKey = lookupBinding.OperationKey,
-            maxAttempts = 1,
-            pathParameters
-        }, options: JsonOptions);
-        HttpResponseMessage response;
-        try
-        {
-            response = await harnessClient.PostAsync("executions", request, cancellationToken);
-        }
-        catch (HttpRequestException)
-        {
-            _ = await MarkUnknownAsync(activity.WorkId, CancellationToken.None);
-            throw;
-        }
-        catch (OperationCanceledException)
-        {
-            _ = await MarkUnknownAsync(activity.WorkId, CancellationToken.None);
-            throw;
-        }
-
-        using (response)
-        {
-            if (response.StatusCode != System.Net.HttpStatusCode.Created)
+            using var request = JsonContent.Create(new
             {
-                _ = await MarkUnknownAsync(activity.WorkId, cancellationToken);
-                throw new HttpRequestException(
-                    $"Generic Harness deployment status lookup did not return 201 Created (HTTP {(int)response.StatusCode}).",
-                    inner: null,
-                    response.StatusCode);
-            }
-            using var harnessResponse = await JsonDocument.ParseAsync(
-                await response.Content.ReadAsStreamAsync(cancellationToken),
-                cancellationToken: cancellationToken);
-            var executionId = GetString(GetObject(harnessResponse.RootElement, "execution"), "id");
-            if (!Guid.TryParse(executionId, out _))
-            {
-                _ = await MarkUnknownAsync(activity.WorkId, cancellationToken);
-                throw new InvalidDataException("Generic Harness returned an invalid deployment status execution identifier.");
-            }
-            var providerResponse = GetObject(harnessResponse.RootElement, "providerResponse");
-            var providerStatusCode = GetInt32(providerResponse, "statusCode");
-            var body = GetString(providerResponse, "body");
-            var truncated = GetBoolean(providerResponse, "truncated");
-            var archivedLookup = JsonSerializer.Serialize(new
-            {
-                lookupKind = admissionDeploymentId is null ? "ByIdempotencyKey" : "ById",
                 providerId = lookupBinding.ProviderId,
-                operationKey = lookupBinding.OperationKey,
-                providerIdentity = lookupBinding.ProviderIdentity,
                 apiDescriptionVersionId = lookupBinding.ApiDescriptionVersionId,
-                executionId,
-                statusCode = providerStatusCode,
-                body,
-                truncated
-            }, JsonOptions);
-            var lookupDigest = AsteriaActivityLedger.Fingerprint(archivedLookup);
-            await activityLedger.RecordProviderObservationAsync(
-                activity.WorkId,
-                "deployment-status-" + lookupDigest[7..],
-                "DeploymentStatusLookup",
-                archivedLookup,
-                _timeProvider.GetUtcNow(),
-                cancellationToken);
-            if (providerStatusCode != (int)System.Net.HttpStatusCode.OK || truncated)
-            {
-                _ = await MarkUnknownAsync(activity.WorkId, cancellationToken);
-                throw new InvalidOperationException(
-                    $"Deployment provider status lookup did not establish an authoritative result (HTTP {providerStatusCode}).");
-            }
-
-            JsonDocument statusDocument;
+                operationKey = lookupBinding.OperationKey,
+                maxAttempts = 1,
+                pathParameters
+            }, options: JsonOptions);
+            HttpResponseMessage response;
             try
             {
-                statusDocument = JsonDocument.Parse(body);
+                response = await harnessClient.PostAsync("executions", request, cancellationToken);
             }
-            catch (JsonException exception)
+            catch (HttpRequestException)
             {
-                activity = await ResolveProviderObservationAsync(activity, archivedLookup, cancellationToken);
-                _ = await activityLedger.MarkRefusedAsync(
+                _ = await MarkUnknownAsync(activity.WorkId, CancellationToken.None);
+                throw;
+            }
+            catch (OperationCanceledException)
+            {
+                _ = await MarkUnknownAsync(activity.WorkId, CancellationToken.None);
+                throw;
+            }
+
+            using (response)
+            {
+                if (response.StatusCode != System.Net.HttpStatusCode.Created)
+                {
+                    _ = await MarkUnknownAsync(activity.WorkId, cancellationToken);
+                    throw new HttpRequestException(
+                        $"Generic Harness deployment status lookup did not return 201 Created (HTTP {(int)response.StatusCode}).",
+                        inner: null,
+                        response.StatusCode);
+                }
+                using var harnessResponse = await JsonDocument.ParseAsync(
+                    await response.Content.ReadAsStreamAsync(cancellationToken),
+                    cancellationToken: cancellationToken);
+                var executionId = GetString(GetObject(harnessResponse.RootElement, "execution"), "id");
+                if (!Guid.TryParse(executionId, out _))
+                {
+                    _ = await MarkUnknownAsync(activity.WorkId, cancellationToken);
+                    throw new InvalidDataException("Generic Harness returned an invalid deployment status execution identifier.");
+                }
+                var providerResponse = GetObject(harnessResponse.RootElement, "providerResponse");
+                var providerStatusCode = GetInt32(providerResponse, "statusCode");
+                var body = AsteriaHarnessResponseBody.Read(providerResponse);
+                var truncated = GetBoolean(providerResponse, "truncated");
+                var archivedLookup = JsonSerializer.Serialize(new
+                {
+                    lookupKind = admissionDeploymentId is null ? "ByIdempotencyKey" : "ById",
+                    providerId = lookupBinding.ProviderId,
+                    operationKey = lookupBinding.OperationKey,
+                    providerIdentity = lookupBinding.ProviderIdentity,
+                    apiDescriptionVersionId = lookupBinding.ApiDescriptionVersionId,
+                    executionId,
+                    statusCode = providerStatusCode,
+                    body,
+                    truncated
+                }, JsonOptions);
+                var lookupDigest = AsteriaActivityLedger.Fingerprint(archivedLookup);
+                await activityLedger.RecordProviderObservationAsync(
                     activity.WorkId,
-                    $"Deployment provider status response is malformed: {exception.Message}",
+                    "deployment-status-" + lookupDigest[7..],
+                    "DeploymentStatusLookup",
+                    archivedLookup,
                     _timeProvider.GetUtcNow(),
                     cancellationToken);
-                throw new InvalidDataException("Deployment provider returned malformed status JSON.", exception);
-            }
-            using (statusDocument)
-            {
-                var status = statusDocument.RootElement;
+                if (providerStatusCode != (int)System.Net.HttpStatusCode.OK || truncated)
+                {
+                    _ = await MarkUnknownAsync(activity.WorkId, cancellationToken);
+                    throw new InvalidOperationException(
+                        $"Deployment provider status lookup did not establish an authoritative result (HTTP {providerStatusCode}).");
+                }
+
+                JsonDocument statusDocument;
                 try
                 {
-                    ValidateStatusBinding(release, activity, status);
+                    statusDocument = JsonDocument.Parse(body);
                 }
-                catch (InvalidDataException exception)
+                catch (JsonException exception)
                 {
                     activity = await ResolveProviderObservationAsync(activity, archivedLookup, cancellationToken);
                     _ = await activityLedger.MarkRefusedAsync(
                         activity.WorkId,
-                        exception.Message,
+                        $"Deployment provider status response is malformed: {exception.Message}",
                         _timeProvider.GetUtcNow(),
                         cancellationToken);
-                    throw;
+                    throw new InvalidDataException("Deployment provider returned malformed status JSON.", exception);
                 }
-                activity = await ResolveProviderObservationAsync(activity, archivedLookup, cancellationToken);
-                var providerState = GetString(status, "status");
-                var outcome = OutcomeForStatus(providerState);
-                var evidenceDigest = AsteriaActivityLedger.Fingerprint(body);
-                return await activityLedger.RecordValidatedOutcomeAsync(
-                    activity.WorkId,
-                    outcome,
-                    evidenceDigest,
-                    _timeProvider.GetUtcNow(),
-                    cancellationToken);
+                using (statusDocument)
+                {
+                    var status = statusDocument.RootElement;
+                    try
+                    {
+                        ValidateStatusBinding(release, activity, status);
+                    }
+                    catch (InvalidDataException exception)
+                    {
+                        activity = await ResolveProviderObservationAsync(activity, archivedLookup, cancellationToken);
+                        _ = await activityLedger.MarkRefusedAsync(
+                            activity.WorkId,
+                            exception.Message,
+                            _timeProvider.GetUtcNow(),
+                            cancellationToken);
+                        throw;
+                    }
+                    var providerState = GetString(status, "status");
+                    if (providerState is "Pending" or "Running")
+                    {
+                        activity = await ResolveProviderObservationAsync(activity, archivedLookup, cancellationToken);
+                        if (lookupAttempt + 1 == MaxDeploymentStatusLookups)
+                        {
+                            _ = await MarkUnknownAsync(activity.WorkId, cancellationToken);
+                            throw new InvalidOperationException(
+                                "Deployment remained Pending or Running after bounded read-only reconciliation; its business outcome remains unknown.");
+                        }
+                        await Task.Delay(DeploymentStatusPollInterval, cancellationToken);
+                        continue;
+                    }
+
+                    activity = await ResolveProviderObservationAsync(activity, archivedLookup, cancellationToken);
+                    var outcome = OutcomeForStatus(providerState);
+                    var evidenceDigest = AsteriaActivityLedger.Fingerprint(body);
+                    return await activityLedger.RecordValidatedOutcomeAsync(
+                        activity.WorkId,
+                        outcome,
+                        evidenceDigest,
+                        _timeProvider.GetUtcNow(),
+                        cancellationToken);
+                }
             }
         }
+
+        throw new InvalidOperationException("Deployment status reconciliation ended without a terminal provider result.");
     }
 
     private async Task<AsteriaActivitySnapshot> ResolveProviderObservationAsync(

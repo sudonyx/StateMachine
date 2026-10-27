@@ -6,7 +6,7 @@ info:
     does not establish deployment success. No state-machine, harness or policy implementation
     is prescribed.
 servers:
-- url: http://localhost:5271
+- url: http://127.0.0.1:5271
   description: Illustrative synthetic provider address
 paths:
   /deployments:

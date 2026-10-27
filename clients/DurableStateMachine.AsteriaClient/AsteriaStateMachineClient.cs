@@ -616,7 +616,7 @@ public sealed class AsteriaStateMachineClient
         ArgumentException.ThrowIfNullOrWhiteSpace(messageId);
         var instance = await GetInstanceAsync(release.WorkflowInstanceId, cancellationToken)
             ?? throw new InvalidOperationException("Asteria workflow instance does not exist.");
-        ValidateInstance(release, instance);
+        ValidateInstance(release, instance, allowLifecycleCancellation: true);
         var receipt = await FindInboundReceiptAsync(release.WorkflowInstanceId, messageId, cancellationToken);
         if (instance.CurrentState != "Cancelled")
         {
@@ -665,7 +665,7 @@ public sealed class AsteriaStateMachineClient
         ArgumentException.ThrowIfNullOrWhiteSpace(messageId);
         var instance = await GetInstanceAsync(release.WorkflowInstanceId, cancellationToken)
             ?? throw new InvalidOperationException("Asteria workflow instance does not exist.");
-        ValidateInstance(release, instance);
+        ValidateInstance(release, instance, allowLifecycleCancellation: true);
         var concerns = await GetConcernStatesAsync(release.WorkflowInstanceId, cancellationToken);
         if (!concerns.TryGetValue("CancellationIntent", out var cancellation))
         {
@@ -1884,7 +1884,10 @@ public sealed class AsteriaStateMachineClient
         };
     }
 
-    private static void ValidateInstance(AsteriaReleaseSnapshot release, AsteriaWorkflowInstance instance)
+    private static void ValidateInstance(
+        AsteriaReleaseSnapshot release,
+        AsteriaWorkflowInstance instance,
+        bool allowLifecycleCancellation = false)
     {
         if (instance.Id != release.WorkflowInstanceId ||
             instance.DefinitionId != release.DefinitionId ||
@@ -1892,10 +1895,18 @@ public sealed class AsteriaStateMachineClient
         {
             throw new InvalidDataException("State Machine instance identity differs from the authoritative release association.");
         }
-        if (instance.CurrentState is not ("Draft" or "UnderAssessment" or "RequirementsIdentified" or
-            "ReviewObligationsIdentified" or "AssessmentUnresolved" or "Prohibited" or "Cancelled" or "Superseded"))
+        var supportedInitialState = instance.CurrentState is
+            "Draft" or "UnderAssessment" or "RequirementsIdentified" or
+            "ReviewObligationsIdentified" or "AssessmentUnresolved" or
+            "Prohibited" or "Cancelled" or "Superseded";
+        var supportedLifecycleCancellationState = allowLifecycleCancellation &&
+            instance.CurrentState is
+                "ReadyForDeployment" or "DeploymentInProgress" or
+                "DeploymentFailed" or "DeploymentUnknown" or
+                "PostDeploymentVerification" or "HealthFailed" or "HealthUnresolved";
+        if (!supportedInitialState && !supportedLifecycleCancellationState)
         {
-            throw new InvalidDataException($"Asteria initial-assessment instance has unsupported state '{instance.CurrentState}'.");
+            throw new InvalidDataException($"Asteria workflow instance has unsupported state '{instance.CurrentState}'.");
         }
         var expectedFacts = CreateInstanceFacts(release);
         if (instance.Facts.ValueKind != JsonValueKind.Object ||

@@ -247,6 +247,18 @@ public sealed class AsteriaVerificationCoordinator(
                         CancellationToken.None);
                     throw new InvalidDataException("Generic Harness returned an invalid execution identifier.");
                 }
+                if (String(execution, "providerId") != binding.ProviderId ||
+                    String(execution, "apiDescriptionVersionId") != binding.ApiDescriptionVersionId ||
+                    String(execution, "operationKey") != binding.OperationKey)
+                {
+                    _ = await ledger.MarkOutcomeUnknownAsync(
+                        activity.WorkId,
+                        "Generic Harness execution metadata does not match the persisted provider operation binding.",
+                        _timeProvider.GetUtcNow(),
+                        cancellationToken);
+                    throw new InvalidDataException(
+                        "Generic Harness execution metadata does not match the configured provider, description, and operation.");
+                }
                 activity = await ledger.RecordHarnessExecutionAsync(
                     activity.WorkId,
                     executionId,
@@ -270,7 +282,7 @@ public sealed class AsteriaVerificationCoordinator(
 
                 var statusCode = Required(providerResponse, "statusCode").GetInt32();
                 var contentType = NullableString(providerResponse, "contentType");
-                var responseBody = String(providerResponse, "body");
+                var responseBody = AsteriaHarnessResponseBody.Read(providerResponse);
                 var truncated = Required(providerResponse, "truncated").GetBoolean();
                 var archivedResponse = JsonSerializer.Serialize(
                     new ProviderResponseEnvelope(statusCode, contentType, responseBody, truncated),
@@ -359,6 +371,7 @@ public sealed class AsteriaVerificationCoordinator(
         var evidenceDigest = AsteriaActivityLedger.Fingerprint(body);
         activity = await ledger.RecordValidatedOutcomeAsync(
             activity.WorkId, result, evidenceDigest, _timeProvider.GetUtcNow(), cancellationToken);
+        var binding = GetBinding(activity.ConcernId);
         var evidence = new Dictionary<string, object?>(StringComparer.Ordinal)
         {
             ["releaseId"] = release.ReleaseId,
@@ -368,8 +381,7 @@ public sealed class AsteriaVerificationCoordinator(
             ["expectedOperationId"] = activity.ExpectedOperationId,
             ["result"] = result,
             ["evidenceDigest"] = evidenceDigest,
-            ["providerExecutionId"] = activity.HarnessExecutionId,
-            ["providerEvidenceId"] = evidenceId
+            ["providerExecutionId"] = activity.HarnessExecutionId
         };
         var observation = await stateMachine.SubmitConcernObservationAsync(
             release,
@@ -405,15 +417,15 @@ public sealed class AsteriaVerificationCoordinator(
         AsteriaActivitySnapshot activity)
     {
         var binding = GetBinding(activity.ConcernId);
-        if (String(response, "releaseId") != release.ReleaseId ||
+        if (activity.ProviderIdentity != binding.ProviderIdentity ||
+            activity.ApiDescriptionVersionId != binding.ApiDescriptionVersionId ||
+            activity.OperationKey != binding.OperationKey ||
+            String(response, "releaseId") != release.ReleaseId ||
             Required(response, "assessmentGeneration").GetInt32() != release.AssessmentGeneration ||
             String(response, "materialDigest") != release.MaterialDigest ||
             String(response, "workflowInstanceId") != release.WorkflowInstanceId ||
             String(response, "activityId") != activity.ActivityId ||
-            String(response, "expectedOperationId") != activity.ExpectedOperationId ||
-            String(response, "providerId") != binding.ProviderId ||
-            String(response, "apiDescriptionVersionId") != binding.ApiDescriptionVersionId ||
-            String(response, "operationKey") != binding.OperationKey)
+            String(response, "expectedOperationId") != activity.ExpectedOperationId)
         {
             throw new InvalidDataException(
                 "Verification provider result does not match the persisted release, activity, and operation binding.");

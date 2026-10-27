@@ -1,0 +1,72 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Asteria Synthetic Security Verification",
+    "version": "1.0.0",
+    "description": "Deterministic local-only synthetic verification. Passed results are demonstration fixtures, not production security evidence."
+  },
+  "servers": [
+    { "url": "http://127.0.0.1:5275" }
+  ],
+  "paths": {
+    "/verification": {
+      "post": {
+        "operationId": "verifySecurityRelease",
+        "summary": "Evaluate the synthetic security verification concern",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/VerificationRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Bound verification result",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/VerificationResponse" }
+              }
+            }
+          },
+          "400": { "description": "Invalid request binding" }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "VerificationRequest": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["releaseId", "assessmentGeneration", "materialDigest", "workflowInstanceId", "concernId", "activityId", "expectedOperationId"],
+        "properties": {
+          "releaseId": { "type": "string" },
+          "assessmentGeneration": { "type": "integer", "minimum": 1 },
+          "materialDigest": { "type": "string" },
+          "workflowInstanceId": { "type": "string" },
+          "concernId": { "type": "string", "enum": ["SecurityVerification"] },
+          "activityId": { "type": "string" },
+          "expectedOperationId": { "type": "string" }
+        }
+      },
+      "VerificationResponse": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["releaseId", "assessmentGeneration", "materialDigest", "workflowInstanceId", "concernId", "activityId", "expectedOperationId", "result", "evidenceId"],
+        "properties": {
+          "releaseId": { "type": "string" },
+          "assessmentGeneration": { "type": "integer" },
+          "materialDigest": { "type": "string" },
+          "workflowInstanceId": { "type": "string" },
+          "concernId": { "type": "string" },
+          "activityId": { "type": "string" },
+          "expectedOperationId": { "type": "string" },
+          "result": { "type": "string", "enum": ["Passed", "Failed", "Indeterminate"] },
+          "evidenceId": { "type": "string" }
+        }
+      }
+    }
+  }
+}
