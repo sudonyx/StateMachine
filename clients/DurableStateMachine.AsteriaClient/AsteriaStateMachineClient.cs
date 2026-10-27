@@ -482,6 +482,22 @@ public sealed class AsteriaStateMachineClient
         return document.RootElement.EnumerateArray().Select(ReadExpectedOperation).ToArray();
     }
 
+    public async Task<IReadOnlyList<JsonElement>> ListTransitionHistoryAsync(
+        string instanceId,
+        CancellationToken cancellationToken = default) =>
+        await ReadJsonArrayAsync(
+            $"api/instances/{Uri.EscapeDataString(instanceId)}/history",
+            "State Machine transition history",
+            cancellationToken);
+
+    public async Task<IReadOnlyList<JsonElement>> ListInboundMessagesAsync(
+        string instanceId,
+        CancellationToken cancellationToken = default) =>
+        await ReadJsonArrayAsync(
+            $"api/instances/{Uri.EscapeDataString(instanceId)}/inbound-messages",
+            "State Machine inbound-message receipts",
+            cancellationToken);
+
     public async Task<bool> TryAcceptObservationAsync(
         AsteriaReleaseSnapshot release,
         AsteriaValidatedAssessment assessment,
@@ -907,6 +923,19 @@ public sealed class AsteriaStateMachineClient
         using var response = await _httpClient.GetAsync(path, cancellationToken);
         EnsureSuccess(response, "reading State Machine resource");
         return JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+    }
+
+    private async Task<IReadOnlyList<JsonElement>> ReadJsonArrayAsync(
+        string path,
+        string description,
+        CancellationToken cancellationToken)
+    {
+        using var document = await GetJsonAsync(path, cancellationToken);
+        if (document.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException($"{description} must be an array.");
+        }
+        return document.RootElement.EnumerateArray().Select(item => item.Clone()).ToArray();
     }
 
     private static void EnsureAcceptedReceipt(JsonElement response)

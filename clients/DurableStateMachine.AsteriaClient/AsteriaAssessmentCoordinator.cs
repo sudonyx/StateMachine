@@ -35,11 +35,11 @@ public sealed class AsteriaAssessmentCoordinator(
         {
             var release = await registry.GetReleaseAsync(releaseId, phaseToken)
                 ?? throw new KeyNotFoundException($"Asteria release '{releaseId}' does not exist.");
+            await AssertAdmissionAsync(release, leaseToken, phaseToken);
             if (release.Status == "Accepted")
             {
                 return release;
             }
-            await AssertAdmissionAsync(release, leaseToken, phaseToken);
             await stateMachine.EnsureDefinitionAsync(definitionJson, phaseToken);
             await AssertAdmissionAsync(release, leaseToken, phaseToken);
             var instance = await stateMachine.EnsureInstanceAsync(release, phaseToken);
@@ -75,21 +75,17 @@ public sealed class AsteriaAssessmentCoordinator(
     {
         var release = await registry.GetReleaseAsync(releaseId, cancellationToken)
             ?? throw new KeyNotFoundException($"Asteria release '{releaseId}' does not exist.");
-        if (release.Status == "Accepted")
-        {
-            return release;
-        }
 
         return await WithLeaseAsync(releaseId, async (leaseToken, phaseToken) =>
         {
             var currentRelease = await registry.GetReleaseAsync(releaseId, phaseToken)
                 ?? throw new KeyNotFoundException($"Asteria release '{releaseId}' disappeared.");
+            await AssertAdmissionAsync(currentRelease, leaseToken, phaseToken);
             if (currentRelease.Status == "Accepted")
             {
                 return currentRelease;
             }
 
-            await AssertAdmissionAsync(currentRelease, leaseToken, phaseToken);
             await stateMachine.EnsureDefinitionAsync(definitionJson, phaseToken);
             await AssertAdmissionAsync(currentRelease, leaseToken, phaseToken);
             var instance = await stateMachine.EnsureInstanceAsync(currentRelease, phaseToken);

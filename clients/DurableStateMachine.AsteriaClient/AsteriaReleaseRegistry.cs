@@ -403,6 +403,72 @@ public sealed class AsteriaReleaseRegistry : IAsyncDisposable
         return await ReadSnapshotAsync(command, cancellationToken);
     }
 
+    public async Task<IReadOnlyList<AsteriaReleaseSnapshot>> ListGenerationsAsync(
+        string releaseId,
+        CancellationToken cancellationToken = default)
+    {
+        var generations = new List<int>();
+        await using (var connection = new SqliteConnection(_connectionString))
+        {
+            await connection.OpenAsync(cancellationToken);
+            await using var command = connection.CreateCommand();
+            command.CommandText = """
+                SELECT Generation
+                FROM AsteriaGenerations
+                WHERE ReleaseId = $releaseId
+                ORDER BY Generation;
+                """;
+            command.Parameters.AddWithValue("$releaseId", releaseId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                generations.Add(reader.GetInt32(0));
+            }
+        }
+
+        var snapshots = new List<AsteriaReleaseSnapshot>(generations.Count);
+        foreach (var generation in generations)
+        {
+            snapshots.Add(await GetGenerationAsync(releaseId, generation, cancellationToken)
+                ?? throw new InvalidDataException(
+                    $"Asteria generation {generation} for release '{releaseId}' disappeared while listing."));
+        }
+        return snapshots;
+    }
+
+    public async Task<IReadOnlyList<AsteriaAmendmentSnapshot>> ListAmendmentsAsync(
+        string releaseId,
+        CancellationToken cancellationToken = default)
+    {
+        var amendments = new List<AsteriaAmendmentSnapshot>();
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT AmendmentId, ReleaseId, RequestFingerprint, ExpectedBaseGeneration,
+                   NewGeneration, OldWorkflowInstanceId, NewWorkflowInstanceId, Phase, LastError
+            FROM AsteriaAmendments
+            WHERE ReleaseId = $releaseId
+            ORDER BY CreatedAt, AmendmentId;
+            """;
+        command.Parameters.AddWithValue("$releaseId", releaseId);
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            amendments.Add(new AsteriaAmendmentSnapshot(
+                reader.GetString(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetInt32(3),
+                reader.GetInt32(4),
+                reader.GetString(5),
+                reader.GetString(6),
+                reader.GetString(7),
+                reader.IsDBNull(8) ? null : reader.GetString(8)));
+        }
+        return amendments;
+    }
+
     public async Task<AsteriaAmendmentSnapshot> ReserveAmendmentAsync(
         string releaseId,
         string amendmentId,

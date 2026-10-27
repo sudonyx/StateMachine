@@ -20,7 +20,7 @@ dotnet test DurableStateMachine.slnx
 - `clients/DurableStateMachine.Cli/` — generic command-line HTTP client.
 - `clients/DurableStateMachine.OrionClient/` — Orion scenario using the HTTP contract only.
 - `clients/DurableStateMachine.MeridianClient/` — independent live HTTP demonstration of a Meridian decision bound to a generic workflow event.
-- `clients/DurableStateMachine.AsteriaClient/` — Asteria-only release registry and coordinator for initial assessments through the published Decision API contract.
+- `clients/DurableStateMachine.AsteriaClient/` — Asteria-only release registry/coordinator for generation-scoped Decision API assessments, pre-deployment amendments and persisted evidence export.
 - `tests/DurableStateMachine.Tests/` — Gate 2 regression tests and SQLite-backed HTTP integration tests.
 - `tools/OrionGate9Corpus/` — deterministic Gate 9 corpus generation, validation and API runner.
 - `test-data/` — fixed 5,000-delivery Orion adversarial corpus.
@@ -331,6 +331,36 @@ instances are refused rather than relabeling or reopening them. New releases
 created by this client use V3. See the [Milestone 4B design](./docs/asteria/gate14-milestone4b-design.md),
 [recovery analysis](./docs/asteria/gate14-milestone4b-recovery.md), and
 [test results](./docs/asteria/gate14-milestone4b-test-results.md).
+
+## Gate 14 Asteria end-to-end reassessment — Milestone 4C
+
+The reproducible live-service procedure is
+[scripts/gate14-milestone4c-demo.ps1](./scripts/gate14-milestone4c-demo.ps1).
+It uses stable release/amendment IDs, assesses Generation 1, amends to a new
+material snapshot, assesses Generation 2 through the configured Decision API,
+repeats the Generation 2 resume, and exports inspectable persisted evidence.
+Set `DURABLE_STATE_MACHINE_API_URL`,
+`DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY`,
+`ASTERIA_DECISION_API_URL`, and a fresh
+`ASTERIA_RELEASE_REGISTRY_PATH` before running. The script does not reset
+databases. Use isolated State Machine and registry databases for its stable IDs.
+
+The client also supports direct export:
+
+```powershell
+dotnet run --project clients\DurableStateMachine.AsteriaClient -- `
+  export-evidence <release-id> <output.json>
+```
+
+Each exported generation reports `assessmentBinding` (the immutable revision and
+state at which the assessment was bound) separately from
+`currentStateMachineProjection` (the live instance at export time).
+The repository contains no Decision API implementation; the live demonstration
+was run by the owner against the real services and passed (owner-reported).
+Controlled API-host tests use fixture responses;
+see the [integration procedure and verification limits](./docs/asteria/gate14-milestone4c-integration.md),
+[adversarial results](./docs/asteria/gate14-milestone4c-adversarial-results.md),
+and [test results](./docs/asteria/gate14-milestone4c-test-results.md).
 
 ## Gate 13 Orion composition
 
