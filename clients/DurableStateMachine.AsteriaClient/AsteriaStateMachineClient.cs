@@ -28,6 +28,10 @@ public sealed class AsteriaStateMachineClient
 {
     public const string DecisionSourceIdentity = AsteriaDecisionApiClient.DecisionSourceIdentity;
     public const string AssessmentObservation = "AsteriaAssessmentObserved";
+    public const string AssessmentStartObservation = "AsteriaAssessmentStarted";
+    public const string AssessmentStartSourceIdentity = "AsteriaAssessmentCoordinator";
+    public const string AmendmentSourceIdentity = "AsteriaAmendmentCoordinator";
+    public const string SupersessionObservation = "SupersedeAssessment";
 
     private static readonly string[] RequiredEvidence =
     [
@@ -151,10 +155,153 @@ public sealed class AsteriaStateMachineClient
         return await ReadInstanceAsync(response, cancellationToken);
     }
 
+    public async Task<AsteriaWorkflowInstance> InspectGenerationAsync(
+        AsteriaReleaseSnapshot generation,
+        CancellationToken cancellationToken = default)
+    {
+        var instance = await GetInstanceAsync(generation.WorkflowInstanceId, cancellationToken)
+            ?? throw new InvalidOperationException(
+                $"Asteria State Machine instance '{generation.WorkflowInstanceId}' does not exist.");
+        ValidateInstance(generation, instance);
+        return instance;
+    }
+
+    public async Task EnsureSupersededAsync(
+        AsteriaReleaseSnapshot oldGeneration,
+        AsteriaReleaseSnapshot replacementGeneration,
+        AsteriaAmendmentSnapshot amendment,
+        IReadOnlyList<AsteriaSupersessionAttempt> attempts,
+        CancellationToken cancellationToken = default)
+    {
+        if (oldGeneration.DefinitionVersion != "3.0" ||
+            replacementGeneration.DefinitionVersion != "3.0" ||
+            oldGeneration.AssessmentGeneration != amendment.ExpectedBaseGeneration ||
+            replacementGeneration.AssessmentGeneration != amendment.NewGeneration ||
+            amendment.OldWorkflowInstanceId != oldGeneration.WorkflowInstanceId ||
+            amendment.NewWorkflowInstanceId != replacementGeneration.WorkflowInstanceId)
+        {
+            throw new InvalidDataException("Asteria amendment generation identities do not match the durable reservation.");
+        }
+
+        var instance = await InspectGenerationAsync(oldGeneration, cancellationToken);
+        string[] requiredEvidence =
+        [
+            "amendmentId",
+            "requestFingerprint",
+            "expectedBaseGeneration",
+            "replacementGeneration",
+            "replacementMaterialDigest"
+        ];
+
+        if (instance.CurrentState == "Superseded")
+        {
+            await VerifySupersessionAcrossAttemptsAsync(
+                oldGeneration.WorkflowInstanceId, amendment, attempts, cancellationToken);
+            return;
+        }
+
+        if (instance.CurrentState is not ("Draft" or "UnderAssessment" or "RequirementsIdentified" or
+            "ReviewObligationsIdentified" or "AssessmentUnresolved"))
+        {
+            throw new InvalidOperationException(
+                $"Asteria generation in state '{instance.CurrentState}' cannot be superseded.");
+        }
+
+        var supersessionAttempt = attempts.SingleOrDefault(item => item.ExpectedRevision == instance.Revision)
+            ?? throw new InvalidOperationException(
+                $"No durable supersession attempt exists for observed revision {instance.Revision}.");
+        if (supersessionAttempt.ReleaseId != oldGeneration.ReleaseId ||
+            supersessionAttempt.AmendmentId != amendment.AmendmentId)
+        {
+            throw new InvalidDataException("Asteria supersession attempt identity differs from its amendment.");
+        }
+        var operationId = supersessionAttempt.OperationId;
+        var messageId = supersessionAttempt.MessageId;
+
+        var expectedOperations = await ListExpectedOperationsAsync(oldGeneration.WorkflowInstanceId, cancellationToken);
+        var operation = expectedOperations.SingleOrDefault(item => item.OperationId == operationId);
+        if (operation is null)
+        {
+            var request = new
+            {
+                operationId,
+                observationType = SupersessionObservation,
+                sourceIdentity = AmendmentSourceIdentity,
+                expectedRevision = instance.Revision,
+                requiredEvidence
+            };
+            using var response = await _httpClient.PostAsJsonAsync(
+                $"api/instances/{Uri.EscapeDataString(oldGeneration.WorkflowInstanceId)}/expected-operations",
+                request, JsonOptions, cancellationToken);
+            EnsureSuccess(response, "registering Asteria supersession operation");
+            using var result = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            operation = ReadExpectedOperation(result.RootElement);
+        }
+        ValidateSupersessionOperation(
+            operation, oldGeneration.WorkflowInstanceId, operationId, instance.Revision, requiredEvidence);
+
+        var receipt = await FindInboundReceiptAsync(
+            oldGeneration.WorkflowInstanceId, messageId, cancellationToken);
+        if (receipt is null)
+        {
+            var evidence = new
+            {
+                amendmentId = amendment.AmendmentId,
+                requestFingerprint = amendment.RequestFingerprint,
+                expectedBaseGeneration = amendment.ExpectedBaseGeneration,
+                replacementGeneration = amendment.NewGeneration,
+                replacementMaterialDigest = replacementGeneration.MaterialDigest
+            };
+            var observation = new
+            {
+                messageId,
+                deliveryId = messageId,
+                operationId,
+                observationId = StableMessageId(messageId, "supersession-result"),
+                type = SupersessionObservation,
+                expectedRevision = instance.Revision,
+                correlationId = operationId,
+                source = AmendmentSourceIdentity,
+                payload = evidence,
+                facts = new
+                {
+                    amendmentId = amendment.AmendmentId,
+                    expectedBaseGeneration = amendment.ExpectedBaseGeneration,
+                    replacementGeneration = amendment.NewGeneration
+                },
+                evidence
+            };
+            using var response = await _httpClient.PostAsJsonAsync(
+                $"api/instances/{Uri.EscapeDataString(oldGeneration.WorkflowInstanceId)}/observations",
+                observation, JsonOptions, cancellationToken);
+            EnsureSuccess(response, "submitting Asteria supersession observation");
+            using var result = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            EnsureAcceptedReceipt(result.RootElement);
+        }
+        else
+        {
+            EnsureAcceptedReceipt(receipt.Value);
+        }
+
+        var superseded = await InspectGenerationAsync(oldGeneration, cancellationToken);
+        if (superseded.CurrentState != "Superseded")
+        {
+            throw new InvalidDataException(
+                $"Accepted Asteria supersession did not reach terminal state 'Superseded'; found '{superseded.CurrentState}'.");
+        }
+        await VerifySupersessionAcrossAttemptsAsync(
+            oldGeneration.WorkflowInstanceId, amendment, attempts, cancellationToken);
+    }
+
     public async Task<AsteriaWorkflowInstance> EnsureSubmittedAsync(
         AsteriaReleaseSnapshot release,
         CancellationToken cancellationToken = default)
     {
+        if (release.DefinitionVersion == "3.0")
+        {
+            return await EnsureV3SubmittedAsync(release, cancellationToken);
+        }
+
         var messageId = StableMessageId(release.Work.WorkId, "submit");
         var current = await GetInstanceAsync(release.WorkflowInstanceId, cancellationToken)
             ?? throw new InvalidOperationException("Asteria workflow instance disappeared before submission.");
@@ -199,6 +346,96 @@ public sealed class AsteriaStateMachineClient
         {
             throw new InvalidOperationException(
                 $"Expected submitted Asteria workflow state UnderAssessment, found '{current.CurrentState}'.");
+        }
+        return current;
+    }
+
+    private async Task<AsteriaWorkflowInstance> EnsureV3SubmittedAsync(
+        AsteriaReleaseSnapshot release,
+        CancellationToken cancellationToken)
+    {
+        var current = await InspectGenerationAsync(release, cancellationToken);
+        var operationId = StableMessageId(release.Work.WorkId, "assessment-start-operation");
+        var messageId = StableMessageId(release.Work.WorkId, "submit");
+        string[] requiredEvidence = ["releaseId", "assessmentGeneration", "materialDigest"];
+        var operations = await ListExpectedOperationsAsync(release.WorkflowInstanceId, cancellationToken);
+        var operation = operations.SingleOrDefault(item => item.OperationId == operationId);
+        if (operation is null)
+        {
+            var request = new
+            {
+                operationId,
+                observationType = AssessmentStartObservation,
+                sourceIdentity = AssessmentStartSourceIdentity,
+                expectedRevision = current.Revision,
+                requiredEvidence
+            };
+            using var response = await _httpClient.PostAsJsonAsync(
+                $"api/instances/{Uri.EscapeDataString(release.WorkflowInstanceId)}/expected-operations",
+                request, JsonOptions, cancellationToken);
+            EnsureSuccess(response, "registering Asteria assessment-start operation");
+            using var result = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            operation = ReadExpectedOperation(result.RootElement);
+        }
+        ValidateAssessmentStartOperation(
+            operation, release, operation.ExpectedRevision, operationId, requiredEvidence);
+        if (current.CurrentState == "Draft" && operation.ExpectedRevision != current.Revision)
+        {
+            throw new InvalidOperationException("V3 assessment-start operation was registered against a stale revision.");
+        }
+
+        var receipt = await FindInboundReceiptAsync(
+            release.WorkflowInstanceId, messageId, cancellationToken);
+        if (current.CurrentState == "Draft" && receipt is null)
+        {
+            var evidence = new
+            {
+                releaseId = release.ReleaseId,
+                assessmentGeneration = release.AssessmentGeneration,
+                materialDigest = release.MaterialDigest
+            };
+            var observation = new
+            {
+                messageId,
+                deliveryId = messageId,
+                operationId,
+                observationId = StableMessageId(release.Work.WorkId, "assessment-start-result"),
+                type = AssessmentStartObservation,
+                expectedRevision = current.Revision,
+                correlationId = operationId,
+                source = AssessmentStartSourceIdentity,
+                payload = evidence,
+                facts = new { },
+                evidence
+            };
+            using var response = await _httpClient.PostAsJsonAsync(
+                $"api/instances/{Uri.EscapeDataString(release.WorkflowInstanceId)}/observations",
+                observation, JsonOptions, cancellationToken);
+            EnsureSuccess(response, "submitting Asteria assessment start");
+            using var result = JsonDocument.Parse(await response.Content.ReadAsStringAsync(cancellationToken));
+            EnsureAcceptedReceipt(result.RootElement);
+        }
+        else if (receipt is null)
+        {
+            throw new InvalidOperationException(
+                "Asteria workflow left Draft without a receipt for its stable trusted assessment-start identity.");
+        }
+        else
+        {
+            EnsureAcceptedReceipt(receipt.Value);
+        }
+
+        current = await InspectGenerationAsync(release, cancellationToken);
+        if (current.CurrentState != "UnderAssessment")
+        {
+            throw new InvalidOperationException(
+                $"Expected V3 Asteria assessment state UnderAssessment, found '{current.CurrentState}'.");
+        }
+        var resolved = (await ListExpectedOperationsAsync(release.WorkflowInstanceId, cancellationToken))
+            .Single(item => item.OperationId == operationId);
+        if (resolved.Status != "Resolved" || string.IsNullOrWhiteSpace(resolved.ResultDigest))
+        {
+            throw new InvalidDataException("Asteria assessment-start observation did not resolve its expected operation.");
         }
         return current;
     }
@@ -351,6 +588,150 @@ public sealed class AsteriaStateMachineClient
         return matches.Length == 0 ? null : matches[0];
     }
 
+    private async Task VerifySupersessionEvidenceAsync(
+        string instanceId,
+        string operationId,
+        string messageId,
+        IReadOnlyList<string> requiredEvidence,
+        CancellationToken cancellationToken)
+    {
+        var receipt = await FindInboundReceiptAsync(instanceId, messageId, cancellationToken)
+            ?? throw new InvalidDataException("Superseded Asteria instance has no durable supersession receipt.");
+        if (GetString(receipt, "status") is not ("Accepted" or "Duplicate") ||
+            GetString(receipt, "acceptedEvent") != SupersessionObservation ||
+            GetString(receipt, "operationId") != operationId)
+        {
+            throw new InvalidDataException("Asteria supersession receipt does not match the reserved stable input identity.");
+        }
+
+        var operations = await ListExpectedOperationsAsync(instanceId, cancellationToken);
+        var operation = operations.SingleOrDefault(item => item.OperationId == operationId)
+            ?? throw new InvalidDataException("Asteria supersession expected operation is missing.");
+        if (operation.Status != "Resolved" ||
+            operation.SourceIdentity != AmendmentSourceIdentity ||
+            !operation.RequiredEvidence.Order(StringComparer.Ordinal)
+                .SequenceEqual(requiredEvidence.Order(StringComparer.Ordinal), StringComparer.Ordinal))
+        {
+            throw new InvalidDataException("Asteria supersession expected operation was not resolved as reserved.");
+        }
+
+        var attemptId = GetString(receipt, "attemptId");
+        using var attempt = await GetJsonAsync(
+            $"api/instances/{Uri.EscapeDataString(instanceId)}/attempts/{Uri.EscapeDataString(attemptId)}",
+            cancellationToken);
+        if (GetString(attempt.RootElement, "status") != "Accepted" ||
+            GetString(attempt.RootElement, "event") != SupersessionObservation)
+        {
+            throw new InvalidDataException("Asteria supersession receipt does not link to an accepted evaluator attempt.");
+        }
+        var transitionId = GetString(attempt.RootElement, "transitionId");
+
+        using var history = await GetJsonAsync(
+            $"api/instances/{Uri.EscapeDataString(instanceId)}/history", cancellationToken);
+        if (history.RootElement.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException("State Machine transition history must be an array.");
+        }
+        var transitions = history.RootElement.EnumerateArray()
+            .Where(item => item.TryGetProperty("attemptId", out var value) &&
+                           value.ValueKind == JsonValueKind.String &&
+                           value.GetString() == attemptId)
+            .ToArray();
+        if (transitions.Length != 1)
+        {
+            throw new InvalidDataException("Asteria supersession attempt must have exactly one accepted transition-history entry.");
+        }
+        var transition = transitions[0];
+        if (GetString(transition, "event") != SupersessionObservation ||
+            GetString(transition, "transitionId") != transitionId ||
+            GetString(transition, "newState") != "Superseded" ||
+            GetString(transition, "definitionVersion") != "3.0")
+        {
+            throw new InvalidDataException("Accepted State Machine history does not prove the V3 supersession transition.");
+        }
+    }
+
+    private async Task VerifySupersessionAcrossAttemptsAsync(
+        string instanceId,
+        AsteriaAmendmentSnapshot amendment,
+        IReadOnlyList<AsteriaSupersessionAttempt> attempts,
+        CancellationToken cancellationToken)
+    {
+        foreach (var attempt in attempts.OrderByDescending(item => item.ExpectedRevision))
+        {
+            if (attempt.ReleaseId != amendment.ReleaseId || attempt.AmendmentId != amendment.AmendmentId)
+            {
+                throw new InvalidDataException("Asteria supersession attempt belongs to a different amendment.");
+            }
+            var receipt = await FindInboundReceiptAsync(instanceId, attempt.MessageId, cancellationToken);
+            if (receipt is null)
+            {
+                continue;
+            }
+            var status = GetString(receipt.Value, "status");
+            if (status is not ("Accepted" or "Duplicate"))
+            {
+                continue;
+            }
+            await VerifySupersessionEvidenceAsync(
+                instanceId,
+                attempt.OperationId,
+                attempt.MessageId,
+                [
+                    "amendmentId",
+                    "requestFingerprint",
+                    "expectedBaseGeneration",
+                    "replacementGeneration",
+                    "replacementMaterialDigest"
+                ],
+                cancellationToken);
+            return;
+        }
+
+        throw new InvalidDataException(
+            "The terminal Asteria generation has no accepted supersession receipt for its durable amendment attempts.");
+    }
+
+    private static void ValidateSupersessionOperation(
+        AsteriaExpectedOperation operation,
+        string instanceId,
+        string operationId,
+        long expectedRevision,
+        IReadOnlyList<string> requiredEvidence)
+    {
+        if (operation.InstanceId != instanceId ||
+            operation.OperationId != operationId ||
+            operation.ObservationType != SupersessionObservation ||
+            operation.SourceIdentity != AmendmentSourceIdentity ||
+            operation.ExpectedRevision != expectedRevision ||
+            !operation.RequiredEvidence.Order(StringComparer.Ordinal)
+                .SequenceEqual(requiredEvidence.Order(StringComparer.Ordinal), StringComparer.Ordinal) ||
+            operation.Status is not ("Expected" or "Resolved"))
+        {
+            throw new InvalidDataException("State Machine supersession operation conflicts with the durable amendment.");
+        }
+    }
+
+    private static void ValidateAssessmentStartOperation(
+        AsteriaExpectedOperation operation,
+        AsteriaReleaseSnapshot release,
+        long expectedRevision,
+        string operationId,
+        IReadOnlyList<string> requiredEvidence)
+    {
+        if (operation.InstanceId != release.WorkflowInstanceId ||
+            operation.OperationId != operationId ||
+            operation.ObservationType != AssessmentStartObservation ||
+            operation.SourceIdentity != AssessmentStartSourceIdentity ||
+            operation.ExpectedRevision != expectedRevision ||
+            !operation.RequiredEvidence.Order(StringComparer.Ordinal)
+                .SequenceEqual(requiredEvidence.Order(StringComparer.Ordinal), StringComparer.Ordinal) ||
+            operation.Status is not ("Expected" or "Resolved"))
+        {
+            throw new InvalidDataException("Asteria assessment-start operation conflicts with the generation work.");
+        }
+    }
+
     private static IReadOnlyDictionary<string, object?> CreateInstanceFacts(AsteriaReleaseSnapshot release)
     {
         var material = release.Material;
@@ -381,7 +762,7 @@ public sealed class AsteriaStateMachineClient
             throw new InvalidDataException("State Machine instance identity differs from the authoritative release association.");
         }
         if (instance.CurrentState is not ("Draft" or "UnderAssessment" or "RequirementsIdentified" or
-            "ReviewObligationsIdentified" or "AssessmentUnresolved" or "Prohibited"))
+            "ReviewObligationsIdentified" or "AssessmentUnresolved" or "Prohibited" or "Cancelled" or "Superseded"))
         {
             throw new InvalidDataException($"Asteria initial-assessment instance has unsupported state '{instance.CurrentState}'.");
         }

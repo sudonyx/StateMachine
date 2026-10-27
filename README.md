@@ -208,6 +208,10 @@ correlates it through a genuine State Machine expected operation. The workflow
 remains unable to reach deployment or `Completed`; assessment obligations
 are not completed checks or approvals.
 
+Milestone 4B keeps migrated V2 releases on their recorded immutable definition
+for `resume`, while newly created CLI releases use V3. The V3 version retains
+the initial assessment binding and adds a trusted assessment-start observation.
+
 Start the real Asteria Decision API with AST-POL-001 V1 available on port
 5267. In a separate PowerShell terminal, start the State Machine API with an
 isolated database:
@@ -234,7 +238,7 @@ $env:DURABLE_STATE_MACHINE_API_URL = "http://localhost:5270"
 $env:DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY = "asteria-local-demo-key"
 $env:ASTERIA_DECISION_API_URL = "http://localhost:5267"
 $env:ASTERIA_RELEASE_REGISTRY_PATH = "$env:TEMP\asteria-release-registry.db"
-$releaseId = "AST-REL-G14-M3B-$([guid]::NewGuid().ToString('N'))"
+$releaseId = "AST-REL-G14-M4B-$([guid]::NewGuid().ToString('N'))"
 dotnet run --project clients\DurableStateMachine.AsteriaClient -- prepare $releaseId `
   .\training-data\asteria\cases\asteria-initial-assessment-demo.json
 dotnet run --project clients\DurableStateMachine.AsteriaClient -- resume $releaseId
@@ -259,6 +263,74 @@ ownership, tested failure windows and limitations.
 Definitions are immutable by `(id, version)`; new versions coexist. Instances remain bound to the exact version used at creation, with their instance facts fixed for their lifetime. Explicit per-attempt facts are immutable evaluation-only inputs and never mutate those facts. Each event attempt (including rejected, ambiguous and unresolved evaluations) is stored separately from accepted transition history, together with a complete evaluation-evidence snapshot. Accepted state, revision, attempt, evidence and transition history commit in one SQLite transaction. Per-host instance gates reduce local contention; Gate 9 SQLite write transactions and revision constraints arbitrate independent hosts sharing a database.
 
 The Meridian client remains a demonstration adapter, not a durable external-activity subsystem. Meridian's idempotency key plus a saved local request envelope support deliberate same-key/same-request retries, but there is no atomic transaction spanning Meridian and local SQLite and the key does not deduplicate state-machine events. Gate 7 supports only the three independently hosted synthetic providers and the documented Generic Harness API; production provider credentials/secret management, background scheduling, automatic workflow retry orchestration, full replay, production authentication, a general distributed lock service and hierarchical/parallel statecharts remain unsupported. SQLite concurrency is limited to hosts sharing a database file with valid locking; no network-filesystem or database-independent distributed guarantee is claimed. The trusted-ingestion credential is a controlled training boundary; it does not prove provider identity or evidence authenticity. See [gate-3-design.md](./docs/gate-3-design.md), [gate-4-design.md](./docs/gate-4-design.md), [gate-5-design.md](./docs/gate-5-design.md), [gate-7-design.md](./docs/gate-7-design.md) and [gate-9-design.md](./docs/gate-9-design.md) for transaction, evidence and authority limits.
+
+## Gate 14 Asteria durable amendments — Milestone 4B
+
+New Asteria releases use immutable definition V3 and generation 1. Each
+material amendment allocates a separate generation, workflow instance, and
+assessment work record. Assessment start is a trusted observation, not a
+generic command. The coordinator provisions the replacement instance without
+enabling its assessment work, then terminally supersedes the old V3 instance through a trusted
+`SupersedeAssessment` observation, verifies its receipt/attempt/history, and
+only then atomically advances the registry's current-generation pointer. It
+does not deploy, complete verification, authenticate approvals, or reverse
+external effects.
+
+Run the State Machine API and Asteria Decision API as described in the
+Milestone 3B section above, then prepare and assess a new V3 generation:
+
+```powershell
+$env:DURABLE_STATE_MACHINE_API_URL = "http://localhost:5270"
+$env:DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY = "asteria-local-demo-key"
+$env:ASTERIA_DECISION_API_URL = "http://localhost:5267"
+$env:ASTERIA_RELEASE_REGISTRY_PATH = "$env:TEMP\asteria-release-registry.db"
+$releaseId = "AST-REL-G14-M4B-$([guid]::NewGuid().ToString('N'))"
+dotnet run --project clients\DurableStateMachine.AsteriaClient -- prepare $releaseId `
+  .\training-data\asteria\cases\asteria-initial-assessment-demo.json
+dotnet run --project clients\DurableStateMachine.AsteriaClient -- resume $releaseId
+```
+
+The synthetic Decision API's outcome is policy-dependent. A base generation
+that reaches terminal `Prohibited` or `Cancelled` is intentionally not
+amendable. For a guaranteed supersession demonstration independent of policy
+outcome, omit the first `resume` and amend immediately after `prepare`; to
+demonstrate preserved prior assessment evidence, keep `resume` and continue
+only when the old instance is in one of V3's eligible nonterminal states.
+
+Create a complete changed material snapshot, then request the amendment using
+a stable amendment ID and expected base generation. Re-running the same
+command with the same amendment ID, base generation, and exact material
+recovers an interrupted protocol; do not change the payload on retry:
+
+```powershell
+$material = Get-Content .\training-data\asteria\cases\asteria-initial-assessment-demo.json -Raw |
+  ConvertFrom-Json
+$material.targetVersion = "4.2.1"
+$material.releaseSummary = "Synthetic amended Asteria release assessment."
+$amendedPath = "$env:TEMP\asteria-amended-material.json"
+$material | ConvertTo-Json | Set-Content $amendedPath
+$amendmentId = "AST-AMEND-M4B-001"
+dotnet run --project clients\DurableStateMachine.AsteriaClient -- amend `
+  $releaseId $amendmentId 1 $amendedPath
+dotnet run --project clients\DurableStateMachine.AsteriaClient -- resume $releaseId
+```
+
+`resume-amendment` is an alias for the same idempotent amendment operation.
+The `amend` command activates a new generation but does not assess it; `resume`
+performs its generation-scoped assessment. Inspect both old and current
+instances in State Machine history to see the old instance's terminal
+`Superseded` transition and the new instance's independent evidence.
+
+The trusted-ingestion key is required to register expected assessment-start
+and supersession operations and submit their observations. It is the existing
+shared-secret training boundary, not role-based authorization; restrict the
+State Machine API and key to the Asteria coordinator. Commands on the generic
+API are not authenticated. Existing migrated V2 instances remain bound to
+immutable V2, which has no supersession transition; amendments against those
+instances are refused rather than relabeling or reopening them. New releases
+created by this client use V3. See the [Milestone 4B design](./docs/asteria/gate14-milestone4b-design.md),
+[recovery analysis](./docs/asteria/gate14-milestone4b-recovery.md), and
+[test results](./docs/asteria/gate14-milestone4b-test-results.md).
 
 ## Gate 13 Orion composition
 

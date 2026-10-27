@@ -28,9 +28,10 @@ public sealed class AsteriaAssessmentCoordinator(
         AsteriaReleaseMaterial material,
         CancellationToken cancellationToken = default)
     {
+        var (definitionId, definitionVersion) = ReadDefinitionIdentity(definitionJson);
         _ = await registry.CreateReleaseAsync(
-            releaseId, material, _timeProvider.GetUtcNow(), cancellationToken: cancellationToken);
-        return await WithLeaseAsync(releaseId, async phaseToken =>
+            releaseId, material, _timeProvider.GetUtcNow(), definitionId, definitionVersion, cancellationToken);
+        return await WithLeaseAsync(releaseId, async (leaseToken, phaseToken) =>
         {
             var release = await registry.GetReleaseAsync(releaseId, phaseToken)
                 ?? throw new KeyNotFoundException($"Asteria release '{releaseId}' does not exist.");
@@ -38,7 +39,9 @@ public sealed class AsteriaAssessmentCoordinator(
             {
                 return release;
             }
+            await AssertAdmissionAsync(release, leaseToken, phaseToken);
             await stateMachine.EnsureDefinitionAsync(definitionJson, phaseToken);
+            await AssertAdmissionAsync(release, leaseToken, phaseToken);
             var instance = await stateMachine.EnsureInstanceAsync(release, phaseToken);
             if (release.Work.Status == "Registered")
             {
@@ -46,6 +49,7 @@ public sealed class AsteriaAssessmentCoordinator(
                     releaseId, "WorkflowCreated", _timeProvider.GetUtcNow(), phaseToken);
             }
 
+            await AssertAdmissionAsync(release, leaseToken, phaseToken);
             instance = await stateMachine.EnsureSubmittedAsync(release, phaseToken);
             if (release.Work.ParentRevision is null)
             {
@@ -76,7 +80,7 @@ public sealed class AsteriaAssessmentCoordinator(
             return release;
         }
 
-        return await WithLeaseAsync(releaseId, async phaseToken =>
+        return await WithLeaseAsync(releaseId, async (leaseToken, phaseToken) =>
         {
             var currentRelease = await registry.GetReleaseAsync(releaseId, phaseToken)
                 ?? throw new KeyNotFoundException($"Asteria release '{releaseId}' disappeared.");
@@ -85,7 +89,9 @@ public sealed class AsteriaAssessmentCoordinator(
                 return currentRelease;
             }
 
+            await AssertAdmissionAsync(currentRelease, leaseToken, phaseToken);
             await stateMachine.EnsureDefinitionAsync(definitionJson, phaseToken);
+            await AssertAdmissionAsync(currentRelease, leaseToken, phaseToken);
             var instance = await stateMachine.EnsureInstanceAsync(currentRelease, phaseToken);
             if (currentRelease.Work.Status == "Registered")
             {
@@ -100,6 +106,7 @@ public sealed class AsteriaAssessmentCoordinator(
                 currentRelease.Work.Status is "ObservationSubmitted" or "Accepted";
             if (!recoveryAfterObservationSubmission)
             {
+                await AssertAdmissionAsync(currentRelease, leaseToken, phaseToken);
                 instance = await stateMachine.EnsureSubmittedAsync(currentRelease, phaseToken);
                 if (currentRelease.Work.ParentRevision is null)
                 {
@@ -116,6 +123,7 @@ public sealed class AsteriaAssessmentCoordinator(
                         $"{currentRelease.Work.ParentRevision.Value} to {instance.Revision}.");
                 }
 
+                await AssertAdmissionAsync(currentRelease, leaseToken, phaseToken);
                 _ = await stateMachine.EnsureExpectedOperationAsync(
                     currentRelease, currentRelease.Work.ParentRevision!.Value, phaseToken);
                 await registry.AdvanceStatusAsync(
@@ -131,6 +139,7 @@ public sealed class AsteriaAssessmentCoordinator(
 
                 if (currentRelease.Work.OriginalResponseJson is null)
                 {
+                    await AssertAdmissionAsync(currentRelease, leaseToken, phaseToken);
                     var originalResponse = await decisionApi.AssessAsync(
                         currentRelease.Work.DecisionIdempotencyKey,
                         currentRelease.Work.DecisionRequestJson
@@ -181,6 +190,7 @@ public sealed class AsteriaAssessmentCoordinator(
                 throw new InvalidDataException("Asteria assessment work has no durable parent revision.");
             }
 
+            await AssertAdmissionAsync(currentRelease, leaseToken, phaseToken);
             _ = await stateMachine.TryAcceptObservationAsync(currentRelease, assessment, phaseToken);
             await registry.AdvanceStatusAsync(
                 releaseId, "Accepted", _timeProvider.GetUtcNow(), phaseToken);
@@ -193,7 +203,7 @@ public sealed class AsteriaAssessmentCoordinator(
 
     private async Task<T> WithLeaseAsync<T>(
         string releaseId,
-        Func<CancellationToken, Task<T>> action,
+        Func<string, CancellationToken, Task<T>> action,
         CancellationToken cancellationToken)
     {
         var leaseToken = Guid.NewGuid().ToString("N");
@@ -211,7 +221,7 @@ public sealed class AsteriaAssessmentCoordinator(
         var heartbeat = MaintainLeaseAsync(releaseId, leaseToken, heartbeatStop.Token, leaseLost);
         try
         {
-            var result = await action(phaseCancellation.Token);
+            var result = await action(leaseToken, phaseCancellation.Token);
             phaseCancellation.Token.ThrowIfCancellationRequested();
             return result;
         }
@@ -260,6 +270,32 @@ public sealed class AsteriaAssessmentCoordinator(
         CancellationToken cancellationToken) =>
         await registry.GetReleaseAsync(releaseId, cancellationToken)
         ?? throw new KeyNotFoundException($"Asteria release '{releaseId}' disappeared during processing.");
+
+    private async Task AssertAdmissionAsync(
+        AsteriaReleaseSnapshot release,
+        string leaseToken,
+        CancellationToken cancellationToken) =>
+        await registry.AssertCoordinatorAdmissionAsync(
+            release.ReleaseId,
+            release.AssessmentGeneration,
+            leaseToken,
+            _timeProvider.GetUtcNow(),
+            cancellationToken);
+
+    private static (string DefinitionId, string DefinitionVersion) ReadDefinitionIdentity(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        var definitionId = root.TryGetProperty("id", out var idElement) ? idElement.GetString() : null;
+        var definitionVersion = root.TryGetProperty("version", out var versionElement)
+            ? versionElement.GetString()
+            : null;
+        if (string.IsNullOrWhiteSpace(definitionId) || string.IsNullOrWhiteSpace(definitionVersion))
+        {
+            throw new InvalidDataException("Asteria definition must declare an ID and version.");
+        }
+        return (definitionId, definitionVersion);
+    }
 
     private string Metadata(string lastAction, long? parentRevision = null, string? outcome = null, string? status = null) =>
         JsonSerializer.Serialize(new

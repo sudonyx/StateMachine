@@ -16,8 +16,14 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="..\..\definitions\asteria-release-governance-v1.json"
+             Link="definitions\asteria-release-governance-v1.json"
+             CopyToOutputDirectory="PreserveNewest" />
     <Content Include="..\..\definitions\asteria-release-governance-v2.json"
              Link="definitions\asteria-release-governance-v2.json"
+             CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="..\..\definitions\asteria-release-governance-v3.json"
+             Link="definitions\asteria-release-governance-v3.json"
              CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
