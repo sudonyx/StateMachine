@@ -15,6 +15,21 @@ From the `StateMachine` repository root, with the Decision API available at
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Start-AsteriaGate14Demo.ps1
 ```
 
+The existing Standard scenario remains the default. To run a separate
+high-risk Emergency scenario without replacing its evidence, use a new
+temporary output directory:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tools\Start-AsteriaGate14Demo.ps1 -ReleaseCategory Emergency
+```
+
+The Emergency run requires all four applicability obligations to be
+`Required`, then verifies the archived `Completed` projection and the two
+separately authenticated synthetic approval records (`ReleaseReviewer` and
+`EmergencyReleaseAuthoriser`) before reporting success. Each run uses a
+timestamped directory by default; retain the Standard and Emergency exports
+separately.
+
 The script builds the solution, verifies the Decision API and each provider's
 health/OpenAPI endpoints, and then starts an isolated State Machine and Generic
 Harness. It registers Asteria V5, imports the actual functional, security,
@@ -96,9 +111,17 @@ specific temporary directory after the evidence is no longer needed.
   exports durable deadline state; it does not claim that a continuously
   running scheduler processed future deadlines.
 
-Gate 14 remains incomplete until recovery and adversarial acceptance coverage
-is complete. This local synthetic run establishes the successful V5 business
-lifecycle across services, but not production provider authentication,
-real-world approval authority, real deployment, multi-process crash-window
-acceptance, or all failure/race branches. See
+The user reports that a separate Emergency/high-risk lifecycle also passed,
+with all four obligations Required, distinct authenticated synthetic approval
+principals, deployment and health evidence, terminal Completed, and consistent
+historical replay. Retain its own evidence/export separately from the Standard
+run; this documentation update does not replace or claim to independently
+rerun either live scenario.
+
+The local synthetic runs establish the successful V5 business lifecycle, not
+production provider authentication, real-world approval authority, or real
+deployment. The Asteria coordinator crash windows now have genuine
+OS-process-restart tests, while remaining concurrency races and the
+test-process-hosted Harness limitation are itemized in the final acceptance
+matrix at [gate14-final-acceptance.md](./gate14-final-acceptance.md); see also
 [gate14-completion-report.md](./gate14-completion-report.md).

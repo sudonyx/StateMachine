@@ -280,6 +280,9 @@ public sealed class AsteriaReadinessCoordinator(
                 $"Asteria readiness activity '{workId}' has unsupported status '{activityResult.Status}'.");
         }
 
+        await AsteriaTestSynchronization.PauseAsync(
+            AsteriaTestSynchronization.ReadinessBeforeObservation,
+            cancellationToken);
         var accepted = await stateMachine.SubmitReadinessObservationAsync(
             release,
             operationId,
@@ -296,8 +299,14 @@ public sealed class AsteriaReadinessCoordinator(
                 ["readinessWorkId"] = workId
             },
             cancellationToken);
+        await AsteriaTestSynchronization.PauseAsync(
+            AsteriaTestSynchronization.ReadinessAfterObservationAccepted,
+            cancellationToken);
         activityResult = await activityLedger.MarkObservationSubmittedAsync(
             workId, accepted.ReceiptId, _timeProvider.GetUtcNow(), cancellationToken);
+        await AsteriaTestSynchronization.PauseAsync(
+            AsteriaTestSynchronization.ReadinessBeforeWorkAccepted,
+            cancellationToken);
         return await activityLedger.MarkAcceptedAsync(
             workId,
             accepted.ReceiptId,

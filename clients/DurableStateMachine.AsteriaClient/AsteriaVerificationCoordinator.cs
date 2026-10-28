@@ -32,6 +32,7 @@ public sealed class AsteriaVerificationCoordinator(
         string attemptId = "initial",
         CancellationToken cancellationToken = default)
     {
+        await ledger.InitializeAsync(cancellationToken);
         var binding = GetBinding(concernId);
         var release = await registry.GetReleaseAsync(releaseId, cancellationToken)
             ?? throw new KeyNotFoundException($"Asteria release '{releaseId}' does not exist.");
@@ -97,7 +98,33 @@ public sealed class AsteriaVerificationCoordinator(
             null,
             null,
             null);
-        var activity = await ledger.ReserveAsync(reservation, _timeProvider.GetUtcNow(), cancellationToken);
+        var activity = await ledger.GetAsync(identifiers.WorkId, cancellationToken);
+        if (activity is null)
+        {
+            activity = await ledger.ReserveAsync(reservation, _timeProvider.GetUtcNow(), cancellationToken);
+        }
+        else if (activity.ActivityId != reservation.ActivityId ||
+                 activity.ReleaseId != reservation.ReleaseId ||
+                 activity.Generation != reservation.Generation ||
+                 activity.MaterialDigest != reservation.MaterialDigest ||
+                 activity.WorkflowInstanceId != reservation.WorkflowInstanceId ||
+                 activity.DefinitionId != reservation.DefinitionId ||
+                 activity.DefinitionVersion != reservation.DefinitionVersion ||
+                 activity.DefinitionDigest != reservation.DefinitionDigest ||
+                 activity.ConcernId != reservation.ConcernId ||
+                 activity.ActivityType != reservation.ActivityType ||
+                 activity.AttemptId != reservation.AttemptId ||
+                 activity.ExpectedOperationId != reservation.ExpectedOperationId ||
+                 activity.SubmissionId != reservation.SubmissionId ||
+                 activity.IdempotencyKey != reservation.IdempotencyKey ||
+                 activity.RequestFingerprint != AsteriaActivityLedger.Fingerprint(reservation.OriginalRequestJson) ||
+                 activity.ProviderIdentity != reservation.ProviderIdentity ||
+                 activity.ApiDescriptionVersionId != reservation.ApiDescriptionVersionId ||
+                 activity.OperationKey != reservation.OperationKey)
+        {
+            throw new InvalidOperationException(
+                $"Asteria verification activity '{identifiers.WorkId}' conflicts with the current release, concern, request, or provider binding.");
+        }
         if (activity.Status == "Accepted")
         {
             return activity;
@@ -135,6 +162,9 @@ public sealed class AsteriaVerificationCoordinator(
                 cancellationToken);
             activity = await ledger.MarkDispatchPendingAsync(
                 activity.WorkId, _timeProvider.GetUtcNow(), cancellationToken);
+            await AsteriaTestSynchronization.PauseAsync(
+                AsteriaTestSynchronization.VerificationAfterDispatchPending,
+                cancellationToken);
             return await DispatchAndProcessAsync(release, activity, binding, cancellationToken);
         }
 
@@ -238,6 +268,9 @@ public sealed class AsteriaVerificationCoordinator(
                 var root = harnessDocument.RootElement;
                 var execution = Required(root, "execution");
                 var executionId = String(execution, "id");
+                await AsteriaTestSynchronization.PauseAsync(
+                    AsteriaTestSynchronization.VerificationAfterRemoteResponse,
+                    cancellationToken);
                 if (!Guid.TryParse(executionId, out _))
                 {
                     _ = await ledger.MarkOutcomeUnknownAsync(
@@ -289,6 +322,9 @@ public sealed class AsteriaVerificationCoordinator(
                     JsonOptions);
                 activity = await ledger.RecordOriginalResponseAsync(
                     activity.WorkId, archivedResponse, _timeProvider.GetUtcNow(), cancellationToken);
+                await AsteriaTestSynchronization.PauseAsync(
+                    AsteriaTestSynchronization.VerificationAfterResponseArchived,
+                    cancellationToken);
                 if (Required(execution, "state").GetInt32() != 2 ||
                     statusCode is < 200 or >= 300 ||
                     truncated ||
@@ -397,10 +433,16 @@ public sealed class AsteriaVerificationCoordinator(
             result,
             result,
             cancellationToken);
+        await AsteriaTestSynchronization.PauseAsync(
+            AsteriaTestSynchronization.VerificationAfterObservationAccepted,
+            cancellationToken);
         activity = await ledger.MarkObservationSubmittedAsync(
             activity.WorkId,
             observation.ReceiptId,
             _timeProvider.GetUtcNow(),
+            cancellationToken);
+        await AsteriaTestSynchronization.PauseAsync(
+            AsteriaTestSynchronization.VerificationBeforeWorkAccepted,
             cancellationToken);
         return await ledger.MarkAcceptedAsync(
             activity.WorkId,

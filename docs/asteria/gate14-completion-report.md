@@ -59,13 +59,64 @@ approval, or deployment evidence.
 - Post-dispatch cancellation uncovered and fixed a State Machine client
   validation gap: cancellation operations now validate their supported
   lifecycle states without broadening the initial-assessment state guard.
-- Final validation: full solution build **passed** with 0 warnings and 0
-  errors; all Asteria-focused tests **passed** (73/73); full solution
-  regression suite **passed** (179/179); `git diff --check` **passed**.
+- Baseline validation before process-hardening: full solution build
+  **passed** with 0 warnings and 0 errors; Asteria-focused tests **passed**
+  (73/73); full solution regression suite **passed** (179/179);
+  `git diff --check` **passed**.
 
 The controlled test-handler results are not live service outcomes. The
-dispatch-marker check validates durable ledger persistence; it is not a
-multi-process crash-window test of a live provider.
+dispatch-marker check validates durable ledger persistence; it is not, by
+itself, a multi-process crash-window test of a live provider.
+
+## Process-level acceptance hardening
+
+Added internal Asteria coordinator synchronization hooks that are disabled by
+default and require explicit opt-in in Development. Each hook signals its
+exact boundary and waits for test-controlled release after the prior durable
+operation. The hooks do not hold SQLite transactions or registry leases.
+Added an isolated process harness that launches the real State Machine API
+and AsteriaClient CLI as child processes with unique databases and kills only
+the exact coordinator PID selected for each case.
+
+The harness passes all nine specified crash windows: verification intent,
+dispatch marker, remote response before archival, archived response,
+accepted State Machine observation, resolved operation before local
+acceptance, deployment admission before reconciliation, accepted deployment
+before health, and accepted health before final completion. Recovery reuses
+persisted work identities and never retries an ambiguous deployment mutation.
+The no-hook execution also passes. A two-coordinator deployment race confirmed
+one dispatch request and one external mutation maximum; because the competing
+lookup could not establish an authoritative result, the work correctly
+remained `OutcomeUnknown`.
+
+The process harness hosts a deterministic fake Harness API in its test
+process. It does not launch the Generic Harness or a separate provider child
+for these fault cases, and its mutation counter is not provider-owned durable
+evidence. The State Machine API stays running while coordinator CLI processes
+are killed/restarted. These limitations are explicitly retained in the
+acceptance matrix; the process tests are not described as end-to-end
+provider-process recovery.
+
+Final validation after the hardening changes: full solution build **passed**
+with 0 warnings and 0 errors; all Asteria-focused tests **passed** (85/85);
+full solution regression suite **passed** (191/191). The separate
+`git diff --check` result is recorded in
+[gate14-final-acceptance.md](./gate14-final-acceptance.md).
+
+The user reports that Standard and Emergency live synthetic lifecycles both
+passed. The Emergency report included four Required obligations, distinct
+synthetic approval principals, accepted deployment and health evidence,
+Completed, and consistent historical replay. These separately retained live
+scenario results are not replaced by the process-test harness and do not
+establish real human identity or deployment.
+
+The individual expected/observed results, test artifacts, and exact blockers
+are recorded in [gate14-final-acceptance.md](./gate14-final-acceptance.md).
+Gate 14 remains **not accepted for the full concurrency criteria** because
+the independent competing verification, concern, approval, amendment,
+cancellation, late-result, readiness, and completion races have not all been
+executed. The verified process cases and passing test suites do not justify
+weakening or reclassifying those remaining gaps.
 
 ## Live synthetic lifecycle
 
@@ -102,25 +153,12 @@ and evidence export only; it is not production acceptance.
 
 ## Remaining acceptance gaps
 
-The implementation must not be declared complete until these items are
-executed and evidenced:
-
-1. True multi-process crash-window and concurrency acceptance remains
-   unestablished. Tests recreate coordinators and ledger clients over durable
-   SQLite state, and the live demo uses independent service processes, but no
-   test kills/restarts all external processes at every dispatch/response/
-   observation boundary.
-2. Adversarial branches are substantially covered, but not exhaustive across
-   every stage and race. Remaining examples include late concurrent conflicting
-   provider results and process-level cancellation races; no last-write-wins
-   behavior is inferred.
-3. Production acceptance with independently authenticated real provider and
-   human authorities, if required by the deployment environment. The local
-   synthetic providers intentionally do not establish that trust.
-
-The local V5 business lifecycle is established; full process-level
-restart/crash-window, multi-process race, and exhaustive adversarial branch
-acceptance are not.
+The nine coordinator crash boundaries now have process-level restart evidence.
+The remaining concurrency gaps and the narrower provider-process limitation
+are enumerated in
+[gate14-final-acceptance.md](./gate14-final-acceptance.md). Production
+acceptance with real human authorities or deployment providers remains
+outside the synthetic training scope and is not claimed.
 The demo leaves services running on its isolated ports and prints exact child
 PIDs for cleanup. Startup, evidence inspection, limitations, and safe cleanup
 instructions are in [gate14-live-demo.md](./gate14-live-demo.md).

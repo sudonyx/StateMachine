@@ -1,6 +1,8 @@
 param(
     [string]$DecisionApiBaseUrl = 'http://localhost:5267/',
     [string]$DemoRoot = (Join-Path $env:TEMP ("asteria-g14-" + (Get-Date -Format 'yyyyMMdd-HHmmssfff'))),
+    [ValidateSet('Standard', 'Emergency')]
+    [string]$ReleaseCategory = 'Standard',
     [switch]$SkipFullLifecycle
 )
 
@@ -318,15 +320,20 @@ try {
 
     $releaseId = 'AST-G14-LIVE-' + (Get-Date -Format 'yyyyMMddHHmmss')
     $materialPath = Join-Path $DemoRoot 'release-material.json'
+    $isEmergency = $ReleaseCategory -eq 'Emergency'
     $material = @{
         product = 'AsteriaPortal'
         targetVersion = '4.2.0'
         environment = 'staging'
-        releaseCategory = 'Standard'
-        changeSize = 'Medium'
-        authenticationChange = $false
+        releaseCategory = $ReleaseCategory
+        changeSize = if ($isEmergency) { 'Large' } else { 'Medium' }
+        authenticationChange = $isEmergency
         customerDataImpact = $true
-        releaseSummary = 'Gate 14 local synthetic cross-service demonstration'
+        releaseSummary = if ($isEmergency) {
+            'Gate 14 local synthetic emergency high-risk demonstration'
+        } else {
+            'Gate 14 local synthetic cross-service demonstration'
+        }
         releaseOwner = 'gate14-demo@example.invalid'
         plannedDeploymentAt = '2027-03-15T10:00:00Z'
     } | ConvertTo-Json -Depth 4
@@ -348,6 +355,18 @@ try {
         $obligations = $generation.independentObligations
         if ($null -eq $obligations) {
             throw 'The assessment did not produce persisted applicability evidence; no verification or approval will be fabricated.'
+        }
+        if ($isEmergency) {
+            foreach ($obligation in @(
+                'functionalVerification',
+                'securityVerification',
+                'releaseReviewApproval',
+                'emergencyApproval'
+            )) {
+                if ($obligations.$obligation.status -ne 'Required') {
+                    throw "Emergency high-risk assessment did not require '$obligation'; no approval or verification will be fabricated."
+                }
+            }
         }
         foreach ($concern in @(
             @{ Id = 'FunctionalVerification'; Applicability = $obligations.functionalVerification.status },
@@ -394,6 +413,42 @@ try {
         $finalEvidencePath = Join-Path $DemoRoot 'gate14-evidence.json'
         Write-Output (Invoke-AsteriaCli @('export-evidence', $releaseId, $finalEvidencePath))
         Write-Output "Synthetic cross-service evidence: $finalEvidencePath"
+        if ($isEmergency) {
+            $finalEvidence = Get-Content -LiteralPath $finalEvidencePath -Raw | ConvertFrom-Json
+            $finalGeneration = $finalEvidence.generations |
+                Where-Object { $_.generation -eq $finalEvidence.currentGeneration } |
+                Select-Object -First 1
+            if ($finalGeneration.currentStateMachineProjection.currentState -ne 'Completed') {
+                throw 'Emergency lifecycle did not reach persisted State Machine Completed.'
+            }
+            foreach ($approval in @(
+                @{
+                    Concern = 'ReleaseReviewApproval'
+                    Principal = 'synthetic-release-reviewer'
+                    Role = 'ReleaseReviewer'
+                },
+                @{
+                    Concern = 'EmergencyApproval'
+                    Principal = 'synthetic-emergency-authoriser'
+                    Role = 'EmergencyReleaseAuthoriser'
+                }
+            )) {
+                $activity = $finalGeneration.activities |
+                    ForEach-Object { $_.activity } |
+                    Where-Object { $_.concernId -eq $approval.Concern } |
+                    Select-Object -Last 1
+                $projection = $finalGeneration.concernProjection.PSObject.Properties[$approval.Concern].Value
+                if ($null -eq $activity -or
+                    $activity.status -ne 'Accepted' -or
+                    $activity.validatedOutcome -ne 'Approved' -or
+                    $activity.authorityPrincipalId -ne $approval.Principal -or
+                    $activity.authorityRole -ne $approval.Role -or
+                    $projection.currentState -ne 'Approved') {
+                    throw "Emergency approval '$($approval.Concern)' lacks its separately authenticated, accepted synthetic principal evidence."
+                }
+            }
+            Write-Output 'Verified all four Emergency obligations were Required and both separately authenticated synthetic approvals were accepted.'
+        }
         Write-Output 'This is a live local synthetic demonstration, not production verification or a real deployment.'
     }
 

@@ -1787,7 +1787,7 @@ public sealed class AsteriaMilestone3BTests
             deploymentAuthorised = false
         }, new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
-    private static string CreatePersistedResponse(AsteriaReleaseSnapshot release, string outcome)
+    internal static string CreatePersistedResponse(AsteriaReleaseSnapshot release, string outcome)
     {
         var material = release.Material;
         var facts = new Dictionary<string, (string Type, object Value)>(StringComparer.Ordinal)

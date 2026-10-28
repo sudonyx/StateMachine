@@ -168,6 +168,9 @@ public sealed class AsteriaHealthVerificationCoordinator(
                 cancellationToken);
             activity = await activityLedger.MarkDispatchPendingAsync(
                 activity.WorkId, _timeProvider.GetUtcNow(), cancellationToken);
+            await AsteriaTestSynchronization.PauseAsync(
+                AsteriaTestSynchronization.HealthAfterDispatchPending,
+                cancellationToken);
         }
         if (activity.Status == "DispatchPending")
         {
@@ -304,6 +307,9 @@ public sealed class AsteriaHealthVerificationCoordinator(
                 cancellationToken: cancellationToken);
             var root = harnessResponse.RootElement;
             var executionId = String(GetObject(root, "execution"), "id");
+            await AsteriaTestSynchronization.PauseAsync(
+                AsteriaTestSynchronization.HealthAfterRemoteResponse,
+                cancellationToken);
             if (!Guid.TryParse(executionId, out _))
             {
                 _ = await MarkUnknownAsync(activity.WorkId, cancellationToken);
@@ -329,6 +335,9 @@ public sealed class AsteriaHealthVerificationCoordinator(
             }, JsonOptions);
             activity = await activityLedger.RecordOriginalResponseAsync(
                 activity.WorkId, archive, _timeProvider.GetUtcNow(), cancellationToken);
+            await AsteriaTestSynchronization.PauseAsync(
+                AsteriaTestSynchronization.HealthAfterResponseArchived,
+                cancellationToken);
             if (statusCode is < 200 or >= 300 || Boolean(providerResponse, "truncated"))
             {
                 return await MarkUnknownAsync(activity.WorkId, cancellationToken);
@@ -431,6 +440,9 @@ public sealed class AsteriaHealthVerificationCoordinator(
             outcome,
             outcome,
             cancellationToken);
+        await AsteriaTestSynchronization.PauseAsync(
+            AsteriaTestSynchronization.HealthAfterObservationAccepted,
+            cancellationToken);
 
         if (outcome != "Passed" || cancellation.CurrentState == "NotRequested")
         {
@@ -477,6 +489,9 @@ public sealed class AsteriaHealthVerificationCoordinator(
         }
         activity = await activityLedger.MarkObservationSubmittedAsync(
             activity.WorkId, accepted.ReceiptId, _timeProvider.GetUtcNow(), cancellationToken);
+        await AsteriaTestSynchronization.PauseAsync(
+            AsteriaTestSynchronization.HealthBeforeWorkAccepted,
+            cancellationToken);
         activity = await activityLedger.MarkAcceptedAsync(
             activity.WorkId,
             accepted.ReceiptId,

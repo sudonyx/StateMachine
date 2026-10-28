@@ -222,6 +222,9 @@ public sealed class AsteriaDeploymentCoordinator(
             activity = dispatchClaim.Activity;
             if (dispatchClaim.ShouldDispatch)
             {
+                await AsteriaTestSynchronization.PauseAsync(
+                    AsteriaTestSynchronization.DeploymentAfterDispatchClaim,
+                    cancellationToken);
                 try
                 {
                     activity = await DispatchAsync(release, activity, cancellationToken);
@@ -347,6 +350,9 @@ public sealed class AsteriaDeploymentCoordinator(
             var root = harnessResponse.RootElement;
             var execution = GetObject(root, "execution");
             var executionId = GetString(execution, "id");
+            await AsteriaTestSynchronization.PauseAsync(
+                AsteriaTestSynchronization.DeploymentAfterRemoteResponse,
+                cancellationToken);
             if (!Guid.TryParse(executionId, out _))
             {
                 _ = await MarkUnknownAsync(activity.WorkId, cancellationToken);
@@ -370,6 +376,9 @@ public sealed class AsteriaDeploymentCoordinator(
             }, JsonOptions);
             activity = await activityLedger.RecordOriginalResponseAsync(
                 activity.WorkId, admissionEnvelope, _timeProvider.GetUtcNow(), cancellationToken);
+            await AsteriaTestSynchronization.PauseAsync(
+                AsteriaTestSynchronization.DeploymentAfterAdmissionArchived,
+                cancellationToken);
             if (GetInt32(providerResponse, "statusCode") is < 200 or >= 300 ||
                 GetBoolean(providerResponse, "truncated"))
             {
@@ -646,6 +655,9 @@ public sealed class AsteriaDeploymentCoordinator(
             accepted.AttemptId,
             accepted.HistoryId,
             _timeProvider.GetUtcNow(),
+            cancellationToken);
+        await AsteriaTestSynchronization.PauseAsync(
+            AsteriaTestSynchronization.DeploymentAfterResultAccepted,
             cancellationToken);
         return new AsteriaDeploymentResult(activity, deploymentId, outcome);
     }
