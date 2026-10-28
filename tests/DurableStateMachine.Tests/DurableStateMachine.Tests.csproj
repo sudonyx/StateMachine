@@ -28,6 +28,9 @@
     <ProjectReference Include="..\..\clients\DurableStateMachine.AsteriaSyntheticProvider\DurableStateMachine.AsteriaSyntheticProvider.csproj">
       <Aliases>AsteriaSyntheticProvider</Aliases>
     </ProjectReference>
+    <ProjectReference Include="..\..\..\GenericHarness\Harness.Api\Harness.Api.csproj">
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+    </ProjectReference>
     <ProjectReference Include="..\..\tools\OrionGate9Corpus\OrionGate9Corpus.csproj" />
   </ItemGroup>
 

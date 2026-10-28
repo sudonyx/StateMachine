@@ -85,6 +85,9 @@ public sealed class AsteriaDeploymentCoordinator(
             {
                 throw new InvalidOperationException("Asteria deployment requires the current, uncancelled ReadyForDeployment generation.");
             }
+            await AsteriaTestSynchronization.PauseAsync(
+                AsteriaTestSynchronization.DeploymentBeforeReservation,
+                cancellationToken);
             activity = await ReserveAsync(release, instance.Revision, deploymentConcern.Revision, cancellationToken);
         }
         else
@@ -374,6 +377,21 @@ public sealed class AsteriaDeploymentCoordinator(
                 body = AsteriaHarnessResponseBody.Read(providerResponse),
                 truncated = GetBoolean(providerResponse, "truncated")
             }, JsonOptions);
+            if (activity.Status == "Accepted" && activity.OriginalResponseJson is not null)
+            {
+                var admissionDigest = AsteriaActivityLedger.Fingerprint(admissionEnvelope);
+                await activityLedger.RecordProviderObservationAsync(
+                    activity.WorkId,
+                    "deployment-admission-" + admissionDigest[7..],
+                    "DeploymentAdmissionResponse",
+                    admissionEnvelope,
+                    _timeProvider.GetUtcNow(),
+                    cancellationToken);
+                await AsteriaTestSynchronization.PauseAsync(
+                    AsteriaTestSynchronization.DeploymentAfterAdmissionArchived,
+                    cancellationToken);
+                return activity;
+            }
             activity = await activityLedger.RecordOriginalResponseAsync(
                 activity.WorkId, admissionEnvelope, _timeProvider.GetUtcNow(), cancellationToken);
             await AsteriaTestSynchronization.PauseAsync(

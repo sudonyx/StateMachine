@@ -2,13 +2,13 @@
 
 ## Status
 
-**Gate 14 is not complete.** The repository now contains the V4/V5 workflow
-implementation, synthetic provider hosts, registration/bootstrap automation,
-and a successful live local V5 lifecycle across the Decision API, State
-Machine, Generic Harness, and synthetic services. Required crash-window,
-multi-process, and adversarial acceptance evidence remains incomplete. The
-synthetic live result is explicitly not production verification, human
-approval, or deployment evidence.
+**Gate 14 is complete for its V5 synthetic training scope only.** The V4/V5
+workflow, synthetic provider hosts, registration/bootstrap automation, and
+live Standard and Emergency local lifecycles are accompanied by process-level
+crash recovery, independent-client concurrency, and targeted
+Generic-Harness/provider durability acceptance evidence. This does not
+establish real human identity, production approval authority, provider
+attestation, or a real deployment.
 
 ## Implemented in this worktree
 
@@ -68,55 +68,54 @@ The controlled test-handler results are not live service outcomes. The
 dispatch-marker check validates durable ledger persistence; it is not, by
 itself, a multi-process crash-window test of a live provider.
 
-## Process-level acceptance hardening
+## Process-level and concurrency acceptance closure
 
 Added internal Asteria coordinator synchronization hooks that are disabled by
 default and require explicit opt-in in Development. Each hook signals its
 exact boundary and waits for test-controlled release after the prior durable
 operation. The hooks do not hold SQLite transactions or registry leases.
-Added an isolated process harness that launches the real State Machine API
-and AsteriaClient CLI as child processes with unique databases and kills only
-the exact coordinator PID selected for each case.
+The isolated harness launches the real State Machine API and AsteriaClient
+CLI as child processes with unique databases and kills only the exact
+coordinator PID selected for each case. Both ordinary execution with no hook
+variables and explicit hook variables in `Production` complete without a
+pause or signal file.
 
-The harness passes all nine specified crash windows: verification intent,
-dispatch marker, remote response before archival, archived response,
-accepted State Machine observation, resolved operation before local
-acceptance, deployment admission before reconciliation, accepted deployment
-before health, and accepted health before final completion. Recovery reuses
-persisted work identities and never retries an ambiguous deployment mutation.
-The no-hook execution also passes. A two-coordinator deployment race confirmed
-one dispatch request and one external mutation maximum; because the competing
-lookup could not establish an authoritative result, the work correctly
-remained `OutcomeUnknown`.
+The harness passes all nine specified crash windows and the listed
+cross-process races: conflicting verification results in both controlled
+winner orders, concurrent independent concerns, both approval payload winner
+orders, both supersession/verification orderings, cancellation on either side
+of dispatch, late deployment and health results, concurrent readiness, and
+concurrent completion. The assertions inspect the persisted work identity,
+generation and digest, expected operations, receipts, attempts where
+available, parent/concern histories, projections, and historical replay.
+Unknown outcomes remain blocking; accepted evidence is not replaced; terminal
+or disqualifying workflow state does not advance to Completed without its
+required evidence.
 
-The process harness hosts a deterministic fake Harness API in its test
-process. It does not launch the Generic Harness or a separate provider child
-for these fault cases, and its mutation counter is not provider-owned durable
-evidence. The State Machine API stays running while coordinator CLI processes
-are killed/restarted. These limitations are explicitly retained in the
-acceptance matrix; the process tests are not described as end-to-end
-provider-process recovery.
+Most deterministic fault windows retain the controlled Harness endpoint
+hosted in the test process; its mutation counter is not represented as
+provider-owned durable evidence. Targeted isolated tests also start independent
+Generic Harness and synthetic deployment-provider child processes. They kill
+the coordinator after provider admission and before Asteria archival, restart
+against the same databases, reconcile read-only by the original idempotency
+key, inspect actual Harness execution/inspection/evidence/attempt records and
+the provider's SQLite row, then verify repeated/competing coordinators still
+produce one provider-owned logical deployment. The complete nine-window
+matrix does not claim that every crash window ran against those separate
+provider processes.
 
-Final validation after the hardening changes: full solution build **passed**
-with 0 warnings and 0 errors; all Asteria-focused tests **passed** (85/85);
-full solution regression suite **passed** (191/191). The separate
-`git diff --check` result is recorded in
-[gate14-final-acceptance.md](./gate14-final-acceptance.md).
+Final validation: the full StateMachine solution build passed with 0 errors
+and two NU1903 warnings from existing Generic Harness dependency versions;
+Asteria-focused tests passed (103/103); process-recovery, concurrency, and
+provider durability tests passed (30/30); full StateMachine regression passed
+(209/209); and `git diff --check` passed. The warning details and per-case
+evidence are recorded in [gate14-final-acceptance.md](./gate14-final-acceptance.md).
 
-The user reports that Standard and Emergency live synthetic lifecycles both
-passed. The Emergency report included four Required obligations, distinct
+The user-reported Standard and Emergency live scenarios remain separately
+retained and are not replaced by the process-test harness. The Emergency
+scenario included four Required obligations, distinct authenticated
 synthetic approval principals, accepted deployment and health evidence,
-Completed, and consistent historical replay. These separately retained live
-scenario results are not replaced by the process-test harness and do not
-establish real human identity or deployment.
-
-The individual expected/observed results, test artifacts, and exact blockers
-are recorded in [gate14-final-acceptance.md](./gate14-final-acceptance.md).
-Gate 14 remains **not accepted for the full concurrency criteria** because
-the independent competing verification, concern, approval, amendment,
-cancellation, late-result, readiness, and completion races have not all been
-executed. The verified process cases and passing test suites do not justify
-weakening or reclassifying those remaining gaps.
+Completed, and consistent historical replay.
 
 ## Live synthetic lifecycle
 
@@ -151,14 +150,13 @@ processes, but their provider results and approval identities were synthetic
 fixtures. This establishes the successful local V5 cross-service lifecycle
 and evidence export only; it is not production acceptance.
 
-## Remaining acceptance gaps
+## Remaining boundaries
 
-The nine coordinator crash boundaries now have process-level restart evidence.
-The remaining concurrency gaps and the narrower provider-process limitation
-are enumerated in
-[gate14-final-acceptance.md](./gate14-final-acceptance.md). Production
-acceptance with real human authorities or deployment providers remains
-outside the synthetic training scope and is not claimed.
+The controlled Harness and independent provider-process coverage distinctions,
+including the supported-state limit on amendment after deployment, are
+itemized in [gate14-final-acceptance.md](./gate14-final-acceptance.md).
+Production acceptance with real human authorities or deployment providers
+remains outside the synthetic training scope and is not claimed.
 The demo leaves services running on its isolated ports and prints exact child
 PIDs for cleanup. Startup, evidence inspection, limitations, and safe cleanup
 instructions are in [gate14-live-demo.md](./gate14-live-demo.md).

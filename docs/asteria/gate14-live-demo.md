@@ -120,8 +120,10 @@ rerun either live scenario.
 
 The local synthetic runs establish the successful V5 business lifecycle, not
 production provider authentication, real-world approval authority, or real
-deployment. The Asteria coordinator crash windows now have genuine
-OS-process-restart tests, while remaining concurrency races and the
-test-process-hosted Harness limitation are itemized in the final acceptance
-matrix at [gate14-final-acceptance.md](./gate14-final-acceptance.md); see also
-[gate14-completion-report.md](./gate14-completion-report.md).
+deployment. The Asteria coordinator crash windows and concurrency races have
+genuine process/API-client acceptance tests. Most deterministic fault
+boundaries use the test-process-hosted controlled Harness; targeted independent
+Generic Harness and synthetic-provider process tests separately verify
+deployment idempotency and restart durability. The exact coverage boundary
+and evidence are recorded in [gate14-final-acceptance.md](./gate14-final-acceptance.md);
+see also [gate14-completion-report.md](./gate14-completion-report.md).

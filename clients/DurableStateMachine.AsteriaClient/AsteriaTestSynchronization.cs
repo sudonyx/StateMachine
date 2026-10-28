@@ -11,6 +11,7 @@ internal static class AsteriaTestSynchronization
     public const string VerificationAfterObservationAccepted = "verification-after-observation-accepted";
     public const string VerificationBeforeWorkAccepted = "verification-before-work-accepted";
     public const string DeploymentAfterDispatchClaim = "deployment-after-dispatch-claim";
+    public const string DeploymentBeforeReservation = "deployment-before-reservation";
     public const string DeploymentAfterRemoteResponse = "deployment-after-remote-response";
     public const string DeploymentAfterAdmissionArchived = "deployment-after-admission-archived";
     public const string DeploymentAfterResultAccepted = "deployment-after-result-accepted";

@@ -364,7 +364,7 @@ public sealed class AsteriaActivityLedger : IAsyncDisposable
         {
             throw new InvalidDataException("Harness execution does not match the activity's persisted provider binding.");
         }
-        if (current.Status is not ("DispatchPending" or "Dispatched"))
+        if (current.Status is not ("DispatchPending" or "Dispatched" or "Accepted"))
         {
             throw new InvalidOperationException(
                 $"Harness execution identity cannot be recorded while activity is in status '{current.Status}'.");
@@ -398,7 +398,9 @@ public sealed class AsteriaActivityLedger : IAsyncDisposable
         update.Transaction = transaction;
         update.CommandText = """
             UPDATE AsteriaActivities
-            SET HarnessExecutionId = $executionId, Status = 'Dispatched', UpdatedAt = $now
+            SET HarnessExecutionId = $executionId,
+                Status = CASE WHEN Status = 'Accepted' THEN Status ELSE 'Dispatched' END,
+                UpdatedAt = $now
             WHERE WorkId = $workId AND HarnessExecutionId IS NULL;
             """;
         update.Parameters.AddWithValue("$executionId", harnessExecutionId);
@@ -447,7 +449,7 @@ public sealed class AsteriaActivityLedger : IAsyncDisposable
             await transaction.CommitAsync(cancellationToken);
             throw new InvalidOperationException("Asteria activity received a conflicting provider response.");
         }
-        if (current.Status is not ("DispatchPending" or "Dispatched"))
+        if (current.Status is not ("DispatchPending" or "Dispatched" or "Accepted"))
         {
             throw new InvalidOperationException(
                 $"Provider response cannot be archived while activity is in status '{current.Status}'.");
@@ -458,7 +460,8 @@ public sealed class AsteriaActivityLedger : IAsyncDisposable
         update.CommandText = """
             UPDATE AsteriaActivities
             SET OriginalResponseJson = $response, ResponseDigest = $digest,
-                Status = 'ResponsePersisted', UpdatedAt = $now
+                Status = CASE WHEN Status = 'Accepted' THEN Status ELSE 'ResponsePersisted' END,
+                UpdatedAt = $now
             WHERE WorkId = $workId AND OriginalResponseJson IS NULL;
             """;
         update.Parameters.AddWithValue("$response", originalResponseJson);
