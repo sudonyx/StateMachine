@@ -1,0 +1,28 @@
+{
+  "seed": 20261029,
+  "instanceCount": 10000,
+  "deliveryCount": 100000,
+  "historyDays": 180,
+  "duplicateDeliveries": 2000,
+  "lateDeliveries": 1000,
+  "concurrentPairs": 500,
+  "scenarioCounts": {
+    "cancelled": 1000,
+    "competing-transition": 500,
+    "long-history-pending": 1125,
+    "long-history-timed-wait": 375,
+    "pending": 4500,
+    "terminal-completed": 1000,
+    "timed-external-wait": 1500
+  },
+  "definitionId": "gate15-generic-load",
+  "definitionVersion": "1.0",
+  "workloadProfile": "generic-durable-command-mix",
+  "definitionSha256": "e962b393b48fbda147193f349d9d6bd4fb75b79e71d3574daf282af5620c0a8c",
+  "sha256": {
+    "instances.ndjson": "2fb8ce5ef74d4b1cefc2e7bb362bb85111c8e79239316cb3bf9bf5d20361a7f7",
+    "deliveries.ndjson": "350d73b5376dd50747ce8392c8ee42d4107b2925cb3c3852984a69787ecc22a9",
+    "timer-schedule.ndjson": "4e7c70b00e7cbc7d84fbcb16e80ba1767f393ba579402eef48498b40e3243868",
+    "concurrent-groups.ndjson": "2030cd148c72e6cccb9f3ad9ecfccddf54982a1e451acc68627fd9454750db03"
+  }
+}

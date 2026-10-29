@@ -24,7 +24,11 @@ builder.Services.AddOpenApi();
 builder.Services.AddScoped<MachineStore>();
 builder.Services.AddSingleton<InstanceLockRegistry>();
 builder.Services.AddSingleton<InputFaultPlan>();
-builder.Services.AddSingleton<TimeProvider>(TimeProvider.System);
+builder.Services.AddSingleton<TimeProvider>(_ => ConfiguredTestTimeProvider.Create(builder.Environment, databasePath));
+builder.Services.AddSingleton(_ => new TransitionEvaluationMetrics(
+    builder.Environment.IsDevelopment()
+    && string.Equals(Environment.GetEnvironmentVariable("DURABLE_STATE_MACHINE_ENABLE_EVALUATION_METRICS"),
+        "true", StringComparison.OrdinalIgnoreCase)));
 builder.Services.AddScoped<TimerProcessingService>();
 builder.Services.AddSingleton<EffectFaultPlan>();
 builder.Services.AddSingleton<SyntheticProviderStore>();
@@ -549,6 +553,20 @@ if (app.Environment.IsDevelopment() &&
         return Results.Ok(processed.Select(result => result.ToResponse()));
     }).WithName("ProcessDueTimers")
       .WithSummary("Development-only: process currently due durable timers; callers cannot declare a timer authoritative.");
+
+    app.MapGet("/api/test-controls/evaluation-metrics", (
+        HttpRequest httpRequest,
+        TransitionEvaluationMetrics metrics) =>
+    {
+        if (!IsTrustedIngestion(httpRequest))
+        {
+            return Results.Json(new ApiError("trusted-ingestion-required",
+                "Evaluation metrics require the configured controlled-administration boundary."),
+                statusCode: StatusCodes.Status403Forbidden);
+        }
+        return Results.Ok(metrics.Snapshot());
+    }).WithName("GetTransitionEvaluationMetrics")
+      .WithSummary("Development-only bounded aggregate timing for the transition evaluator; enabled by explicit process configuration.");
 }
 app.MapGet("/health", () => Results.Ok(new { status = "ok" })).WithTags("Operations");
 

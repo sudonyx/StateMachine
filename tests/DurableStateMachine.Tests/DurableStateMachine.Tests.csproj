@@ -32,10 +32,12 @@
       <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
     </ProjectReference>
     <ProjectReference Include="..\..\tools\OrionGate9Corpus\OrionGate9Corpus.csproj" />
+    <ProjectReference Include="..\..\tools\Gate15Load\Gate15Load.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <None Include="..\..\definitions\*.json" Link="definitions\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\tools\Gate15Load\definitions\*.json" Link="definitions\%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
     <None Include="..\..\test-data\orion-gate9-deliveries.ndjson" Link="test-data\orion-gate9-deliveries.ndjson" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Diagnostics;
 using DurableStateMachine.Core;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -10,7 +11,8 @@ namespace DurableStateMachine.Persistence;
 public sealed class MachineStore(
     MachineDbContext db,
     InstanceLockRegistry instanceLockRegistry,
-    InputFaultPlan inputFaultPlan)
+    InputFaultPlan inputFaultPlan,
+    TransitionEvaluationMetrics evaluationMetrics)
 {
     private static readonly JsonSerializerOptions StoredJsonOptions = new(JsonSerializerDefaults.Web);
     private object InstanceLocksSync => instanceLockRegistry.Sync;
@@ -2192,13 +2194,13 @@ public sealed class MachineStore(
                 ? new TransitionEvaluation(EvaluationStatus.Rejected, concernRow.CurrentState, eventName,
                     null, null, [], "terminal-parent-state",
                     $"Terminal parent state '{instance.CurrentState}' cannot accept concern activity.")
-                : TransitionEvaluator.EvaluateConcern(concern, concernRow.CurrentState, eventName, context);
+                : EvaluateConcern(concern, concernRow.CurrentState, eventName, context);
         }
         else
         {
             blockingTimer = await FindBlockingTimerAsync(instance.Id, definition, eventName, now, cancellationToken);
             evaluation = blockingTimer is null
-                ? TransitionEvaluator.Evaluate(definition, instance.CurrentState, eventName, context)
+                ? Evaluate(definition, instance.CurrentState, eventName, context)
                 : new TransitionEvaluation(
                     EvaluationStatus.Rejected,
                     instance.CurrentState,
@@ -2215,7 +2217,7 @@ public sealed class MachineStore(
         {
             foreach (var row in concernRows.Where(row => !definition.Concerns[row.ConcernId].States[row.CurrentState].IsTerminal))
             {
-                var concernEvaluation = TransitionEvaluator.EvaluateConcern(
+                var concernEvaluation = EvaluateConcern(
                     definition.Concerns[row.ConcernId], row.CurrentState, eventName, context);
                 if (concernEvaluation.Status != EvaluationStatus.Accepted)
                 {
@@ -2674,6 +2676,38 @@ public sealed class MachineStore(
     {
         var record = await db.Instances.AsNoTracking().SingleAsync(instance => instance.Id == id, cancellationToken);
         return ToDetails(record);
+    }
+
+    private TransitionEvaluation Evaluate(
+        MachineDefinition definition,
+        string state,
+        string eventName,
+        TransitionEvaluationContext context)
+    {
+        if (!evaluationMetrics.Enabled)
+        {
+            return TransitionEvaluator.Evaluate(definition, state, eventName, context);
+        }
+        var started = Stopwatch.GetTimestamp();
+        var result = TransitionEvaluator.Evaluate(definition, state, eventName, context);
+        evaluationMetrics.Record(result.Status.ToString(), Stopwatch.GetTimestamp() - started);
+        return result;
+    }
+
+    private TransitionEvaluation EvaluateConcern(
+        MachineConcern definition,
+        string state,
+        string eventName,
+        TransitionEvaluationContext context)
+    {
+        if (!evaluationMetrics.Enabled)
+        {
+            return TransitionEvaluator.EvaluateConcern(definition, state, eventName, context);
+        }
+        var started = Stopwatch.GetTimestamp();
+        var result = TransitionEvaluator.EvaluateConcern(definition, state, eventName, context);
+        evaluationMetrics.Record(result.Status.ToString(), Stopwatch.GetTimestamp() - started);
+        return result;
     }
 
     private static InputAttemptRecord CreateAttempt(

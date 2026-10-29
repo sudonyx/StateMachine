@@ -1,0 +1,155 @@
+{
+  "runId": "gate15-full-20261029",
+  "profile": "generic-durable-command-mix",
+  "singleRun": true,
+  "source": {
+    "baseCommit": "a0851b5b59c30781d21c0480776f0fddcef94b60",
+    "workingTree": "uncommitted Gate 15 tool, test, and documentation changes"
+  },
+  "runtime": {
+    "os": "Windows 11 Home build 26300",
+    "dotnetSdk": "10.0.100",
+    "dotnetRuntime": "10.0.0",
+    "processor": "AMD Ryzen 7 7840HS",
+    "availableMemory": "approximately 32 GB",
+    "persistence": "SQLite on local disk",
+    "sqliteDefaultTimeoutSeconds": 30,
+    "sqliteConnectionPooling": true,
+    "apiHosting": "separate local API process",
+    "externalProviders": "none"
+  },
+  "corpus": {
+    "seed": 20261029,
+    "instances": 10000,
+    "deliveries": 100000,
+    "historyDays": 180,
+    "distinctBusinessDays": 171,
+    "scenarioCounts": {
+      "cancelled": 1000,
+      "competing-transition": 500,
+      "long-history-pending": 1125,
+      "long-history-timed-wait": 375,
+      "pending": 4500,
+      "terminal-completed": 1000,
+      "timed-external-wait": 1500
+    },
+    "lateRecords": 2700,
+    "exactDuplicateDeliveries": 2000,
+    "concurrentPairs": 500,
+    "definitionId": "gate15-generic-load",
+    "definitionVersion": "1.0",
+    "definitionSha256": "e962b393b48fbda147193f349d9d6bd4fb75b79e71d3574daf282af5620c0a8c",
+    "fileSha256": {
+      "instances.ndjson": "2fb8ce5ef74d4b1cefc2e7bb362bb85111c8e79239316cb3bf9bf5d20361a7f7",
+      "deliveries.ndjson": "350d73b5376dd50747ce8392c8ee42d4107b2925cb3c3852984a69787ecc22a9",
+      "timer-schedule.ndjson": "4e7c70b00e7cbc7d84fbcb16e80ba1767f393ba579402eef48498b40e3243868",
+      "concurrent-groups.ndjson": "2030cd148c72e6cccb9f3ad9ecfccddf54982a1e451acc68627fd9454750db03"
+    },
+    "manifestSha256": "f073ac5f45d1bb60ce8b9283270eac1c9b572fbbe0ec9e8e2aa1106a84377f39"
+  },
+  "execution": {
+    "concurrency": 4,
+    "elapsedDeliverySeconds": 630.0525475,
+    "intendedDeliveryRecords": 100000,
+    "completedDeliveryRecords": 100000,
+    "httpAttempts": 100000,
+    "retries": 0,
+    "completedDeliveriesPerSecond": 158.71692035337736,
+    "acceptedTransitionsPerSecond": 20.434803495497334,
+    "businessOutcomes": {
+      "Accepted": 12875,
+      "Duplicate": 2000,
+      "Rejected": 60719,
+      "Stale": 24406
+    },
+    "transportFailures": 0,
+    "httpFailures": 0,
+    "concurrentPairsExecuted": 500,
+    "http409ResponsesRecordedSeparately": false
+  },
+  "correctnessAndReplay": {
+    "instancesChecked": 10000,
+    "receiptsChecked": 100000,
+    "historiesChecked": 12875,
+    "acceptedInputTransitions": 12875,
+    "duplicateReceiptsChecked": 2000,
+    "concurrentPairsChecked": 500,
+    "concurrentConflictReceiptsChecked": 500,
+    "instancesReplayed": 10000,
+    "allInstanceVerificationElapsedSeconds": 40.1982076,
+    "invariantFailures": 0,
+    "effectOperations": 0,
+    "effectAttempts": 0
+  },
+  "queryLatencyMilliseconds": {
+    "currentState": {
+      "count": 10000,
+      "mean": 3.40091804,
+      "p50": 3.109,
+      "p95": 5.356,
+      "p99": 7.1687,
+      "maximum": 334.2039
+    },
+    "historicalReplay": {
+      "count": 10000,
+      "mean": 4.64883635,
+      "p50": 4.3389,
+      "p95": 6.8914,
+      "p99": 10.6556,
+      "maximum": 110.8071
+    },
+    "pendingWork": {
+      "count": 1000,
+      "instancesWithPendingTimers": 375,
+      "mean": 3.8998276,
+      "p50": 3.5944,
+      "p95": 6.4708,
+      "p99": 11.9641,
+      "maximum": 35.7419
+    }
+  },
+  "recovery": {
+    "apiReadyMilliseconds": 1905.242,
+    "processRestartedAgainstSameDatabase": true,
+    "dueTimersFound": 0,
+    "timersProcessed": 0,
+    "timerTransitionsChecked": 0,
+    "pendingTimersAfterRestart": 1875,
+    "recoveryElapsedSeconds": null,
+    "note": "The API schedules timers at accepted transition time plus P7D. The real system clock was not advanced; the due-processing endpoint correctly returned no timers. Post-restart verification ran with Microsoft.EntityFrameworkCore logging at Warning."
+  },
+  "storage": {
+    "databasePath": "artifacts/gate15/runtime/gate15.db",
+    "databaseBytesAfterRun": 253722624,
+    "databaseBytesAfterRestartAndVerification": 253722624,
+    "walBytesAfterRestartAndVerification": 4313672,
+    "sharedMemoryBytesAtInspection": 32768,
+    "grossDatabaseBytesPerDeliveryRecord": 2537.22624,
+    "rowCounts": {
+      "Definitions": 1,
+      "Instances": 10000,
+      "InboundMessages": 100000,
+      "InputAttempts": 73594,
+      "TransitionHistory": 12875,
+      "Timers": 1875,
+      "EffectOperations": 0,
+      "EffectAttempts": 0
+    },
+    "receiptReasons": {
+      "input-accepted": 12875,
+      "duplicate-message": 2000,
+      "no-applicable-transition": 50094,
+      "terminal-state": 10625,
+      "stale-revision": 24406
+    },
+    "preRunDatabaseBytes": null,
+    "perAcceptedOrRejectedDeliveryGrowth": null,
+    "storageNote": "The per-delivery figure is gross database file bytes divided by delivery count, not incremental growth. A pre-run size and isolated per-outcome storage comparison were not captured."
+  },
+  "unmeasured": {
+    "evaluatorOnlyLatency": "No evaluator-boundary instrumentation was present; HTTP latency is not represented as evaluator latency.",
+    "instanceCreationElapsed": "The runner's timed interval begins after definition registration and instance creation.",
+    "separateProfileThroughput": "Profiles A/B/C were logical categories in one mixed run, not separately timed runs.",
+    "databaseLockWait": "No SQLite lock-wait or transaction-duration instrumentation was collected."
+  }
+}

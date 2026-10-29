@@ -1,0 +1,50 @@
+{
+  "languageVersion": "1.2",
+  "id": "gate15-generic-load",
+  "version": "1.0",
+  "initialState": "Draft",
+  "states": [
+    { "id": "Draft" },
+    { "id": "Active" },
+    { "id": "WaitingExternal" },
+    { "id": "Completed", "terminal": true },
+    { "id": "Cancelled", "terminal": true },
+    { "id": "TimedOut", "terminal": true }
+  ],
+  "events": [
+    "Begin",
+    "Cancel",
+    "Complete",
+    "WaitForExternal",
+    "DeadlineElapsed"
+  ],
+  "inputPolicy": {
+    "commands": [
+      { "name": "BeginWork", "event": "Begin" },
+      { "name": "CancelWork", "event": "Cancel" },
+      { "name": "CompleteWork", "event": "Complete" },
+      { "name": "WaitForExternal", "event": "WaitForExternal" }
+    ],
+    "observations": []
+  },
+  "transitions": [
+    { "id": "begin-work", "source": "Draft", "event": "Begin", "target": "Active" },
+    { "id": "cancel-draft", "source": "Draft", "event": "Cancel", "target": "Cancelled" },
+    { "id": "complete-active", "source": "Active", "event": "Complete", "target": "Completed" },
+    { "id": "wait-for-external", "source": "Active", "event": "WaitForExternal", "target": "WaitingExternal" },
+    { "id": "complete-after-external", "source": "WaitingExternal", "event": "Complete", "target": "Completed" },
+    { "id": "cancel-active", "source": "Active", "event": "Cancel", "target": "Cancelled" },
+    { "id": "cancel-waiting", "source": "WaitingExternal", "event": "Cancel", "target": "Cancelled" },
+    { "id": "deadline-elapsed", "source": "WaitingExternal", "event": "DeadlineElapsed", "target": "TimedOut" }
+  ],
+  "timers": [
+    {
+      "id": "external-response-deadline",
+      "onTransition": "wait-for-external",
+      "duration": "P7D",
+      "event": "DeadlineElapsed",
+      "whileState": "WaitingExternal",
+      "cancelOnTransitions": [ "complete-after-external", "cancel-waiting" ]
+    }
+  ]
+}
