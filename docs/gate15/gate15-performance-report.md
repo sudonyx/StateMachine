@@ -98,12 +98,12 @@ expected operations, effect operations, or effect attempts. The file-size
 division is approximately 2,537 bytes per delivery record, but this is gross
 database size per input, not attributable row growth.
 
-A pre-run database size was not captured, and no separate accepted-only and
-rejected-only database comparisons were performed. Therefore incremental
-growth per accepted versus rejected delivery cannot be defended from this
-run; those fields are null in the machine-readable results. SQLite page
-allocation, indexes, WAL behavior, shared instance data, and payload sizes
-make a gross file-size division unsuitable as a per-row estimate.
+For this original canonical run, a pre-run database size was not captured,
+and no separate accepted-only and rejected-only database comparisons were
+performed. Its incremental growth per accepted versus rejected delivery
+cannot be defended; those fields are null in the machine-readable results.
+The later isolated outcome-specific measurements are reported below and in
+`gate15-supplemental-results.md`.
 
 The runtime uses the `Instances` table as its current-state projection and
 retains transition history. No separate snapshot subsystem or controlled
@@ -128,10 +128,9 @@ snapshot comparison exists in this workload.
 - No separate warm-up phase was measured; cache state may affect comparisons
   with later runs.
 
-Future measurement should isolate transaction/lock wait and persistence
-duration, record repeated-run variance, and use more isolated outcome mixes
-for storage attribution. Any optimization should retain receipt identity,
-revision arbitration, complete history, and the existing concurrency/replay
+Future performance work may isolate transaction/lock wait and persistence
+duration. Any optimization should retain receipt identity, revision
+arbitration, complete history, and the existing concurrency/replay
 regression coverage.
 
 ## Supplemental profile measurements
@@ -171,3 +170,18 @@ upper bounds. A pre-run snapshot captured 4,096 DB bytes and 300,792 WAL
 bytes; post-run sizes were 257,454,080 DB bytes and 4,297,192 WAL bytes, a
 combined DB+WAL growth of 261,446,384 bytes. After restart, all 10,000
 instances replayed consistently and there were zero invariant failures.
+
+## Outcome-specific storage attribution
+
+The final isolated experiment measured two fresh-database runs per receipt
+outcome, each with 512 measured deliveries, matching instance IDs, payloads,
+and post-setup baselines. Across the two runs, the estimated checkpointed
+increment was 3,240–3,248 bytes per Accepted delivery, 2,368–2,384 per
+Rejected delivery, 1,408–1,424 per exact Duplicate, and 1,208–1,232 per
+Stale-revision delivery. All runs had identical 1,806,336-byte database
+baselines, zero WAL at baseline and after checkpoint, 4096-byte pages,
+512/512 verified measured receipts, and 512/512 consistent historical
+replays. These are configuration-specific allocation estimates: Accepted
+includes its attempt and history, Rejected includes its attempt, and SQLite
+indexes, shared pages, and page allocation contribute. See the table,
+per-run deltas, and caveats in `gate15-supplemental-results.md`.

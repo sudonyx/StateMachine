@@ -89,6 +89,59 @@ records also contain both accepted and rejected transitions. The observed
 outcome mixes are not sufficiently isolated to assign a defensible number of
 bytes per accepted, rejected, duplicate, or stale record.
 
+## Outcome-specific storage attribution
+
+The follow-up used eight fresh SQLite databases: two independent runs for
+each outcome, with 512 measured deliveries per run. Each database had the
+same 512-instance population, fixed instance IDs, payload, expected-revision
+setup, and clock. The baseline was captured after 512 accepted `BeginWork`
+setup transitions. Every baseline and final snapshot used
+`PRAGMA wal_checkpoint(TRUNCATE)`; all checkpoints returned `busy=0`, with
+4096-byte pages and zero WAL bytes at both boundaries. Thus the reported
+increment is the checkpointed database-file delta, with a zero WAL delta.
+The real API received `CompleteWork` at revision 1 for Accepted, `BeginWork`
+in `Active` for Rejected, the exact baseline `BeginWork` message identity and
+envelope for Duplicate, and `CompleteWork` at stale revision 0 for Stale.
+The runner used bounded concurrency 8.
+
+| Outcome | Samples | Baseline DB / WAL bytes (each run) | Incremental DB+WAL bytes (two runs; mean) | Estimated bytes / delivery (range; mean) | Durable row deltas per run | Limitations |
+|---|---:|---:|---:|---:|---|---|
+| Accepted | 512 × 2 | 1,806,336 / 0 | 1,658,880–1,662,976 (1,660,928) | 3,240–3,248 (3,244) | +512 receipts, +512 attempts, +512 histories | Two runs; SQLite page/index allocation; not a universal row size. |
+| Rejected | 512 × 2 | 1,806,336 / 0 | 1,212,416–1,220,608 (1,216,512) | 2,368–2,384 (2,376) | +512 receipts, +512 attempts, no histories | Two runs; SQLite page/index allocation; not a universal row size. |
+| Exact duplicate | 512 × 2 | 1,806,336 / 0 | 720,896–729,088 (724,992) | 1,408–1,424 (1,416) | +512 receipts, no attempts or histories | Two runs; SQLite page/index allocation; not a universal row size. |
+| Stale revision | 512 × 2 | 1,806,336 / 0 | 618,496–630,784 (624,640) | 1,208–1,232 (1,220) | +512 receipts, no attempts or histories | Two runs; SQLite page/index allocation; not a universal row size. |
+
+All runs started with 512 instances, 512 Accepted setup receipts, 512
+attempts, 512 history rows, and no timers. Each ended with 1,024 inbound
+messages, including exactly 512 receipts of the measured outcome; the
+expected outcome was verified both from the API and persisted SQLite receipt
+counts. State/revision and history assertions passed, and all 512 historical
+replays per run were `Consistent` with no verification failures. Rejected,
+duplicate, and stale inputs left the one accepted setup history per instance
+unchanged; accepted inputs added one valid transition history per instance.
+
+The workload deliberately uses the same fixed IDs, payload sizes, and
+instance population across outcome categories. Accepted rows include the
+associated attempt and history evidence; rejected rows include attempts;
+duplicate and stale rows do not. This is outcome-associated durable storage,
+not isolated physical row size. The estimates include index changes, shared
+pages, and page allocation; variation of one or more 4096-byte pages between
+the two runs is visible in the ranges. The small sample and two repetitions
+describe this local SQLite configuration only, not a universal per-record
+cost. An earlier rejected pilot is retained separately but excluded from the
+matched-ID comparison.
+
+Machine-readable evidence for the matched-ID runs:
+
+- [Accepted run 1](../../artifacts/gate15/supplemental/storage-attribution/matched-id/accepted-r1/result.json)
+- [Accepted run 2](../../artifacts/gate15/supplemental/storage-attribution/matched-id/accepted-r2/result.json)
+- [Rejected run 1](../../artifacts/gate15/supplemental/storage-attribution/matched-id/rejected-r1/result.json)
+- [Rejected run 2](../../artifacts/gate15/supplemental/storage-attribution/matched-id/rejected-r2/result.json)
+- [Exact duplicate run 1](../../artifacts/gate15/supplemental/storage-attribution/matched-id/duplicate-r1/result.json)
+- [Exact duplicate run 2](../../artifacts/gate15/supplemental/storage-attribution/matched-id/duplicate-r2/result.json)
+- [Stale revision run 1](../../artifacts/gate15/supplemental/storage-attribution/matched-id/stale-r1/result.json)
+- [Stale revision run 2](../../artifacts/gate15/supplemental/storage-attribution/matched-id/stale-r2/result.json)
+
 ## Profile correctness and replay
 
 Every instance in each isolated profile was checked after restarting the API

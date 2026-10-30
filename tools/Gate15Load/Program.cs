@@ -40,8 +40,10 @@ public static class Program
                     return await Gate15Runner.RunAsync(args, output, seed, instanceCount, deliveryCount, historyDays, profile);
                 case "verify":
                     return await Gate15Verifier.RunAsync(args, output, seed, instanceCount, deliveryCount, historyDays, profile);
+                case "storage-attribution":
+                    return await Gate15StorageAttribution.RunAsync(args);
                 default:
-                    Console.WriteLine("Commands: generate | validate | determinism | run | verify");
+                    Console.WriteLine("Commands: generate | validate | determinism | run | verify | storage-attribution");
                     return command == "help" ? 0 : 2;
             }
 

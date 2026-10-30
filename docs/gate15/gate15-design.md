@@ -181,3 +181,55 @@ The three scenario partitions, the separate fresh mixed run, their
 post-restart replay results, and their storage observations are summarized in
 `gate15-supplemental-results.md`. The original canonical run and its
 machine-readable results remain unchanged.
+
+## Outcome-specific storage attribution
+
+The `storage-attribution` command measures one outcome in one fresh database.
+Use a unique database and run ID for each outcome and repetition. It registers
+the generic definition, creates 512 identical `Active` instances through
+accepted `BeginWork` setup inputs, checkpoints the database, and captures the
+baseline. It then submits 512 measured commands and verifies their durable
+receipt statuses, input/history row deltas, current projections, and
+historical replay. A second `PRAGMA wal_checkpoint(TRUNCATE)` precedes the
+final DB/WAL and row-count snapshot.
+
+The same setup is used for all categories. `accepted` sends `CompleteWork`;
+`rejected` sends `BeginWork` in `Active`, where the declared event has no
+applicable transition; `duplicate` exactly resubmits each baseline
+`BeginWork` message identity and envelope; `stale` sends `CompleteWork` with
+revision 0 against the prepared revision-1 instance. The fixed, small payload
+and process-start test clock are shared across runs. Instance IDs are fixed
+across outcome categories, while run IDs remain unique report identifiers.
+The tool refuses a database that already contains instance/receipt/history
+evidence in any instance namespace.
+
+Example (repeat with a fresh path and run ID for each category/repetition):
+
+```powershell
+$outcome = 'accepted'
+$repeat = 1
+$run = Join-Path $PWD "artifacts\gate15\supplemental\storage-attribution\$outcome-r$repeat"
+New-Item -ItemType Directory -Force $run | Out-Null
+$env:ASPNETCORE_ENVIRONMENT = 'Development'
+$env:DURABLE_STATE_MACHINE_ENABLE_TEST_CONTROLS = 'true'
+$env:DURABLE_STATE_MACHINE_TRUSTED_INGESTION_KEY = [guid]::NewGuid().ToString('N')
+$env:DURABLE_STATE_MACHINE_DB = Join-Path $run 'storage.db'
+$env:DURABLE_STATE_MACHINE_TEST_CLOCK_DATABASE = $env:DURABLE_STATE_MACHINE_DB
+$env:DURABLE_STATE_MACHINE_TEST_CLOCK_UTC = '2026-01-01T00:00:00Z'
+$api = Start-Process dotnet -ArgumentList @('src\DurableStateMachine.Api\bin\Debug\net10.0\DurableStateMachine.Api.dll', '--urls', 'http://127.0.0.1:5188') -PassThru
+try {
+    Invoke-RestMethod http://127.0.0.1:5188/health
+    dotnet run --project tools\Gate15Load\Gate15Load.csproj -- storage-attribution --base-url http://127.0.0.1:5188 --database $env:DURABLE_STATE_MACHINE_DB --outcome $outcome --run-id "gate15-store-$outcome-r$repeat" --sample-count 512 --report (Join-Path $run 'result.json')
+}
+finally {
+    Stop-Process -Id $api.Id
+}
+```
+
+The reported quotient is an experiment-specific estimate, not a universal
+per-row cost. It includes page allocation and index changes caused by the
+measured deliveries, but excludes all 512 setup instances and their
+prerequisite receipts, attempts, and histories by using the post-setup
+checkpoint as the baseline. WAL is checkpointed at both boundaries. Compare
+the two independent runs per category and report variability rather than
+attributing setup data to the measured outcome.

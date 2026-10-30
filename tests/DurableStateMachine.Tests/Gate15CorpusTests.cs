@@ -31,4 +31,17 @@ public sealed class Gate15CorpusTests
             }
         }
     }
+
+    [Fact]
+    public void Storage_attribution_math_uses_baseline_delta_and_rejects_invalid_samples()
+    {
+        Assert.Equal(24, StorageAttributionMath.CalculateBytesPerMeasuredDelivery(
+            baselineCombinedBytes: 4096,
+            finalCombinedBytes: 16384,
+            measuredDeliveries: 512));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            StorageAttributionMath.CalculateBytesPerMeasuredDelivery(4096, 8192, 0));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            StorageAttributionMath.CalculateBytesPerMeasuredDelivery(8192, 4096, 1));
+    }
 }
